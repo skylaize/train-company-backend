@@ -1,0 +1,53 @@
+import "dotenv/config";
+import express from "express";
+import cors from "cors";
+import { authRouter } from "./routes/auth.routes";
+import { userRouter } from "./routes/user.routes";
+import { companyRouter } from "./routes/company.routes";
+import { lineRouter } from "./routes/line.routes";
+import { trainRouter } from "./routes/train.routes";
+import { contractRouter } from "./routes/contract.routes";
+import { leaderboardRouter } from "./routes/leaderboard.routes";
+import { incidentRouter } from "./routes/incident.routes";
+import { transactionRouter } from "./routes/transaction.routes";
+import { achievementRouter } from "./routes/achievement.routes";
+import { dailyChallengeRouter } from "./routes/daily-challenge.routes";
+import { staffRouter } from "./routes/staff.routes";
+import { weatherRouter } from "./routes/weather.routes";
+import { accountRouter } from "./routes/account.routes";
+import { summaryRouter } from "./routes/summary.routes";
+import { networkRouter } from "./routes/network.routes";
+import { startSimulationJob } from "./jobs/simulation.job";
+
+const app = express();
+
+app.use(cors());
+app.use(express.json());
+
+app.get("/", (_req, res) => {
+  res.json({ status: "ok", service: "train-company-backend" });
+});
+
+app.use("/api/auth", authRouter);
+app.use("/api", userRouter);
+app.use("/api", companyRouter);
+app.use("/api", lineRouter);
+app.use("/api", trainRouter);
+app.use("/api", contractRouter);
+app.use("/api", leaderboardRouter);
+app.use("/api", incidentRouter);
+app.use("/api", transactionRouter);
+app.use("/api", achievementRouter);
+app.use("/api", dailyChallengeRouter);
+app.use("/api", staffRouter);
+app.use("/api", weatherRouter);
+app.use("/api", accountRouter);
+app.use("/api", summaryRouter);
+app.use("/api", networkRouter);
+
+const PORT = process.env.PORT || 4000;
+
+app.listen(PORT, () => {
+  console.log(`Serveur démarré sur http://localhost:${PORT}`);
+  startSimulationJob();
+});
