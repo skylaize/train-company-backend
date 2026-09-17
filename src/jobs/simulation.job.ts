@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { prisma } from "../prisma";
 import { ensureMarketStocked, removeExpiredContracts } from "../controllers/contract.controller";
 import { computeReputation } from "../services/reputation.service";
@@ -193,7 +194,7 @@ async function runFreightContracts() {
       const payout = damaged ? Math.round(baseReward * DAMAGE_PAYOUT_RATIO) : baseReward;
       const newWear = damaged ? Math.min(100, contract.train.wear + DAMAGE_WEAR_PENALTY) : contract.train.wear;
 
-      const updates = [
+      const updates: Prisma.PrismaPromise<any>[] = [
         prisma.contract.update({
           where: { id: contract.id },
           data: { status: "LIVREE", trainId: null },
