@@ -21,7 +21,16 @@ import { startSimulationJob } from "./jobs/simulation.job";
 
 const app = express();
 
-app.use(cors());
+app.use(
+  cors({
+    origin: [
+      "https://train-company-frontend.vercel.app", // Vérifie que c'est bien ton URL Vercel exacte
+      "http://localhost:5173",
+    ],
+    credentials: true,
+  })
+);
+
 app.use(express.json());
 
 app.get("/", (_req, res) => {
@@ -47,7 +56,7 @@ app.use("/api", networkRouter);
 
 const PORT = process.env.PORT || 4000;
 
-app.listen(PORT, () => {
-  console.log(`Serveur démarré sur http://localhost:${PORT}`);
+app.listen(Number(PORT), "0.0.0.0", () => {
+  console.log(`Serveur démarré sur le port ${PORT}`);
   startSimulationJob();
 });
