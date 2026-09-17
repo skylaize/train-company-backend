@@ -21,15 +21,15 @@ import { startSimulationJob } from "./jobs/simulation.job";
 
 const app = express();
 
-app.use(
-  cors({
-    origin: [
-      "https://train-company-frontend.vercel.app", // Vérifie que c'est bien ton URL Vercel exacte
-      "http://localhost:5173",
-    ],
-    credentials: true,
-  })
-);
+// CORS entièrement ouvert : reflète l'origine de la requête (équivalent à "*" mais
+// plus robuste avec les requêtes de pré-vérification/preflight et les en-têtes personnalisés)
+const corsOptions = {
+  origin: true,
+  methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+};
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
 
 app.use(express.json());
 
@@ -56,7 +56,7 @@ app.use("/api", networkRouter);
 
 const PORT = process.env.PORT || 4000;
 
-app.listen(Number(PORT), "0.0.0.0", () => {
-  console.log(`Serveur démarré sur le port ${PORT}`);
+app.listen(PORT, () => {
+  console.log(`Serveur démarré sur http://localhost:${PORT}`);
   startSimulationJob();
 });

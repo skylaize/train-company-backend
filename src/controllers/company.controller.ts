@@ -58,22 +58,6 @@ export async function updateCompany(req: AuthRequest, res: Response) {
   return res.json(updated);
 }
 
-// Interrupteur TEMPORAIRE pour tester les avantages Premium sans paiement réel.
-// À remplacer par un vrai webhook Stripe (ou équivalent) une fois la facturation en place.
-export async function togglePremiumTest(req: AuthRequest, res: Response) {
-  const company = await prisma.company.findUnique({ where: { ownerId: req.userId as string } });
-  if (!company) {
-    return res.status(404).json({ error: "Créez d'abord votre compagnie" });
-  }
-
-  const updated = await prisma.company.update({
-    where: { id: company.id },
-    data: { isPremium: !company.isPremium },
-  });
-
-  return res.json({ isPremium: updated.isPremium });
-}
-
 const MAX_FLEET_CAP = 6; // capacité maximale du dépôt en V1
 
 export async function expandFleet(req: AuthRequest, res: Response) {
