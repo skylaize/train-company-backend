@@ -45,6 +45,11 @@ export async function deleteAccount(req: AuthRequest, res: Response) {
       prisma.transaction.deleteMany({ where: { companyId: company.id } }),
       prisma.dailyChallenge.deleteMany({ where: { companyId: company.id } }),
       prisma.staff.deleteMany({ where: { companyId: company.id } }),
+      prisma.achievementUnlock.deleteMany({ where: { companyId: company.id } }),
+      prisma.adWatch.deleteMany({ where: { companyId: company.id } }),
+      // si cette compagnie a parrainé d'autres joueurs, on détache la référence plutôt que
+      // de les impacter (ils gardent leur historique, juste sans parrain associé)
+      prisma.company.updateMany({ where: { referredById: company.id }, data: { referredById: null } }),
       prisma.train.deleteMany({ where: { companyId: company.id } }),
       prisma.line.deleteMany({ where: { companyId: company.id } }),
       prisma.company.delete({ where: { id: company.id } }),

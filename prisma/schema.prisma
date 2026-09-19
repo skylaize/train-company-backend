@@ -24,10 +24,17 @@ model Company {
   balance      Int      @default(500) // trésorerie, en pièces
   maxTrains    Int      @default(2) // capacité du dépôt, extensible contre paiement
   isPremium    Boolean  @default(false) // débloque les modèles de trains exclusifs
+  tutorialSeen Boolean  @default(false) // mémorisé côté compte, pas par navigateur
+  referralCode String   @unique // code à partager, généré à la création
+  referredById String?  // compagnie qui a parrainé celle-ci, si un code a été renseigné à l'inscription
+  referralRewardGranted Boolean @default(false) // évite de verser deux fois la récompense au parrain
   createdAt    DateTime @default(now())
 
   owner        User     @relation(fields: [ownerId], references: [id])
   ownerId      String   @unique
+
+  referredBy   Company? @relation("Referrals", fields: [referredById], references: [id])
+  referrals    Company[] @relation("Referrals")
 
   trains       Train[]
   lines        Line[]
@@ -35,6 +42,30 @@ model Company {
   transactions Transaction[]
   dailyChallenges DailyChallenge[]
   staff        Staff[]
+  achievementUnlocks AchievementUnlock[]
+  adWatches    AdWatch[]
+}
+
+model AdWatch {
+  id        String   @id @default(uuid())
+  date      String   // format "AAAA-MM-JJ", un enregistrement par jour et par compagnie
+  count     Int      @default(0)
+
+  company   Company  @relation(fields: [companyId], references: [id])
+  companyId String
+
+  @@unique([companyId, date])
+}
+
+model AchievementUnlock {
+  id            String   @id @default(uuid())
+  achievementId String   // identifiant du succès (ex. "coffres-pleins"), pas une relation, juste une clé fixe
+  unlockedAt    DateTime @default(now())
+
+  company       Company  @relation(fields: [companyId], references: [id])
+  companyId     String
+
+  @@unique([companyId, achievementId])
 }
 
 model Line {
@@ -98,6 +129,7 @@ model Contract {
   durationMinutes   Int            // temps de livraison simulé
   reward            Int            // récompense versée à la livraison
   risky             Boolean        @default(false) // marchandise fragile : récompense plus élevée mais risque de dommage
+  insured           Boolean        @default(false) // prime payée à l'acceptation pour réduire le risque de dommage
 
   status            ContractStatus @default(DISPONIBLE)
   acceptedAt        DateTime?
@@ -124,7 +156,7 @@ model Incident {
 
 model Transaction {
   id          String   @id @default(uuid())
-  type        String   // ACHAT_TRAIN | REPARATION | FRET | FONDATION
+  type        String   // ACHAT_TRAIN | REPARATION | FRET | FONDATION | PERSONNEL | REVENU_LIGNE | PARRAINAGE | PUBLICITE
   amount      Int      // positif = recette, négatif = dépense
   description String
 

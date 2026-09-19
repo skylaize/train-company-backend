@@ -1,10 +1,26 @@
 import { Response } from "express";
+import { Prisma } from "@prisma/client";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
 import { computeReputation } from "../services/reputation.service";
 
+const REFERRAL_SIGNUP_BONUS = 100; // versé immédiatement au nouveau joueur qui utilise un code
+const CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // sans caractères ambigus (0/O, 1/I...)
+
+async function generateUniqueReferralCode(): Promise<string> {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    let code = "";
+    for (let i = 0; i < 6; i++) {
+      code += CODE_CHARS[Math.floor(Math.random() * CODE_CHARS.length)];
+    }
+    const existing = await prisma.company.findUnique({ where: { referralCode: code } });
+    if (!existing) return code;
+  }
+  throw new Error("Impossible de générer un code de parrainage unique");
+}
+
 export async function createCompany(req: AuthRequest, res: Response) {
-  const { name, liveryColor } = req.body;
+  const { name, liveryColor, referralCode } = req.body;
 
   if (!name) {
     return res.status(400).json({ error: "Le nom de la compagnie est requis" });
@@ -15,28 +31,65 @@ export async function createCompany(req: AuthRequest, res: Response) {
     return res.status(409).json({ error: "Vous avez déjà une compagnie" });
   }
 
+  // le code de parrainage est optionnel ; s'il est fourni, il doit correspondre à une compagnie existante
+  let referrer: { id: string } | null = null;
+  if (referralCode && typeof referralCode === "string") {
+    referrer = await prisma.company.findUnique({
+      where: { referralCode: referralCode.trim().toUpperCase() },
+      select: { id: true },
+    });
+    // un code invalide n'empêche pas la création de compagnie, il est simplement ignoré
+  }
+
+  const newCode = await generateUniqueReferralCode();
+
   const company = await prisma.company.create({
     data: {
       name,
       liveryColor: liveryColor || "#f2a900",
       ownerId: req.userId as string,
+      referralCode: newCode,
+      referredById: referrer?.id ?? null,
     },
   });
 
-  await prisma.transaction.create({
-    data: {
-      companyId: company.id,
-      type: "FONDATION",
-      amount: company.balance,
-      description: "Capital de fondation de la compagnie",
-    },
-  });
+  const foundationTransactions: Prisma.PrismaPromise<any>[] = [
+    prisma.transaction.create({
+      data: {
+        companyId: company.id,
+        type: "FONDATION",
+        amount: company.balance,
+        description: "Capital de fondation de la compagnie",
+      },
+    }),
+  ];
 
-  return res.status(201).json(company);
+  // bonus de bienvenue immédiat pour le nouveau joueur qui utilise un code de parrainage valide
+  if (referrer) {
+    foundationTransactions.push(
+      prisma.company.update({
+        where: { id: company.id },
+        data: { balance: { increment: REFERRAL_SIGNUP_BONUS } },
+      }),
+      prisma.transaction.create({
+        data: {
+          companyId: company.id,
+          type: "PARRAINAGE",
+          amount: REFERRAL_SIGNUP_BONUS,
+          description: "Bonus de bienvenue (code de parrainage utilisé)",
+        },
+      })
+    );
+  }
+
+  await prisma.$transaction(foundationTransactions);
+
+  const finalCompany = await prisma.company.findUnique({ where: { id: company.id } });
+  return res.status(201).json(finalCompany);
 }
 
 export async function updateCompany(req: AuthRequest, res: Response) {
-  const { name, liveryColor } = req.body;
+  const { name, liveryColor, tutorialSeen } = req.body;
 
   const company = await prisma.company.findUnique({ where: { ownerId: req.userId as string } });
   if (!company) {
@@ -52,6 +105,7 @@ export async function updateCompany(req: AuthRequest, res: Response) {
     data: {
       ...(name !== undefined ? { name: name.trim() } : {}),
       ...(liveryColor !== undefined ? { liveryColor } : {}),
+      ...(tutorialSeen !== undefined ? { tutorialSeen: Boolean(tutorialSeen) } : {}),
     },
   });
 

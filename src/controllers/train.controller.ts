@@ -96,7 +96,7 @@ export async function assignTrainToLine(req: AuthRequest, res: Response) {
   return res.json(updated);
 }
 
-const REPAIR_COST_PER_POINT = 3; // pièces par point d'usure à réparer
+const REPAIR_COST_PER_POINT = 2; // pièces par point d'usure à réparer (réduit pour éviter qu'une double panne ne bloque un nouveau joueur)
 
 export async function repairTrain(req: AuthRequest, res: Response) {
   const { trainId } = req.body;
@@ -119,8 +119,8 @@ export async function repairTrain(req: AuthRequest, res: Response) {
   }
 
   const hasChefDepot = await prisma.staff.count({ where: { companyId: company.id, role: "CHEF_DEPOT" } }) > 0;
-  const costPerPoint = hasChefDepot ? (company.isPremium ? 1 : 2) : REPAIR_COST_PER_POINT;
-  const cost = train.wear * costPerPoint;
+  const costPerPoint = hasChefDepot ? (company.isPremium ? 0.5 : 1) : REPAIR_COST_PER_POINT;
+  const cost = Math.ceil(train.wear * costPerPoint);
   if (company.balance < cost) {
     return res.status(409).json({ error: `Trésorerie insuffisante (réparation : ${cost} pièces)` });
   }

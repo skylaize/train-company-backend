@@ -17,6 +17,9 @@ import { weatherRouter } from "./routes/weather.routes";
 import { accountRouter } from "./routes/account.routes";
 import { summaryRouter } from "./routes/summary.routes";
 import { networkRouter } from "./routes/network.routes";
+import { careerRouter } from "./routes/career.routes";
+import { referralRouter } from "./routes/referral.routes";
+import { adsRouter } from "./routes/ads.routes";
 import { startSimulationJob } from "./jobs/simulation.job";
 
 const app = express();
@@ -53,6 +56,9 @@ app.use("/api", weatherRouter);
 app.use("/api", accountRouter);
 app.use("/api", summaryRouter);
 app.use("/api", networkRouter);
+app.use("/api", careerRouter);
+app.use("/api", referralRouter);
+app.use("/api", adsRouter);
 
 const PORT = process.env.PORT || 4000;
 

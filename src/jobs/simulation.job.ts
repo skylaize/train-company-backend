@@ -20,14 +20,56 @@ async function runSimulationTick() {
   await maybeChangeWeather();
   const weather = await getActiveWeather();
   await runLineTrains(weather);
-  await runFreightContracts();
+  await runFreightContracts(weather);
   await runPayroll();
   await removeExpiredContracts();
   await ensureMarketStocked();
+  await processReferralRewards();
+}
+
+const REFERRAL_REWARD = 150; // versé au parrain une fois que l'ami invité a vraiment commencé à jouer
+
+async function processReferralRewards() {
+  // un ami invité qui n'a pas encore rapporté sa récompense au parrain
+  const pendingReferrals = await prisma.company.findMany({
+    where: { referredById: { not: null }, referralRewardGranted: false },
+    select: { id: true, referredById: true },
+  });
+
+  for (const referred of pendingReferrals) {
+    if (!referred.referredById) continue;
+
+    // condition minimale pour prouver que l'ami a vraiment commencé à jouer, pas juste créé un compte
+    const [trainCount, lineCount] = await Promise.all([
+      prisma.train.count({ where: { companyId: referred.id } }),
+      prisma.line.count({ where: { companyId: referred.id } }),
+    ]);
+
+    if (trainCount >= 1 && lineCount >= 1) {
+      await prisma.$transaction([
+        prisma.company.update({ where: { id: referred.id }, data: { referralRewardGranted: true } }),
+        prisma.company.update({
+          where: { id: referred.referredById },
+          data: { balance: { increment: REFERRAL_REWARD } },
+        }),
+        prisma.transaction.create({
+          data: {
+            companyId: referred.referredById,
+            type: "PARRAINAGE",
+            amount: REFERRAL_REWARD,
+            description: "Récompense de parrainage : un ami invité a fondé son réseau",
+          },
+        }),
+      ]);
+    }
+  }
 }
 
 const WEAR_PER_TICK = 2;         // usure gagnée à chaque tick pour un train en service sur une ligne
-const INCIDENT_CHANCE = 0.08;    // probabilité qu'un train en ligne subisse un retard ce tick
+const INCIDENT_CHANCE = 0.015;   // probabilité qu'un train en ligne subisse un retard ce tick
+// Ce taux s'applique à chaque cycle de 30s pendant toute la durée du trajet : plus la ligne
+// est longue, plus il y a de cycles, donc plus d'occasions de tirer un incident. Réglé pour
+// qu'un trajet de 20-25 minutes ait en moyenne moins d'un incident, pas plusieurs.
 const REVENUE_PER_MINUTE = 8;    // recette voyageurs par minute de trajet, versée à chaque arrivée
 const FOG_SLOWDOWN_CHANCE = 0.3; // par temps de brouillard, chance qu'un train soit ralenti ce tick
 const DAMAGE_CHANCE = 0.3;       // pour une cargaison fragile, probabilité de dommage à la livraison
@@ -165,16 +207,28 @@ async function runLineTrains(weather: string) {
   }
 }
 
-async function runFreightContracts() {
+async function runFreightContracts(weather: string) {
   const activeContracts = await prisma.contract.findMany({
     where: { status: "EN_COURS" },
     include: { train: true },
   });
   const companiesWithDirecteur = await getCompaniesWithDirecteurCommercial();
   const premiumCompanyIds = await getPremiumCompanyIds();
+  const incidentChance = weather === "VERGLAS" ? INCIDENT_CHANCE * 2 : INCIDENT_CHANCE;
 
   for (const contract of activeContracts) {
     if (!contract.train || !contract.acceptedAt) continue;
+
+    // Même risque de retard aléatoire que sur les lignes voyageurs, renforcé par temps de verglas
+    if (Math.random() < incidentChance) {
+      await prisma.incident.create({
+        data: {
+          trainId: contract.train.id,
+          message: `Retard signalé sur le fret : ${contract.train.name} (${contract.cargoType})`,
+        },
+      });
+      continue;
+    }
 
     const elapsedMs = Date.now() - new Date(contract.acceptedAt).getTime();
     const elapsedMinutes = elapsedMs / 60_000;
@@ -189,7 +243,8 @@ async function runFreightContracts() {
         baseReward = Math.round(baseReward * 1.15);
       }
       // Une compagnie Premium subit deux fois moins de risque de dommage sur les cargaisons fragiles
-      const effectiveDamageChance = premiumCompanyIds.has(contract.companyId as string) ? DAMAGE_CHANCE / 2 : DAMAGE_CHANCE;
+      let effectiveDamageChance = premiumCompanyIds.has(contract.companyId as string) ? DAMAGE_CHANCE / 2 : DAMAGE_CHANCE;
+      if (contract.insured) effectiveDamageChance /= 2; // la prime d'assurance réduit encore le risque de moitié
       const damaged = contract.risky && Math.random() < effectiveDamageChance;
       const payout = damaged ? Math.round(baseReward * DAMAGE_PAYOUT_RATIO) : baseReward;
       const newWear = damaged ? Math.min(100, contract.train.wear + DAMAGE_WEAR_PENALTY) : contract.train.wear;

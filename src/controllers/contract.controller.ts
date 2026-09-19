@@ -1,4 +1,5 @@
 import { Response } from "express";
+import { Prisma } from "@prisma/client";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
 
@@ -30,11 +31,23 @@ export async function removeExpiredContracts() {
 }
 
 export async function ensureMarketStocked() {
-  const available = await prisma.contract.count({ where: { status: "DISPONIBLE", companyId: null } });
-  const missing = MIN_MARKET_SIZE - available;
+  const availableContracts = await prisma.contract.findMany({
+    where: { status: "DISPONIBLE", companyId: null },
+    select: { cargoType: true },
+  });
+  const missing = MIN_MARKET_SIZE - availableContracts.length;
+  if (missing <= 0) return;
+
+  const presentTypes = new Set(availableContracts.map((c) => c.cargoType));
 
   for (let i = 0; i < missing; i++) {
-    const template = CARGO_TEMPLATES[Math.floor(Math.random() * CARGO_TEMPLATES.length)];
+    // on évite de proposer un modèle de marchandise déjà visible sur le marché,
+    // pour ne pas donner l'impression que les offres se dupliquent
+    const pool = CARGO_TEMPLATES.filter((t) => !presentTypes.has(t.cargoType));
+    const candidates = pool.length > 0 ? pool : CARGO_TEMPLATES;
+    const template = candidates[Math.floor(Math.random() * candidates.length)];
+    presentTypes.add(template.cargoType);
+
     await prisma.contract.create({
       data: { ...template, expiresAt: new Date(Date.now() + EXPIRY_MINUTES * 60_000) },
     });
@@ -66,8 +79,10 @@ export async function listMyContracts(req: AuthRequest, res: Response) {
   return res.json(contracts);
 }
 
+const INSURANCE_PREMIUM_RATIO = 0.15; // 15% de la récompense, payé d'avance, non remboursable
+
 export async function acceptContract(req: AuthRequest, res: Response) {
-  const { contractId, trainId } = req.body;
+  const { contractId, trainId, insured } = req.body;
 
   if (!contractId || !trainId) {
     return res.status(400).json({ error: "contractId et trainId sont requis" });
@@ -98,16 +113,42 @@ export async function acceptContract(req: AuthRequest, res: Response) {
     return res.status(409).json({ error: "Ce train doit être réparé avant de pouvoir circuler" });
   }
 
-  const [updatedContract] = await prisma.$transaction([
+  const wantsInsurance = Boolean(insured);
+  if (wantsInsurance && !contract.risky) {
+    return res.status(400).json({ error: "Seules les cargaisons fragiles peuvent être assurées" });
+  }
+
+  const premium = wantsInsurance ? Math.round(contract.reward * INSURANCE_PREMIUM_RATIO) : 0;
+  if (wantsInsurance && company.balance < premium) {
+    return res.status(409).json({ error: `Trésorerie insuffisante pour la prime d'assurance (${premium} pièces)` });
+  }
+
+  const updates: Prisma.PrismaPromise<any>[] = [
     prisma.contract.update({
       where: { id: contractId },
-      data: { companyId: company.id, trainId, status: "EN_COURS", acceptedAt: new Date() },
+      data: { companyId: company.id, trainId, status: "EN_COURS", acceptedAt: new Date(), insured: wantsInsurance },
     }),
     prisma.train.update({
       where: { id: trainId },
       data: { status: "EN_ROUTE", progress: 0, departedAt: new Date() },
     }),
-  ]);
+  ];
+
+  if (wantsInsurance) {
+    updates.push(
+      prisma.company.update({ where: { id: company.id }, data: { balance: { decrement: premium } } }),
+      prisma.transaction.create({
+        data: {
+          companyId: company.id,
+          type: "FRET",
+          amount: -premium,
+          description: `Prime d'assurance : ${contract.cargoType}`,
+        },
+      })
+    );
+  }
+
+  const [updatedContract] = await prisma.$transaction(updates);
 
   return res.status(201).json(updatedContract);
 }
