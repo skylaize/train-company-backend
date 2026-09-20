@@ -12,6 +12,7 @@ import {
   INDEX_MAX,
 } from "../services/market.service";
 import { STOCK_TYPES_FREE, STOCK_TYPES_PREMIUM } from "../services/construction.service";
+import { sendToCompany } from "../services/push.service";
 
 async function companyOf(req: AuthRequest) {
   return prisma.company.findUnique({
@@ -380,7 +381,7 @@ export async function checkPriceAlerts() {
   );
 
   for (const alert of alerts as {
-    id: string; cargoType: string; direction: string; threshold: number;
+    id: string; companyId: string; cargoType: string; direction: string; threshold: number;
   }[]) {
     const index = indexByType.get(alert.cargoType);
     if (index === undefined) continue;
@@ -392,6 +393,19 @@ export async function checkPriceAlerts() {
     await prisma.priceAlert.update({
       where: { id: alert.id },
       data: { triggeredAt: new Date(), seen: false },
+    });
+
+    /* C'est ici que l'alerte prend tout son sens : elle part vers l'appareil du
+       joueur, qu'il soit sur le jeu ou non. Sans cet envoi, elle n'apparaissait
+       qu'à condition d'avoir déjà la page des cours ouverte — donc à celui qui
+       n'en avait pas besoin. */
+    await sendToCompany(alert.companyId, {
+      title: `${alert.cargoType} — seuil franchi`,
+      body: `Le cours est passé ${alert.direction === "DESSOUS" ? "sous" : "au-dessus de"} ${Math.round(
+        alert.threshold * 100
+      )}.`,
+      url: "/dashboard",
+      tag: `alerte-${alert.cargoType}`,
     });
   }
 }
@@ -438,7 +452,18 @@ export async function runStandingOrders() {
     /* Échec (entrepôt plein, trésorerie insuffisante, stock absent) : l'ordre
        est simplement mis en sommeil jusqu'au prochain créneau, sans message
        d'erreur nulle part — il réessaiera. */
-    void result;
+    if (!("error" in result)) {
+      await sendToCompany(order.companyId, {
+        title: order.kind === "ACHAT" ? "Ordre d'achat exécuté" : "Ordre de vente exécuté",
+        body:
+          order.kind === "ACHAT"
+            ? `${result.quantity} × ${order.cargoType} acheté au cours du moment (${result.total} pi.).`
+            : `${result.quantity} × ${order.cargoType} vendu (${result.total} pi.).`,
+        url: "/dashboard",
+        tag: `ordre-${order.cargoType}`,
+      });
+    }
+
     await prisma.standingOrder.update({
       where: { id: order.id },
       data: { lastRunAt: new Date() },

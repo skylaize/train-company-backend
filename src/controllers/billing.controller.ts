@@ -50,18 +50,37 @@ export async function createCheckoutSession(req: AuthRequest, res: Response) {
 
   const site = process.env.PUBLIC_SITE_URL ?? "https://compagnie.skhost.fr";
 
-  const session = await stripe.checkout.sessions.create({
-    mode: "payment", // achat unique : pas d'abonnement, donc pas de renouvellement à gérer
-    line_items: [{ price: priceId, quantity: 1 }],
-    /* C'est par là que le webhook retrouvera la compagnie à créditer. On ne se
-       fie pas à l'e-mail : un joueur peut payer avec une autre adresse. */
-    client_reference_id: company.id,
-    metadata: { companyId: company.id, companyName: company.name },
-    success_url: `${site}/dashboard?premium=ok`,
-    cancel_url: `${site}/dashboard?premium=annule`,
-  });
+  /* Sans ce try/catch, un refus de Stripe — tarif inconnu, clé de test contre
+     compte en production, compte non activé — remontait en rejet non
+     intercepté : le joueur voyait « une erreur est survenue » et la cause
+     n'apparaissait nulle part. Pire, un rejet non intercepté peut arrêter le
+     processus Node. On journalise le détail côté serveur et on renvoie au
+     joueur un message qui dit au moins d'où vient le problème. */
+  try {
+    const session = await stripe.checkout.sessions.create({
+      mode: "payment", // achat unique : pas d'abonnement, donc pas de renouvellement à gérer
+      line_items: [{ price: priceId, quantity: 1 }],
+      /* C'est par là que le webhook retrouvera la compagnie à créditer. On ne se
+         fie pas à l'e-mail : un joueur peut payer avec une autre adresse. */
+      client_reference_id: company.id,
+      metadata: { companyId: company.id, companyName: company.name },
+      success_url: `${site}/dashboard?premium=ok`,
+      cancel_url: `${site}/dashboard?premium=annule`,
+    });
 
-  return res.json({ url: session.url });
+    if (!session.url) {
+      console.error("[stripe] session créée sans URL de paiement", session.id);
+      return res.status(502).json({ error: "Stripe n'a pas renvoyé de page de paiement" });
+    }
+
+    return res.json({ url: session.url });
+  } catch (err) {
+    const e = err as { type?: string; code?: string; message?: string };
+    console.error("[stripe] échec de création de la session :", e.type, e.code, e.message);
+    return res.status(502).json({
+      error: `Stripe a refusé la demande : ${e.message ?? "raison inconnue"}`,
+    });
+  }
 }
 
 /* Webhook Stripe. Monté avec express.raw AVANT express.json : la vérification

@@ -1,5 +1,6 @@
 import { prisma } from "../prisma";
 import { depotExpansionCost } from "./upkeep.service";
+import { sendToCompany } from "./push.service";
 
 /* ============================================================
    Chantiers.
@@ -114,6 +115,18 @@ export async function completeConstructions() {
   });
 
   for (const c of due as { id: string; kind: string; companyId: string; label: string }[]) {
+    /* Le chantier se termine souvent quand le joueur n'est pas là — c'est même
+       l'usage normal, puisqu'il dure des heures. La notification est donc le
+       seul moyen qu'il l'apprenne au bon moment. Elle n'est pas réservée aux
+       abonnés : prévenir de la fin d'un chantier n'est pas un avantage, c'est
+       le minimum pour que l'attente reste jouable. */
+    await sendToCompany(c.companyId, {
+      title: "Chantier terminé",
+      body: `${c.label} — votre compagnie peut lancer le chantier suivant.`,
+      url: "/dashboard",
+      tag: "chantier",
+    });
+
     if (c.kind === "DEPOT") {
       await prisma.$transaction([
         prisma.company.update({ where: { id: c.companyId }, data: { maxTrains: { increment: 1 } } }),

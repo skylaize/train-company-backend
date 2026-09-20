@@ -64,6 +64,25 @@ model Company {
   constructions Construction[]
   priceAlerts  PriceAlert[]
   standingOrders StandingOrder[]
+  pushSubscriptions PushSubscription[]
+}
+
+// Un appareil abonné aux notifications. Une compagnie peut en avoir plusieurs :
+// le téléphone et l'ordinateur sont deux abonnements distincts, chacun avec ses
+// propres clés de chiffrement. L'endpoint est l'identifiant unique côté
+// navigateur — c'est lui qui sert de clé, pas l'appareil.
+model PushSubscription {
+  id        String   @id @default(uuid())
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  company   Company  @relation(fields: [companyId], references: [id])
+  companyId String
+
+  @@index([companyId])
 }
 
 // ============================================================

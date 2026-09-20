@@ -24,6 +24,7 @@ import { missionRouter } from "./routes/mission.routes";
 import { billingRouter } from "./routes/billing.routes";
 import { marketRouter } from "./routes/market.routes";
 import { constructionRouter } from "./routes/construction.routes";
+import { pushRouter } from "./routes/push.routes";
 import { handleStripeWebhook } from "./controllers/billing.controller";
 import { startSimulationJob } from "./jobs/simulation.job";
 
@@ -62,6 +63,7 @@ app.use("/api", missionRouter);
 app.use("/api", billingRouter);
 app.use("/api", marketRouter);
 app.use("/api", constructionRouter);
+app.use("/api", pushRouter);
 app.use("/api", incidentRouter);
 app.use("/api", transactionRouter);
 app.use("/api", achievementRouter);
