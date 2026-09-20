@@ -4,7 +4,15 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
+  // Connexion du jeu : elle passe par le connecteur mutualisé de Neon
+  // (l'hôte en "-pooler"), qui encaisse sans broncher les requêtes courtes et
+  // nombreuses de la simulation.
+  url = env("DATABASE_URL")
+  // Connexion des migrations : la même base, mais SANS le pooler. Le moteur de
+  // migration a besoin d'une vraie session — verrous consultatifs, transactions
+  // longues — que PgBouncer en mode transaction ne sait pas tenir. À travers le
+  // pooler, "migrate deploy" finit en P1002 alors que le jeu, lui, fonctionne.
+  directUrl = env("DIRECT_DATABASE_URL")
 }
 
 model User {
