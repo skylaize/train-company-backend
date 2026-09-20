@@ -3,6 +3,8 @@ import { Prisma } from "@prisma/client";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
 import { computeReputation } from "../services/reputation.service";
+import { depotExpansionCost, upkeepPerTick } from "../services/upkeep.service";
+import { depotBuildHours } from "../services/construction.service";
 
 const REFERRAL_SIGNUP_BONUS = 100; // versé immédiatement au nouveau joueur qui utilise un code
 const CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // sans caractères ambigus (0/O, 1/I...)
@@ -88,8 +90,24 @@ export async function createCompany(req: AuthRequest, res: Response) {
   return res.status(201).json(finalCompany);
 }
 
+/* Livrées. La palette réservée doit être vérifiée ici : l'interface grise les
+   boutons, mais rien n'empêche d'envoyer la couleur directement à l'API. */
+const LIVERY_FREE = ["#c99a3e", "#4f7fa3", "#5c8a68", "#a8483a", "#8a6ba3", "#c97a3e", "#f2a900"];
+const LIVERY_PREMIUM = ["#0f766e", "#b91c1c", "#1e3a8a", "#7c2d12", "#4c1d95", "#065f46", "#9d174d", "#334155"];
+
+function liveryAllowed(color: string, isPremium: boolean) {
+  const c = String(color).toLowerCase();
+  if (LIVERY_FREE.includes(c)) return true;
+  return isPremium && LIVERY_PREMIUM.includes(c);
+}
+
+function mergeHint(current: string, id: string) {
+  const list = (current || "").split(",").filter(Boolean);
+  return list.includes(id) ? current : [...list, id].join(",");
+}
+
 export async function updateCompany(req: AuthRequest, res: Response) {
-  const { name, liveryColor, tutorialSeen } = req.body;
+  const { name, liveryColor, tutorialSeen, theme, lastSeenVersion, seenHint } = req.body;
 
   const company = await prisma.company.findUnique({ where: { ownerId: req.userId as string } });
   if (!company) {
@@ -100,51 +118,85 @@ export async function updateCompany(req: AuthRequest, res: Response) {
     return res.status(400).json({ error: "Le nom ne peut pas être vide" });
   }
 
+  if (liveryColor !== undefined && !liveryAllowed(liveryColor, company.isPremium)) {
+    return res.status(403).json({ error: "Cette livrée est réservée aux compagnies Premium" });
+  }
+
   const updated = await prisma.company.update({
     where: { id: company.id },
     data: {
       ...(name !== undefined ? { name: name.trim() } : {}),
       ...(liveryColor !== undefined ? { liveryColor } : {}),
       ...(tutorialSeen !== undefined ? { tutorialSeen: Boolean(tutorialSeen) } : {}),
+      // liste blanche : une valeur inconnue laisserait l'interface sans couleurs
+      ...(theme === "sombre" || theme === "papier" ? { theme } : {}),
+      ...(typeof lastSeenVersion === "string" && lastSeenVersion.length <= 20
+        ? { lastSeenVersion }
+        : {}),
+      /* Les explications contextuelles sont marquées une par une. On stocke une
+         liste séparée par des virgules plutôt qu'un tableau : une seule colonne,
+         pas de table supplémentaire pour une poignée d'identifiants. */
+      ...(typeof seenHint === "string" && /^[a-z-]{1,32}$/.test(seenHint)
+        ? { hintsSeen: mergeHint(company.hintsSeen, seenHint) }
+        : {}),
     },
   });
 
   return res.json(updated);
 }
 
-const MAX_FLEET_CAP = 6; // capacité maximale du dépôt en V1
+/* Plus de plafond : c'est le prix qui freine, pas une borne arbitraire.
+   Une borne dure arrêtait net la progression ; un coût géométrique la ralentit
+   sans jamais la fermer.
 
+   L'agrandissement passe par un CHANTIER : on paie à la
+   commande, la place arrive quelques dizaines de minutes plus tard, et on ne
+   peut en mener qu'un à la fois. Sans cela, une compagnie assise sur 30 000
+   pièces convertissait sa trésorerie en dix places d'un seul clic — l'argent
+   était la seule contrainte, et elle ne contraignait plus personne. */
 export async function expandFleet(req: AuthRequest, res: Response) {
   const company = await prisma.company.findUnique({ where: { ownerId: req.userId as string } });
   if (!company) {
     return res.status(404).json({ error: "Créez d'abord votre compagnie" });
   }
 
-  if (company.maxTrains >= MAX_FLEET_CAP) {
-    return res.status(409).json({ error: "Capacité maximale du dépôt atteinte" });
+  const running = await prisma.construction.findFirst({
+    where: { companyId: company.id, done: false },
+  });
+  if (running) {
+    return res.status(409).json({ error: "Un chantier est déjà en cours" });
   }
 
-  const cost = company.maxTrains * 200;
+  const cost = depotExpansionCost(company.maxTrains, company.isPremium);
   if (company.balance < cost) {
     return res.status(409).json({ error: `Trésorerie insuffisante (agrandissement : ${cost} pièces)` });
   }
 
-  const [updated] = await prisma.$transaction([
-    prisma.company.update({
-      where: { id: company.id },
-      data: { maxTrains: { increment: 1 }, balance: { decrement: cost } },
+  const hours = depotBuildHours(company.maxTrains);
+  const label = `Agrandissement du dépôt (${company.maxTrains + 1} places)`;
+
+  const [construction] = await prisma.$transaction([
+    prisma.construction.create({
+      data: {
+        companyId: company.id,
+        kind: "DEPOT",
+        label,
+        cost,
+        endsAt: new Date(Date.now() + hours * 3600_000),
+      },
     }),
+    prisma.company.update({ where: { id: company.id }, data: { balance: { decrement: cost } } }),
     prisma.transaction.create({
       data: {
         companyId: company.id,
-        type: "EXPANSION_FLOTTE",
+        type: "CHANTIER",
         amount: -cost,
-        description: `Agrandissement du dépôt (+1 place, capacité ${company.maxTrains + 1})`,
+        description: `${label} — chantier lancé`,
       },
     }),
   ]);
 
-  return res.json(updated);
+  return res.status(201).json(construction);
 }
 
 export async function getMyCompany(req: AuthRequest, res: Response) {
@@ -159,5 +211,26 @@ export async function getMyCompany(req: AuthRequest, res: Response) {
 
   const reputation = await computeReputation(company.id);
 
-  return res.json({ ...company, reputation });
+  /* Le joueur doit voir ce que coûte la place suivante et ce que son réseau lui
+     coûte par heure : sans ces deux chiffres, l'entretien ressemble à une fuite
+     de trésorerie inexpliquée. */
+  const trainCount = company.trains.length;
+  const TICKS_PER_HOUR = 120;
+
+  /* Le chantier en cours voyage avec la compagnie : la flotte, le marché et la
+     page des chantiers l'affichent tous, et aucun des trois ne doit avoir à le
+     demander séparément. */
+  const construction = await prisma.construction.findFirst({
+    where: { companyId: company.id, done: false },
+    orderBy: { startedAt: "desc" },
+  });
+
+  return res.json({
+    ...company,
+    reputation,
+    nextDepotCost: depotExpansionCost(company.maxTrains, company.isPremium),
+    nextDepotHours: depotBuildHours(company.maxTrains),
+    construction,
+    upkeepPerHour: upkeepPerTick(trainCount) * TICKS_PER_HOUR,
+  });
 }

@@ -25,9 +25,14 @@ model Company {
   maxTrains    Int      @default(2) // capacité du dépôt, extensible contre paiement
   isPremium    Boolean  @default(false) // débloque les modèles de trains exclusifs
   tutorialSeen Boolean  @default(false) // mémorisé côté compte, pas par navigateur
+  theme        String   @default("sombre") // "sombre" | "papier", suit le joueur d'un appareil à l'autre
+  lastSeenVersion String? // dernier bulletin de nouveautés lu, mémorisé sur le compte et non par navigateur
+  hintsSeen    String   @default("") // ids des explications déjà lues, séparés par des virgules
   referralCode String   @unique // code à partager, généré à la création
   referredById String?  // compagnie qui a parrainé celle-ci, si un code a été renseigné à l'inscription
   referralRewardGranted Boolean @default(false) // évite de verser deux fois la récompense au parrain
+  referralMilestone Int  @default(0) // plus haut palier de parrainage déjà accordé (3, 5, 10 filleuls)
+  title        String?  // titre honorifique gagné au palier 5, affiché au classement
   createdAt    DateTime @default(now())
 
   owner        User     @relation(fields: [ownerId], references: [id])
@@ -44,6 +49,144 @@ model Company {
   staff        Staff[]
   achievementUnlocks AchievementUnlock[]
   adWatches    AdWatch[]
+  clientRelations ClientRelation[]
+  missions     Mission[]
+  warehouse    Warehouse?
+  stockLots    StockLot[]
+  constructions Construction[]
+  priceAlerts  PriceAlert[]
+  standingOrders StandingOrder[]
+}
+
+// ============================================================
+// Cours du fret.
+//
+// Une seule ligne par marchandise, partagée par tout le réseau : le cours est
+// une donnée de monde, pas de compagnie. Tout le monde voit le même prix au
+// même moment, sinon spéculer n'aurait aucun sens collectif.
+// ============================================================
+model CargoMarket {
+  cargoType String   @id // clé naturelle : le nom de la marchandise, déjà utilisé partout ailleurs
+  basePrice Int      // valeur de référence d'une unité, autour de laquelle le cours oscille
+  index     Float    @default(1) // multiplicateur courant, borné (voir market.service)
+  history   String   @default("[]") // derniers relevés, JSON [{t,i}] — suffisant pour tracer une courbe
+  eventLabel String? // événement en cours qui explique le mouvement, affiché tel quel au joueur
+  eventUntil DateTime?
+  updatedAt DateTime @updatedAt
+}
+
+// Entrepôt de la compagnie : ce qui permet de garder de la marchandise au lieu
+// de la livrer tout de suite. Construit par chantier, agrandi par chantier.
+model Warehouse {
+  id        String   @id @default(uuid())
+  capacity  Int      @default(20) // unités stockables, toutes marchandises confondues
+  level     Int      @default(1)  // nombre d'agrandissements effectués, pilote le coût du suivant
+  builtAt   DateTime @default(now())
+
+  company   Company  @relation(fields: [companyId], references: [id])
+  companyId String   @unique
+}
+
+// Un lot en stock. Le prix d'achat moyen est conservé pour pouvoir afficher la
+// plus ou moins-value : sans lui, le joueur ne sait pas s'il gagne de l'argent.
+model StockLot {
+  id           String   @id @default(uuid())
+  cargoType    String
+  quantity     Int
+  avgUnitPrice Float    // moyenne pondérée des achats successifs
+
+  company      Company  @relation(fields: [companyId], references: [id])
+  companyId    String
+
+  @@unique([companyId, cargoType])
+}
+
+// Chantier en cours. Une seule ligne active par compagnie : c'est la règle qui
+// empêche une grosse trésorerie de se convertir instantanément en progression.
+model Construction {
+  id        String   @id @default(uuid())
+  kind      String   // DEPOT | ENTREPOT | ENTREPOT_AGRANDISSEMENT
+  label     String   // libellé figé à la commande, pour l'afficher sans le recalculer
+  cost      Int      // déjà débité à la commande : on paie le chantier, pas la livraison
+  startedAt DateTime @default(now())
+  endsAt    DateTime
+  done      Boolean  @default(false)
+
+  company   Company  @relation(fields: [companyId], references: [id])
+  companyId String
+
+  @@index([companyId, done])
+}
+
+// Alerte de cours (abonnés). Purement informative : elle ne fait rien d'autre
+// que prévenir, donc elle enlève la surveillance, pas le travail.
+model PriceAlert {
+  id          String   @id @default(uuid())
+  cargoType   String
+  direction   String   // DESSOUS | DESSUS
+  threshold   Float    // seuil exprimé en indice (1 = cours normal)
+  triggeredAt DateTime?
+  seen        Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  company     Company  @relation(fields: [companyId], references: [id])
+  companyId   String
+
+  @@index([companyId])
+}
+
+// Ordre permanent (abonnés) : achète ou vend automatiquement au franchissement
+// d'un seuil. Le prix obtenu est exactement celui qu'aurait eu un joueur
+// présent — c'est la présence qui est remplacée, pas le rendement.
+model StandingOrder {
+  id         String   @id @default(uuid())
+  cargoType  String
+  kind       String   // ACHAT | VENTE
+  threshold  Float
+  quantity   Int
+  active     Boolean  @default(true)
+  lastRunAt  DateTime?
+  createdAt  DateTime @default(now())
+
+  company    Company  @relation(fields: [companyId], references: [id])
+  companyId  String
+
+  @@index([companyId, active])
+}
+
+// Relation commerciale avec un donneur d'ordre. La réputation gagnée ici
+// majore le tarif de TOUTES les cargaisons de ce client, pas seulement
+// celles livrées dans le cadre d'une mission.
+model ClientRelation {
+  id         String   @id @default(uuid())
+  clientId   String   // ACIERIES | PORT | COOPERATIVE | LABORATOIRES
+  reputation Int      @default(0) // 0 à 100
+  level      Int      @default(0) // palier atteint, pour ne le fêter qu'une fois
+
+  company    Company  @relation(fields: [companyId], references: [id])
+  companyId  String
+
+  @@unique([companyId, clientId])
+}
+
+// Un ordre daté proposé par un donneur d'ordre : le joueur l'accepte ou le refuse.
+model Mission {
+  id         String   @id @default(uuid())
+  clientId   String
+  cargoType  String   // marchandise demandée, tirée parmi celles du client
+  target     Int      // nombre de cargaisons à livrer
+  progress   Int      @default(0)
+  reward     Int      // pièces versées à la réussite
+  repReward  Int      // réputation gagnée chez ce client
+  status     String   @default("PROPOSEE") // PROPOSEE | ACCEPTEE | REUSSIE | ECHOUEE
+  offerUntil DateTime // au-delà, l'offre expire et le client en propose une autre
+  dueAt      DateTime? // échéance de livraison, fixée à l'acceptation
+  createdAt  DateTime @default(now())
+
+  company    Company  @relation(fields: [companyId], references: [id])
+  companyId  String
+
+  @@index([companyId, status])
 }
 
 model AdWatch {

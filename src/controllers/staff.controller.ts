@@ -1,25 +1,26 @@
 import { Response } from "express";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
+import { buildLeaderRows } from "../services/leaderboard.service";
 
-export const STAFF_ROLES: Record<string, { label: string; salaryPerTick: number; effect: string; premium: boolean }> = {
+export const STAFF_ROLES: Record<string, { label: string; salaryPerTick: number; effect: string; minGradeId: number }> = {
   MECANICIEN: {
     label: "Mécanicien",
     salaryPerTick: 3,
-    effect: "Réduit l'usure accumulée par vos rames en service (davantage encore en Premium)",
-    premium: false,
+    effect: "Réduit de moitié l'usure accumulée par vos rames en service",
+    minGradeId: 0,
   },
   CHEF_DEPOT: {
     label: "Chef de dépôt",
     salaryPerTick: 4,
-    effect: "Réduit le coût des réparations (encore plus en Premium)",
-    premium: false,
+    effect: "Réduit de moitié le coût des réparations",
+    minGradeId: 0,
   },
   DIRECTEUR_COMMERCIAL: {
     label: "Directeur commercial",
     salaryPerTick: 6,
-    effect: "Augmente de 15% tous vos revenus (voyageurs et fret) — poste Premium",
-    premium: true,
+    effect: "Augmente de 15 % tous vos revenus — demande le grade « Chef de réseau »",
+    minGradeId: 2,
   },
 };
 
@@ -49,10 +50,13 @@ export async function hireStaff(req: AuthRequest, res: Response) {
     return res.status(404).json({ error: "Créez d'abord votre compagnie" });
   }
 
-  if (STAFF_ROLES[role].premium && !company.isPremium) {
-    return res.status(403).json({ error: "Ce poste est réservé aux compagnies Premium" });
+  if (STAFF_ROLES[role].minGradeId > 0) {
+    const rows = await buildLeaderRows();
+    const gradeId = rows.find((r) => r.id === company.id)?.gradeId ?? 0;
+    if (gradeId < STAFF_ROLES[role].minGradeId) {
+      return res.status(403).json({ error: "Ce poste demande le grade « Chef de réseau »" });
+    }
   }
-
   const existing = await prisma.staff.findUnique({ where: { companyId_role: { companyId: company.id, role } } });
   if (existing) {
     return res.status(409).json({ error: "Ce poste est déjà pourvu" });

@@ -1,0 +1,13 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.trainRouter = void 0;
+const express_1 = require("express");
+const auth_middleware_1 = require("../middleware/auth.middleware");
+const train_controller_1 = require("../controllers/train.controller");
+exports.trainRouter = (0, express_1.Router)();
+exports.trainRouter.post("/trains", auth_middleware_1.requireAuth, train_controller_1.buyTrain);
+exports.trainRouter.post("/trains/assign", auth_middleware_1.requireAuth, train_controller_1.assignTrainToLine);
+exports.trainRouter.post("/trains/release", auth_middleware_1.requireAuth, train_controller_1.releaseTrain);
+exports.trainRouter.post("/trains/rename", auth_middleware_1.requireAuth, train_controller_1.renameTrain);
+exports.trainRouter.post("/trains/repair", auth_middleware_1.requireAuth, train_controller_1.repairTrain);
+exports.trainRouter.get("/trains", auth_middleware_1.requireAuth, train_controller_1.listMyTrains);

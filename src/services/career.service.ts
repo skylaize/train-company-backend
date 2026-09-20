@@ -13,7 +13,7 @@ export interface CareerRank {
   achieved: boolean;
 }
 
-interface CareerContext {
+export interface CareerContext {
   trainCount: number;
   lineCount: number;
   staffCount: number;
@@ -61,11 +61,21 @@ const RANK_DEFINITIONS: {
     name: "Magnat ferroviaire",
     requirements: [
       { label: "Employer au moins 2 membres du personnel", check: (ctx) => ctx.staffCount >= 2 },
-      { label: "Dépôt agrandi à sa capacité maximale (6 rames)", check: (ctx) => ctx.maxTrains >= 6 },
+      { label: "Dépôt porté à 6 places ou plus", check: (ctx) => ctx.maxTrains >= 6 },
       { label: "Avoir généré 20 000 pi. de recettes cumulées", check: (ctx) => ctx.totalRevenue >= 20000 },
     ],
   },
 ];
+
+/* Grade atteint pour un contexte donné, sans aucune requête : le classement
+   s'en sert pour étiqueter toutes les compagnies d'un coup. */
+export function rankFromContext(ctx: CareerContext) {
+  let current = 0;
+  RANK_DEFINITIONS.forEach((def, id) => {
+    if (def.requirements.every((r) => r.check(ctx))) current = id;
+  });
+  return { id: current, name: RANK_DEFINITIONS[current].name };
+}
 
 export async function computeCareerStatus(companyId: string) {
   const [trainCount, lines, staffCount, freightDelivered, revenueAgg, reputation, company] = await Promise.all([
@@ -98,11 +108,8 @@ export async function computeCareerStatus(companyId: string) {
     achieved: def.requirements.every((r) => r.check(ctx)),
   }));
 
-  // le grade actuel est le plus élevé dont toutes les conditions sont remplies
-  let currentRankId = 0;
-  for (const rank of ranks) {
-    if (rank.achieved) currentRankId = rank.id;
-  }
+  // une seule source de vérité : la même fonction que celle utilisée par le classement
+  const currentRankId = rankFromContext(ctx).id;
 
   return {
     currentRank: ranks[currentRankId],

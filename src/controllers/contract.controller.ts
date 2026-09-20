@@ -2,6 +2,8 @@ import { Response } from "express";
 import { Prisma } from "@prisma/client";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
+import { requiredCargoTypes } from "../services/mission.service";
+import { getCargoIndexMap, freightMultiplier } from "../services/market.service";
 
 async function getOwnedCompanyOrFail(userId: string) {
   return prisma.company.findUnique({ where: { ownerId: userId } });
@@ -21,7 +23,11 @@ const CARGO_TEMPLATES = [
   { cargoType: "Produits pharmaceutiques réfrigérés", originStation: "Strasbourg", destinationStation: "Mulhouse", durationMinutes: 4, reward: 190, risky: true },
 ];
 
+/* Le marché est commun à tout le réseau : on le garnit pour le plus exigeant
+   des joueurs connectés. Un abonné voit six offres, un gratuit les trois plus
+   anciennes — plus de choix, pas de meilleur tarif. */
 const MIN_MARKET_SIZE = 3;
+const PREMIUM_MARKET_SIZE = 6;
 const EXPIRY_MINUTES = 5; // durée de vie d'une offre non acceptée sur le marché
 
 export async function removeExpiredContracts() {
@@ -35,17 +41,40 @@ export async function ensureMarketStocked() {
     where: { status: "DISPONIBLE", companyId: null },
     select: { cargoType: true },
   });
-  const missing = MIN_MARKET_SIZE - availableContracts.length;
-  if (missing <= 0) return;
-
   const presentTypes = new Set(availableContracts.map((c) => c.cargoType));
 
-  for (let i = 0; i < missing; i++) {
-    // on évite de proposer un modèle de marchandise déjà visible sur le marché,
-    // pour ne pas donner l'impression que les offres se dupliquent
-    const pool = CARGO_TEMPLATES.filter((t) => !presentTypes.has(t.cargoType));
-    const candidates = pool.length > 0 ? pool : CARGO_TEMPLATES;
-    const template = candidates[Math.floor(Math.random() * candidates.length)];
+  /* Marchandises réclamées par un ordre de mission en cours et absentes du
+     marché. Sans cette garantie, un joueur peut accepter un ordre portant sur
+     de l'acier et ne jamais voir un seul contrat d'acier — il perdrait de la
+     réputation sans avoir commis la moindre erreur. */
+  const wanted = [...(await requiredCargoTypes())].filter(
+    (t) => !presentTypes.has(t) && CARGO_TEMPLATES.some((c) => c.cargoType === t)
+  );
+
+  /* Le marché s'étend au-delà de son minimum si des ordres attendent une
+     marchandise : un marché « plein » d'autre chose bloquerait les missions. */
+  const toCreate = Math.max(PREMIUM_MARKET_SIZE - availableContracts.length, wanted.length);
+  if (toCreate <= 0) return;
+
+  type CargoTemplate = (typeof CARGO_TEMPLATES)[number];
+
+  for (let i = 0; i < toCreate; i++) {
+    let template: CargoTemplate | undefined;
+
+    // les marchandises réclamées passent d'abord
+    while (wanted.length > 0 && !template) {
+      const need = wanted.shift() as string;
+      template = CARGO_TEMPLATES.find((t) => t.cargoType === need);
+    }
+
+    if (!template) {
+      // on évite de proposer un modèle de marchandise déjà visible sur le marché,
+      // pour ne pas donner l'impression que les offres se dupliquent
+      const pool = CARGO_TEMPLATES.filter((t) => !presentTypes.has(t.cargoType));
+      const candidates = pool.length > 0 ? pool : CARGO_TEMPLATES;
+      template = candidates[Math.floor(Math.random() * candidates.length)];
+    }
+
     presentTypes.add(template.cargoType);
 
     await prisma.contract.create({
@@ -54,14 +83,38 @@ export async function ensureMarketStocked() {
   }
 }
 
-export async function listMarket(_req: AuthRequest, res: Response) {
+export async function listMarket(req: AuthRequest, res: Response) {
   await removeExpiredContracts();
   await ensureMarketStocked();
+
+  const company = await prisma.company.findUnique({
+    where: { ownerId: req.userId as string },
+    select: { isPremium: true },
+  });
+
   const contracts = await prisma.contract.findMany({
     where: { status: "DISPONIBLE", companyId: null },
     orderBy: { createdAt: "asc" },
+    take: company?.isPremium ? PREMIUM_MARKET_SIZE : MIN_MARKET_SIZE,
   });
-  return res.json(contracts);
+
+  /* Le cours du jour est joint à chaque offre : sans lui, le joueur devrait
+     ouvrir une autre page pour savoir si la marchandise proposée paie
+     au-dessus ou en dessous de sa valeur normale. */
+  const index = await getCargoIndexMap();
+  const withPrices = contracts.map((c: { cargoType: string; reward: number }) => {
+    const i = index.get(c.cargoType);
+    const multiplier = i === undefined ? 1 : freightMultiplier(i);
+    return {
+      ...c,
+      marketIndex: i === undefined ? null : Number(i.toFixed(3)),
+      // récompense réellement attendue, cours compris — c'est ce chiffre qui décide
+      effectiveReward: Math.round(c.reward * multiplier),
+      marketDelta: Math.round((multiplier - 1) * 100),
+    };
+  });
+
+  return res.json(withPrices);
 }
 
 export async function listMyContracts(req: AuthRequest, res: Response) {

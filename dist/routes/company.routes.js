@@ -1,0 +1,11 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.companyRouter = void 0;
+const express_1 = require("express");
+const auth_middleware_1 = require("../middleware/auth.middleware");
+const company_controller_1 = require("../controllers/company.controller");
+exports.companyRouter = (0, express_1.Router)();
+exports.companyRouter.post("/company", auth_middleware_1.requireAuth, company_controller_1.createCompany);
+exports.companyRouter.get("/company", auth_middleware_1.requireAuth, company_controller_1.getMyCompany);
+exports.companyRouter.patch("/company", auth_middleware_1.requireAuth, company_controller_1.updateCompany);
+exports.companyRouter.post("/company/expand-fleet", auth_middleware_1.requireAuth, company_controller_1.expandFleet);

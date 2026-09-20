@@ -1,0 +1,16 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.marketRouter = void 0;
+const express_1 = require("express");
+const auth_middleware_1 = require("../middleware/auth.middleware");
+const market_controller_1 = require("../controllers/market.controller");
+exports.marketRouter = (0, express_1.Router)();
+exports.marketRouter.get("/market/prices", auth_middleware_1.requireAuth, market_controller_1.getMarketPrices);
+exports.marketRouter.post("/market/buy", auth_middleware_1.requireAuth, market_controller_1.buyCargo);
+exports.marketRouter.post("/market/sell", auth_middleware_1.requireAuth, market_controller_1.sellCargo);
+exports.marketRouter.get("/market/alerts", auth_middleware_1.requireAuth, market_controller_1.listAlerts);
+exports.marketRouter.post("/market/alerts", auth_middleware_1.requireAuth, market_controller_1.createAlert);
+exports.marketRouter.post("/market/alerts/seen", auth_middleware_1.requireAuth, market_controller_1.acknowledgeAlerts);
+exports.marketRouter.delete("/market/alerts/:id", auth_middleware_1.requireAuth, market_controller_1.deleteAlert);
+exports.marketRouter.post("/market/orders", auth_middleware_1.requireAuth, market_controller_1.createStandingOrder);
+exports.marketRouter.delete("/market/orders/:id", auth_middleware_1.requireAuth, market_controller_1.deleteStandingOrder);

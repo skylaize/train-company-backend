@@ -1,0 +1,10 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.missionRouter = void 0;
+const express_1 = require("express");
+const auth_middleware_1 = require("../middleware/auth.middleware");
+const mission_controller_1 = require("../controllers/mission.controller");
+exports.missionRouter = (0, express_1.Router)();
+exports.missionRouter.get("/clients/mine", auth_middleware_1.requireAuth, mission_controller_1.getMyClients);
+exports.missionRouter.post("/missions/:id/accept", auth_middleware_1.requireAuth, mission_controller_1.acceptMission);
+exports.missionRouter.post("/missions/:id/decline", auth_middleware_1.requireAuth, mission_controller_1.declineMission);

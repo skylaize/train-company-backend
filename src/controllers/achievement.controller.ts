@@ -25,6 +25,14 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     existingUnlocks,
     distinctModels,
     insuredCount,
+    missionsDone,
+    clientRelations,
+    linesForDuration,
+    missionPayouts,
+    warehouse,
+    cargoSales,
+    constructionsDone,
+    stockLots,
   ] = await Promise.all([
     prisma.contract.count({ where: { companyId: company.id, status: "LIVREE" } }),
     prisma.transaction.count({ where: { companyId: company.id, type: "REPARATION" } }),
@@ -39,12 +47,45 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     prisma.achievementUnlock.findMany({ where: { companyId: company.id }, select: { achievementId: true } }),
     prisma.train.findMany({ where: { companyId: company.id }, select: { model: true }, distinct: ["model"] }),
     prisma.contract.count({ where: { companyId: company.id, insured: true } }),
+    // v1.2 : ordres honorés, relations clients, réseau et parrainage
+    prisma.mission.count({ where: { companyId: company.id, status: "REUSSIE" } }),
+    prisma.clientRelation.findMany({ where: { companyId: company.id }, select: { reputation: true } }),
+    prisma.line.findMany({ where: { companyId: company.id }, select: { durationMinutes: true } }),
+    prisma.transaction.aggregate({
+      where: { companyId: company.id, type: "MISSION", amount: { gt: 0 } },
+      _sum: { amount: true },
+    }),
+    // entrepôt, spéculation et chantiers
+    prisma.warehouse.findUnique({ where: { companyId: company.id } }),
+    prisma.transaction.findMany({
+      where: { companyId: company.id, type: "VENTE_FRET" },
+      select: { description: true },
+    }),
+    prisma.construction.count({ where: { companyId: company.id, done: true } }),
+    prisma.stockLot.findMany({ where: { companyId: company.id }, select: { quantity: true } }),
   ]);
 
   const rank = allCompanies.findIndex((c) => c.id === company.id) + 1;
   const distinctStations = new Set(linesForStations.flatMap((l) => [l.departureStation, l.arrivalStation])).size;
   const alreadyUnlocked = new Set(existingUnlocks.map((u) => u.achievementId));
   const daysSinceCreation = (Date.now() - new Date(company.createdAt).getTime()) / (1000 * 60 * 60 * 24);
+
+  const reputations = (clientRelations as Array<{ reputation: number }>).map((r) => r.reputation);
+  const bestReputation = reputations.length > 0 ? Math.max(...reputations) : 0;
+  const clientsEngaged = reputations.filter((r) => r > 0).length;
+  const longestLine = (linesForDuration as Array<{ durationMinutes: number }>)
+    .reduce((max, l) => Math.max(max, l.durationMinutes), 0);
+
+  /* Plus-values de revente. Le gain est inscrit dans le libellé de l'écriture
+     — « (+312 pi.) » — plutôt que dans le montant, qui porte le produit brut
+     de la vente. On le relit donc ici, faute de colonne dédiée. */
+  const sales = (cargoSales as Array<{ description: string }>).map((t) => {
+    const m = t.description.match(/\(([-+]?\d+) pi\.\)$/);
+    return m ? Number(m[1]) : 0;
+  });
+  const bestSale = sales.length > 0 ? Math.max(...sales) : 0;
+  const totalSpeculation = sales.reduce((sum, g) => sum + g, 0);
+  const storedUnits = (stockLots as Array<{ quantity: number }>).reduce((sum, l) => sum + l.quantity, 0);
 
   // Condition remplie "en ce moment" pour chaque succès. Un succès déjà persisté reste acquis
   // pour toujours, même si la condition ne l'est plus (ex. trésorerie redescendue sous le seuil).
@@ -142,7 +183,7 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     {
       id: "flotte-imperiale",
       name: "Flotte impériale",
-      description: "Agrandir le dépôt jusqu'à sa capacité maximale (6 rames)",
+      description: "Porter le dépôt à 6 places",
       liveMet: company.maxTrains >= 6,
     },
     {
@@ -180,6 +221,104 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
       name: "Grand réseau",
       description: "Avoir tracé au moins 6 lignes",
       liveMet: company._count.lines >= 6,
+    },
+
+    /* ---- Ajouts de la 1.2, adossés aux nouveaux systèmes ---- */
+    {
+      id: "premier-ordre",
+      name: "Parole donnée",
+      description: "Honorer un premier ordre de donneur d'ordre",
+      liveMet: missionsDone >= 1,
+    },
+    {
+      id: "parole-tenue",
+      name: "Parole tenue",
+      description: "Honorer 10 ordres de donneurs d'ordre",
+      liveMet: missionsDone >= 10,
+    },
+    {
+      id: "client-regulier",
+      name: "Client régulier",
+      description: "Atteindre 30 de réputation chez un chargeur",
+      liveMet: bestReputation >= 30,
+    },
+    {
+      id: "affreteur-historique",
+      name: "Affréteur historique",
+      description: "Porter un chargeur à 100 de réputation",
+      liveMet: bestReputation >= 100,
+    },
+    {
+      id: "carnet-rempli",
+      name: "Carnet d'adresses",
+      description: "Travailler avec les quatre donneurs d'ordre",
+      liveMet: clientsEngaged >= 4,
+    },
+    {
+      id: "grande-traversee",
+      name: "Grande traversée",
+      description: "Exploiter une ligne de 15 minutes ou plus",
+      liveMet: longestLine >= 15,
+    },
+    {
+      id: "depot-etendu",
+      name: "Dépôt étendu",
+      description: "Porter le dépôt à 8 places",
+      liveMet: company.maxTrains >= 8,
+    },
+    {
+      id: "baron-du-parc",
+      name: "Baron du parc",
+      description: "Aligner 10 rames en même temps",
+      liveMet: company._count.trains >= 10,
+    },
+    {
+      id: "recruteur-confirme",
+      name: "Recruteur confirmé",
+      description: "Atteindre le premier palier de parrainage",
+      liveMet: company.referralMilestone >= 3,
+    },
+    {
+      id: "commis-dordre",
+      name: "Commis d'ordre",
+      description: "Encaisser 2 000 pi. de primes de mission",
+      liveMet: (missionPayouts?._sum?.amount ?? 0) >= 2000,
+    },
+    {
+      id: "premier-entrepot",
+      name: "Sous la halle",
+      description: "Faire construire votre entrepôt",
+      liveMet: Boolean(warehouse),
+    },
+    {
+      id: "premiere-revente",
+      name: "Acheté bas, revendu haut",
+      description: "Réaliser une plus-value sur une revente de marchandise",
+      liveMet: bestSale > 0,
+    },
+    {
+      id: "beau-coup",
+      name: "Le beau coup",
+      description: "Gagner 500 pi. sur une seule revente",
+      liveMet: bestSale >= 500,
+    },
+    {
+      id: "negociant",
+      name: "Négociant",
+      description: "Cumuler 5 000 pi. de plus-values sur le marché",
+      liveMet: totalSpeculation >= 5000,
+    },
+    {
+      id: "entrepot-plein",
+      name: "Entrepôt plein",
+      description: "Stocker 50 unités de marchandise en même temps",
+      liveMet: storedUnits >= 50,
+    },
+    {
+      id: "batisseur",
+      name: "Bâtisseur",
+      description: "Mener dix chantiers à leur terme",
+      liveMet: constructionsDone >= 10,
     },
   ];
 

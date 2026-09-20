@@ -20,6 +20,11 @@ import { networkRouter } from "./routes/network.routes";
 import { careerRouter } from "./routes/career.routes";
 import { referralRouter } from "./routes/referral.routes";
 import { adsRouter } from "./routes/ads.routes";
+import { missionRouter } from "./routes/mission.routes";
+import { billingRouter } from "./routes/billing.routes";
+import { marketRouter } from "./routes/market.routes";
+import { constructionRouter } from "./routes/construction.routes";
+import { handleStripeWebhook } from "./controllers/billing.controller";
 import { startSimulationJob } from "./jobs/simulation.job";
 
 const app = express();
@@ -34,6 +39,12 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 
+/* Le webhook Stripe doit recevoir le corps BRUT : la vérification de signature
+   porte sur les octets exacts envoyés par Stripe. Il est donc monté avant
+   express.json(), sinon le corps serait déjà décodé et la signature invalide.
+   C'est l'erreur la plus courante de cette intégration. */
+app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), handleStripeWebhook);
+
 app.use(express.json());
 
 app.get("/", (_req, res) => {
@@ -47,6 +58,10 @@ app.use("/api", lineRouter);
 app.use("/api", trainRouter);
 app.use("/api", contractRouter);
 app.use("/api", leaderboardRouter);
+app.use("/api", missionRouter);
+app.use("/api", billingRouter);
+app.use("/api", marketRouter);
+app.use("/api", constructionRouter);
 app.use("/api", incidentRouter);
 app.use("/api", transactionRouter);
 app.use("/api", achievementRouter);

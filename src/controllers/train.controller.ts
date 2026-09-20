@@ -1,21 +1,26 @@
 import { Response } from "express";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
+import { buildLeaderRows } from "../services/leaderboard.service";
 
 async function getOwnedCompanyOrFail(userId: string) {
   return prisma.company.findUnique({ where: { ownerId: userId } });
 }
 
-const TRAIN_MODELS: Record<string, { cost: number; premium: boolean }> = {
-  STANDARD: { cost: 200, premium: false },
-  EXPRESS: { cost: 450, premium: true },
-  FRET_LOURD: { cost: 450, premium: true },
+/* Le matériel se débloque au grade de carrière, plus à l'abonnement.
+   Deux modèles sur trois étaient marqués Premium alors qu'aucune route ne rend
+   une compagnie Premium : personne ne pouvait les acheter, et tout le monde
+   roulait en Standard. Le choix de matériel n'existait tout simplement pas. */
+export const TRAIN_MODELS: Record<string, { cost: number; minGradeId: number }> = {
+  STANDARD: { cost: 200, minGradeId: 0 },
+  EXPRESS: { cost: 450, minGradeId: 1 },   // Gestionnaire confirmé
+  FRET_LOURD: { cost: 450, minGradeId: 2 }, // Chef de réseau
 };
 
 export async function buyTrain(req: AuthRequest, res: Response) {
   const { name, model } = req.body;
   const chosenModel = model && TRAIN_MODELS[model] ? model : "STANDARD";
-  const { cost: TRAIN_COST, premium } = TRAIN_MODELS[chosenModel];
+  const { cost: TRAIN_COST, minGradeId } = TRAIN_MODELS[chosenModel];
 
   if (!name) {
     return res.status(400).json({ error: "Le nom du train est requis" });
@@ -26,8 +31,13 @@ export async function buyTrain(req: AuthRequest, res: Response) {
     return res.status(404).json({ error: "Créez d'abord votre compagnie" });
   }
 
-  if (premium && !company.isPremium) {
-    return res.status(403).json({ error: "Ce modèle est réservé aux compagnies Premium" });
+  if (minGradeId > 0) {
+    const rows = await buildLeaderRows();
+    const gradeId = rows.find((r) => r.id === company.id)?.gradeId ?? 0;
+    if (gradeId < minGradeId) {
+      const needed = minGradeId === 1 ? "Gestionnaire confirmé" : "Chef de réseau";
+      return res.status(403).json({ error: `Ce modèle demande le grade « ${needed} »` });
+    }
   }
 
   const trainCount = await prisma.train.count({ where: { companyId: company.id } });
@@ -119,7 +129,10 @@ export async function repairTrain(req: AuthRequest, res: Response) {
   }
 
   const hasChefDepot = await prisma.staff.count({ where: { companyId: company.id, role: "CHEF_DEPOT" } }) > 0;
-  const costPerPoint = hasChefDepot ? (company.isPremium ? 0.5 : 1) : REPAIR_COST_PER_POINT;
+  /* La remise Premium sur les réparations a été retirée : elle abaissait les
+     charges, donc elle déplaçait la taille optimale d'une compagnie. Premium
+     ne doit pas faire aller plus HAUT, seulement plus vite ou plus confortablement. */
+  const costPerPoint = hasChefDepot ? 1 : REPAIR_COST_PER_POINT;
   const cost = Math.ceil(train.wear * costPerPoint);
   if (company.balance < cost) {
     return res.status(409).json({ error: `Trésorerie insuffisante (réparation : ${cost} pièces)` });

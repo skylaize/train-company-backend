@@ -1,0 +1,10 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.contractRouter = void 0;
+const express_1 = require("express");
+const auth_middleware_1 = require("../middleware/auth.middleware");
+const contract_controller_1 = require("../controllers/contract.controller");
+exports.contractRouter = (0, express_1.Router)();
+exports.contractRouter.get("/contracts/market", auth_middleware_1.requireAuth, contract_controller_1.listMarket);
+exports.contractRouter.get("/contracts/mine", auth_middleware_1.requireAuth, contract_controller_1.listMyContracts);
+exports.contractRouter.post("/contracts/accept", auth_middleware_1.requireAuth, contract_controller_1.acceptContract);

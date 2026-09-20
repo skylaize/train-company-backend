@@ -1,0 +1,11 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.lineRouter = void 0;
+const express_1 = require("express");
+const auth_middleware_1 = require("../middleware/auth.middleware");
+const line_controller_1 = require("../controllers/line.controller");
+exports.lineRouter = (0, express_1.Router)();
+exports.lineRouter.post("/lines", auth_middleware_1.requireAuth, line_controller_1.createLine);
+exports.lineRouter.get("/lines", auth_middleware_1.requireAuth, line_controller_1.listMyLines);
+exports.lineRouter.patch("/lines", auth_middleware_1.requireAuth, line_controller_1.updateLine);
+exports.lineRouter.delete("/lines", auth_middleware_1.requireAuth, line_controller_1.deleteLine);
