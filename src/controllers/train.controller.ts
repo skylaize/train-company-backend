@@ -1,6 +1,7 @@
 import { Response } from "express";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
+import { staffEffectsFor, repairCostPerPoint } from "../services/staff.service";
 import { buildLeaderRows } from "../services/leaderboard.service";
 
 async function getOwnedCompanyOrFail(userId: string) {
@@ -106,7 +107,6 @@ export async function assignTrainToLine(req: AuthRequest, res: Response) {
   return res.json(updated);
 }
 
-const REPAIR_COST_PER_POINT = 2; // pièces par point d'usure à réparer (réduit pour éviter qu'une double panne ne bloque un nouveau joueur)
 
 export async function repairTrain(req: AuthRequest, res: Response) {
   const { trainId } = req.body;
@@ -128,11 +128,10 @@ export async function repairTrain(req: AuthRequest, res: Response) {
     return res.status(409).json({ error: "Ce train n'a pas besoin de réparation" });
   }
 
-  const hasChefDepot = await prisma.staff.count({ where: { companyId: company.id, role: "CHEF_DEPOT" } }) > 0;
-  /* La remise Premium sur les réparations a été retirée : elle abaissait les
-     charges, donc elle déplaçait la taille optimale d'une compagnie. Premium
-     ne doit pas faire aller plus HAUT, seulement plus vite ou plus confortablement. */
-  const costPerPoint = hasChefDepot ? 1 : REPAIR_COST_PER_POINT;
+  /* Le coût par point dépend désormais de l'équipe de chefs de dépôt et de la
+     part de la flotte qu'elle couvre — le même calcul que la réparation
+     automatique et que le prix affiché sur le bouton. */
+  const costPerPoint = repairCostPerPoint(await staffEffectsFor(company.id));
   const cost = Math.ceil(train.wear * costPerPoint);
   if (company.balance < cost) {
     return res.status(409).json({ error: `Trésorerie insuffisante (réparation : ${cost} pièces)` });
@@ -156,7 +155,9 @@ export async function repairTrain(req: AuthRequest, res: Response) {
         companyId: company.id,
         type: "REPARATION",
         amount: -cost,
-        description: `Réparation de ${train.name}`,
+        description: train.wear >= 100 ? `Réparation de ${train.name}` : `Révision préventive de ${train.name}`,
+        trainId: train.id,
+        lineId: train.lineId,
       },
     }),
   ]);

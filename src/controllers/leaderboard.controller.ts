@@ -24,6 +24,7 @@ export async function getLeaderboard(req: AuthRequest, res: Response) {
     id: r.id,
     name: r.name,
     liveryColor: r.liveryColor,
+    emblem: r.emblem,
     grade: r.grade,
     title: r.title,
     trains: r.trains,

@@ -77,7 +77,13 @@ export async function processReferralMilestones() {
       }
 
       if (milestone.reward === "title") {
-        await prisma.company.update({ where: { id: sponsorId }, data: { title: SPONSOR_TITLE } });
+        /* Le titre gagné ne remplace pas un titre que le joueur a choisi en
+           boutique : il s'ajoute à ceux qu'il peut porter. On ne l'impose que
+           s'il n'en porte encore aucun. */
+        await prisma.company.updateMany({
+          where: { id: sponsorId, title: null },
+          data: { title: SPONSOR_TITLE },
+        });
       }
 
       if (milestone.reward === "express") {

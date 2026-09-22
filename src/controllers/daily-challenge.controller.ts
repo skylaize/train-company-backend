@@ -87,7 +87,7 @@ async function computeProgress(companyId: string, type: string): Promise<number>
     case "RECETTES": {
       // seul défi mesuré en pièces : on additionne les recettes du jour
       const agg = await prisma.transaction.aggregate({
-        where: { companyId, amount: { gt: 0 }, type: { not: "FONDATION" }, createdAt: { gte: since } },
+        where: { companyId, amount: { gt: 0 }, type: { notIn: ["FONDATION", "CHANTIER"] }, createdAt: { gte: since } },
         _sum: { amount: true },
       });
       return agg._sum.amount ?? 0;

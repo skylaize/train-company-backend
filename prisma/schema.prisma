@@ -40,7 +40,16 @@ model Company {
   referredById String?  // compagnie qui a parrainé celle-ci, si un code a été renseigné à l'inscription
   referralRewardGranted Boolean @default(false) // évite de verser deux fois la récompense au parrain
   referralMilestone Int  @default(0) // plus haut palier de parrainage déjà accordé (3, 5, 10 filleuls)
-  title        String?  // titre honorifique gagné au palier 5, affiché au classement
+  title        String?  // titre affiché au classement : gagné (palier 5) ou choisi parmi ceux de la boutique
+  emblem       String?  // emblème porté devant le nom de la compagnie, choisi parmi ceux débloqués
+  // Bilan de retour (Premium) : dernière activité connue, et fenêtre d'absence à résumer
+  lastActiveAt       DateTime?
+  lastActiveBalance  Int?
+  absenceFrom        DateTime?
+  absenceTo          DateTime?
+  absenceFromBalance Int?
+  absenceToBalance   Int?
+  lastDigestOn       String? // jour (AAAA-MM-JJ, heure de Paris) du dernier bilan du matin envoyé
   createdAt    DateTime @default(now())
 
   owner        User     @relation(fields: [ownerId], references: [id])
@@ -65,6 +74,23 @@ model Company {
   priceAlerts  PriceAlert[]
   standingOrders StandingOrder[]
   pushSubscriptions PushSubscription[]
+  shopPurchases ShopPurchase[]
+}
+
+// Un objet cosmétique acheté. Une ligne par objet et par compagnie : on ne
+// vend chaque objet qu'une fois. La session Stripe sert de preuve de paiement
+// et de garde contre un webhook livré deux fois.
+model ShopPurchase {
+  id              String   @id @default(uuid())
+  itemId          String
+  stripeSessionId String   @unique
+  amountCents     Int
+  purchasedAt     DateTime @default(now())
+
+  company         Company  @relation(fields: [companyId], references: [id])
+  companyId       String
+
+  @@unique([companyId, itemId])
 }
 
 // Un appareil abonné aux notifications. Une compagnie peut en avoir plusieurs :
@@ -138,6 +164,8 @@ model Construction {
   startedAt DateTime @default(now())
   endsAt    DateTime
   done      Boolean  @default(false)
+  queued    Boolean  @default(false) // en file (Premium) : démarre à la fin du chantier en cours
+  durationMs Int     @default(0) // durée prévue, pour recaler endsAt au démarrage réel
 
   company   Company  @relation(fields: [companyId], references: [id])
   companyId String
@@ -329,11 +357,17 @@ model Transaction {
   type        String   // ACHAT_TRAIN | REPARATION | FRET | FONDATION | PERSONNEL | REVENU_LIGNE | PARRAINAGE | PUBLICITE
   amount      Int      // positif = recette, négatif = dépense
   description String
+  // rame et ligne concernées, pour la rentabilité détaillée (sans clé étrangère :
+  // une rame vendue ou une ligne supprimée ne doit pas effacer l'historique)
+  trainId     String?
+  lineId      String?
 
   company     Company  @relation(fields: [companyId], references: [id])
   companyId   String
 
   createdAt   DateTime @default(now())
+
+  @@index([companyId, createdAt])
 }
 
 model DailyChallenge {
@@ -353,15 +387,21 @@ model DailyChallenge {
 }
 
 model Staff {
-  id            String   @id @default(uuid())
-  role          String   // MECANICIEN | CHEF_DEPOT
-  salaryPerTick Int
-  hiredAt       DateTime @default(now())
+  id             String   @id @default(uuid())
+  role           String   // MECANICIEN | CHEF_DEPOT | DIRECTEUR_COMMERCIAL
+  name           String   @default("")
+  level          Int      @default(1)    // 1 à 5, accordé par le joueur à chaque augmentation
+  xp             Int      @default(0)    // ticks de service : c'est l'ancienneté qui fait l'expérience
+  raiseRequested Boolean  @default(false) // l'employé a atteint le niveau suivant et attend une réponse
+  refusedAtXp    Int      @default(0)    // expérience au dernier refus, pour ne pas redemander aussitôt
+  salaryPerTick  Int
+  hiredAt        DateTime @default(now())
 
-  company       Company  @relation(fields: [companyId], references: [id])
-  companyId     String
+  company        Company  @relation(fields: [companyId], references: [id])
+  companyId      String
 
-  @@unique([companyId, role])
+  // plus d'unicité par poste : on peut désormais embaucher plusieurs mécaniciens
+  @@index([companyId, role])
 }
 
 model WeatherEvent {

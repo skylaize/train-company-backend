@@ -53,11 +53,37 @@ export interface PushMessage {
 /* Envoi à tous les appareils d'une compagnie. Les abonnements morts — appareil
    réinitialisé, autorisation retirée, navigateur désinstallé — répondent 404 ou
    410 : on les supprime au lieu de réessayer indéfiniment. */
-export async function sendToCompany(companyId: string, message: PushMessage) {
-  if (!configured) return;
+export interface PushReport {
+  subscriptions: number;
+  delivered: number;
+  removed: number; // abonnements morts, supprimés
+  failed: number;
+  lastError: string | null;
+}
 
+export async function sendToCompany(companyId: string, message: PushMessage): Promise<PushReport | null> {
+  if (!configured) return null;
+
+  /* Rien de ce qui se passe ici ne doit pouvoir interrompre l'appelant.
+
+     Cette fonction est appelée au milieu de la livraison des chantiers : si
+     elle lève — table absente parce qu'une migration n'a pas été jouée, base
+     injoignable — le chantier n'est jamais marqué terminé, et le joueur reste
+     bloqué sur « mise en service » indéfiniment. Une notification ratée est un
+     désagrément ; une progression bloquée est un bug. */
+  try {
+    return await deliver(companyId, message);
+  } catch (err) {
+    console.error("[push] envoi abandonné :", (err as Error).message);
+    return { subscriptions: 0, delivered: 0, removed: 0, failed: 1, lastError: (err as Error).message };
+  }
+}
+
+async function deliver(companyId: string, message: PushMessage): Promise<PushReport> {
+  const report: PushReport = { subscriptions: 0, delivered: 0, removed: 0, failed: 0, lastError: null };
   const subs = await prisma.pushSubscription.findMany({ where: { companyId } });
-  if (subs.length === 0) return;
+  report.subscriptions = subs.length;
+  if (subs.length === 0) return report;
 
   const payload = JSON.stringify(message);
 
@@ -66,16 +92,26 @@ export async function sendToCompany(companyId: string, message: PushMessage) {
       try {
         await webpush.sendNotification(
           { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } },
-          payload
+          payload,
+          // une notification de chantier vieille de deux jours ne sert plus à rien
+          { TTL: 12 * 3600, urgency: "normal" }
         );
+        report.delivered += 1;
       } catch (err) {
         const status = (err as { statusCode?: number }).statusCode;
-        if (status === 404 || status === 410) {
+        /* 404/410 : abonnement mort (appareil réinitialisé, autorisation
+           retirée). 403 : abonnement créé avec d'autres clés VAPID — il ne
+           marchera plus jamais, autant le supprimer pour qu'il soit recréé. */
+        if (status === 404 || status === 410 || status === 403) {
+          report.removed += 1;
           await prisma.pushSubscription.delete({ where: { id: s.id } }).catch(() => undefined);
         } else {
+          report.failed += 1;
+          report.lastError = `${status ?? "?"} ${(err as Error).message}`.slice(0, 200);
           console.error("[push] envoi échoué :", status, (err as Error).message);
         }
       }
     })
   );
+  return report;
 }

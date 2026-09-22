@@ -55,22 +55,37 @@ export type ConstructionKind = "DEPOT" | "ENTREPOT" | "ENTREPOT_AGRANDISSEMENT";
 
 /* Ce qu'un chantier donné coûterait et durerait, pour l'afficher avant la
    commande. Le joueur doit voir le temps AVANT de payer, sinon le chantier est
-   une mauvaise surprise et non une décision. */
-export async function quoteFor(companyId: string, kind: ConstructionKind) {
+   une mauvaise surprise et non une décision.
+
+   `after` : le chantier en cours, quand on chiffre celui qu'on met en file
+   (Premium). Le devis doit alors porter sur l'état de la compagnie APRÈS la
+   livraison du premier — la sixième place de dépôt ne coûte pas le prix de la
+   cinquième. */
+export async function quoteFor(companyId: string, kind: ConstructionKind, after: string | null = null) {
   const company = await prisma.company.findUnique({
     where: { id: companyId },
     select: { maxTrains: true, isPremium: true },
   });
   if (!company) return null;
 
-  const warehouse = await prisma.warehouse.findUnique({ where: { companyId } });
+  const current = await prisma.warehouse.findUnique({ where: { companyId } });
+  const slots = company.maxTrains + (after === "DEPOT" ? 1 : 0);
+
+  // entrepôt tel qu'il sera à la fin du chantier en cours
+  let warehouse: { capacity: number; level: number } | null = current
+    ? { capacity: current.capacity, level: current.level }
+    : null;
+  if (after === "ENTREPOT" && !warehouse) warehouse = { capacity: WAREHOUSE_BASE_CAPACITY, level: 1 };
+  if (after === "ENTREPOT_AGRANDISSEMENT" && warehouse) {
+    warehouse = { capacity: warehouse.capacity + WAREHOUSE_CAPACITY_STEP, level: warehouse.level + 1 };
+  }
 
   if (kind === "DEPOT") {
     return {
       kind,
-      label: `Agrandissement du dépôt (${company.maxTrains + 1} places)`,
-      cost: depotExpansionCost(company.maxTrains, company.isPremium),
-      hours: depotBuildHours(company.maxTrains),
+      label: `Agrandissement du dépôt (${slots + 1} places)`,
+      cost: depotExpansionCost(slots, company.isPremium),
+      hours: depotBuildHours(slots),
       available: true,
       reason: null as string | null,
     };
@@ -99,11 +114,107 @@ export async function quoteFor(companyId: string, kind: ConstructionKind) {
   };
 }
 
+// le chantier qui avance — jamais celui qui attend en file
 export async function activeConstruction(companyId: string) {
   return prisma.construction.findFirst({
-    where: { companyId, done: false },
+    where: { companyId, done: false, queued: false },
     orderBy: { startedAt: "desc" },
   });
+}
+
+export async function queuedConstruction(companyId: string) {
+  return prisma.construction.findFirst({
+    where: { companyId, done: false, queued: true },
+    orderBy: { startedAt: "asc" },
+  });
+}
+
+/* Commande d'un chantier, lancé tout de suite ou mis en file.
+
+   La file est l'avantage Premium, et elle est volontairement étroite : UN
+   chantier en attente, pas plus. Elle n'accélère rien — le second chantier
+   dure exactement ce qu'il aurait duré — elle évite seulement qu'un dépôt
+   reste à l'arrêt pendant la nuit entre deux commandes. Le paiement se fait
+   à la commande, comme pour tout chantier : l'attente ne doit pas finir sur
+   un « trésorerie insuffisante » à 4 h du matin. */
+export async function orderConstruction(
+  companyId: string,
+  kind: ConstructionKind
+): Promise<{ construction: unknown; queued: boolean } | { error: string; status: number }> {
+  const company = await prisma.company.findUnique({
+    where: { id: companyId },
+    select: { balance: true, isPremium: true },
+  });
+  if (!company) return { error: "Créez d'abord votre compagnie", status: 404 };
+
+  const running = await activeConstruction(companyId);
+  if (running) {
+    if (!company.isPremium) {
+      return { error: "Un chantier est déjà en cours", status: 409 };
+    }
+    if (await queuedConstruction(companyId)) {
+      return { error: "Un chantier attend déjà son tour : la file n'en garde qu'un", status: 409 };
+    }
+  }
+
+  const quote = await quoteFor(companyId, kind, running ? running.kind : null);
+  if (!quote) return { error: "Devis indisponible", status: 404 };
+  if (!quote.available) return { error: quote.reason ?? "Ce chantier n'est pas disponible", status: 409 };
+  if (company.balance < quote.cost) {
+    return { error: `Trésorerie insuffisante (${quote.cost} pièces)`, status: 409 };
+  }
+
+  const durationMs = Math.round(quote.hours * 3600_000);
+  const queued = Boolean(running);
+  // en file : fin provisoire, recalée au démarrage réel
+  const startsAt = queued ? new Date(running!.endsAt) : new Date();
+
+  const [construction] = await prisma.$transaction([
+    prisma.construction.create({
+      data: {
+        companyId,
+        kind,
+        label: quote.label,
+        cost: quote.cost,
+        queued,
+        durationMs,
+        endsAt: new Date(startsAt.getTime() + durationMs),
+      },
+    }),
+    prisma.company.update({ where: { id: companyId }, data: { balance: { decrement: quote.cost } } }),
+    prisma.transaction.create({
+      data: {
+        companyId,
+        type: "CHANTIER",
+        amount: -quote.cost,
+        description: queued ? `${quote.label} — mis en file` : `${quote.label} — chantier lancé`,
+      },
+    }),
+  ]);
+
+  return { construction, queued };
+}
+
+/* Retrait du chantier en file, remboursé en entier : il n'a pas commencé. */
+export async function cancelQueued(
+  companyId: string
+): Promise<{ error: string; status: number } | { ok: true; refunded: number }> {
+  const q = await queuedConstruction(companyId);
+  if (!q) return { error: "Aucun chantier en file", status: 404 };
+
+  await prisma.$transaction([
+    prisma.construction.delete({ where: { id: q.id } }),
+    prisma.company.update({ where: { id: companyId }, data: { balance: { increment: q.cost } } }),
+    prisma.transaction.create({
+      data: {
+        companyId,
+        type: "CHANTIER",
+        amount: q.cost,
+        description: `${q.label} — retiré de la file, remboursé`,
+      },
+    }),
+  ]);
+  return { ok: true, refunded: q.cost as number };
 }
 
 /* Livraison des chantiers arrivés à terme. Appelée par le tick de simulation :
@@ -111,7 +222,7 @@ export async function activeConstruction(companyId: string) {
    l'onglet reviendrait à mettre le temps en pause. */
 export async function completeConstructions() {
   const due = await prisma.construction.findMany({
-    where: { done: false, endsAt: { lte: new Date() } },
+    where: { done: false, queued: false, endsAt: { lte: new Date() } },
   });
 
   for (const c of due as { id: string; kind: string; companyId: string; label: string }[]) {
@@ -120,9 +231,12 @@ export async function completeConstructions() {
        seul moyen qu'il l'apprenne au bon moment. Elle n'est pas réservée aux
        abonnés : prévenir de la fin d'un chantier n'est pas un avantage, c'est
        le minimum pour que l'attente reste jouable. */
+    const next = await queuedConstruction(c.companyId);
     await sendToCompany(c.companyId, {
       title: "Chantier terminé",
-      body: `${c.label} — votre compagnie peut lancer le chantier suivant.`,
+      body: next
+        ? `${c.label}. Le chantier suivant démarre : ${next.label}.`
+        : `${c.label} — votre compagnie peut lancer le chantier suivant.`,
       url: "/dashboard",
       tag: "chantier",
     });
@@ -160,6 +274,20 @@ export async function completeConstructions() {
           : []),
         prisma.construction.update({ where: { id: c.id }, data: { done: true } }),
       ]);
+    }
+
+    /* Le chantier en file démarre maintenant, pas à l'heure prévue à la
+       commande : si le tick a pris du retard, la durée reste la bonne. */
+    if (next) {
+      const now = Date.now();
+      await prisma.construction.update({
+        where: { id: next.id },
+        data: {
+          queued: false,
+          startedAt: new Date(now),
+          endsAt: new Date(now + (next.durationMs || 3600_000)),
+        },
+      });
     }
   }
 }

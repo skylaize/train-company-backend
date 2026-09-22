@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import Stripe from "stripe";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
+import { grantShopItem } from "./shop.controller";
 
 /* ============================================================
    Paiement du statut Premium, via Stripe Checkout.
@@ -102,6 +103,24 @@ export async function handleStripeWebhook(req: Request, res: Response) {
 
   if (event.type === "checkout.session.completed") {
     const session = event.data.object as Stripe.Checkout.Session;
+
+    /* Achat en boutique : même webhook, autre traitement. La marque « shop »
+       est posée par la boutique elle-même ; un paiement Premium n'en porte pas,
+       ce qui garde le parcours Premium exactement tel qu'il fonctionnait. */
+    if (session.metadata?.kind === "shop") {
+      if (session.payment_status === "paid") {
+        try {
+          await grantShopItem(session);
+        } catch (err) {
+          /* On répond quand même 200 : un 500 ferait réessayer Stripe pendant
+             trois jours, et l'erreur ne disparaîtrait pas pour autant. Le
+             journal garde la session pour une livraison à la main. */
+          console.error("[boutique] livraison échouée pour la session", session.id, err);
+        }
+      }
+      return res.json({ received: true });
+    }
+
     const companyId = session.client_reference_id ?? session.metadata?.companyId;
 
     /* Un paiement en attente n'est pas un paiement. Pour un virement ou un

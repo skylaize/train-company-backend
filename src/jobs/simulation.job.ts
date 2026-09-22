@@ -8,7 +8,21 @@ import { upkeepPerTick } from "../services/upkeep.service";
 import { computeReputation } from "../services/reputation.service";
 import { runMarketTick, runStorageFees, getCargoIndexMap, freightMultiplier } from "../services/market.service";
 import { completeConstructions } from "../services/construction.service";
+import { runMorningDigest } from "../services/report.service";
 import { checkPriceAlerts, runStandingOrders } from "../controllers/market.controller";
+import { staffEffectsByCompany, runStaffExperience, repairCostPerPoint, staffEffectsFor, CompanyStaffEffects, WEAR_PER_TICK } from "../services/staff.service";
+
+/* Arrondi aléatoire : 1,72 donne 2 dans 72 % des cas et 1 dans les autres.
+   L'usure est stockée en entier ; un arrondi classique ramenait tout taux
+   entre 1,5 et 2 à 2, si bien qu'un mécanicien partiellement efficace — ou un
+   mécanicien par canicule (1 × 1,5 = 1,5) — n'avait strictement aucun effet.
+   Ici, la moyenne sur la durée est exactement le taux voulu. */
+function stochasticRound(x: number) {
+  const f = Math.floor(x);
+  return f + (Math.random() < x - f ? 1 : 0);
+}
+
+const NO_STAFF: CompanyStaffEffects = { wearMultiplier: 1, repairMultiplier: 1, revenueMultiplier: 1 };
 
 // Tourne toutes les 30 secondes. Deux types de trajets sont gérés :
 // - Ligne voyageurs : service continu, le train repart aussitôt arrivé.
@@ -47,6 +61,7 @@ async function runSimulationTick() {
   await runLineTrains(weather);
   await runFreightContracts(weather);
   await runPayroll();
+  await runStaffExperience();
   await runUpkeep();
   // avant de réapprovisionner : les ordres périmés libèrent leur marchandise
   await expireMissions();
@@ -61,6 +76,8 @@ async function runSimulationTick() {
   await runStandingOrders();
   // chantiers arrivés à terme : dépôt agrandi, entrepôt livré
   await completeConstructions();
+  // bilan du matin : isolé, un raté ne doit pas interrompre le tick
+  await runMorningDigest().catch((err) => console.error("[bilan] échec :", (err as Error).message));
   if (tickCount % MILESTONE_EVERY === 0) await processReferralMilestones();
 }
 
@@ -102,7 +119,6 @@ async function processReferralRewards() {
   }
 }
 
-const WEAR_PER_TICK = 2;         // usure gagnée à chaque tick pour un train en service sur une ligne
 const INCIDENT_CHANCE = 0.015;   // probabilité qu'un train en ligne subisse un retard ce tick
 // Ce taux s'applique à chaque cycle de 30s pendant toute la durée du trajet : plus la ligne
 // est longue, plus il y a de cycles, donc plus d'occasions de tirer un incident. Réglé pour
@@ -147,16 +163,6 @@ async function maybeChangeWeather() {
   }
 }
 
-async function getCompaniesWithMecanicien(): Promise<Set<string>> {
-  const rows = await prisma.staff.findMany({ where: { role: "MECANICIEN" }, select: { companyId: true } });
-  return new Set(rows.map((r) => r.companyId));
-}
-
-async function getCompaniesWithDirecteurCommercial(): Promise<Set<string>> {
-  const rows = await prisma.staff.findMany({ where: { role: "DIRECTEUR_COMMERCIAL" }, select: { companyId: true } });
-  return new Set(rows.map((r) => r.companyId));
-}
-
 /* Réputations clients de toutes les compagnies, en une requête : appeler la
    base pour chaque livraison serait absurde alors que le tick en traite des dizaines. */
 async function getReputationByCompany(): Promise<Map<string, Map<string, number>>> {
@@ -182,12 +188,11 @@ async function runLineTrains(weather: string) {
     where: { status: "EN_ROUTE", lineId: { not: null } },
     include: { line: true },
   });
-  const companiesWithMecanicien = await getCompaniesWithMecanicien();
-  const companiesWithDirecteur = await getCompaniesWithDirecteurCommercial();
-  const premiumCompanyIds = await getPremiumCompanyIds();
+  const staffEffects = await staffEffectsByCompany();
   const incidentChance = weather === "VERGLAS" ? INCIDENT_CHANCE * 2 : INCIDENT_CHANCE;
 
   for (const train of runningTrains) {
+    const fx = staffEffects.get(train.companyId) ?? NO_STAFF;
     if (!train.line || !train.departedAt) continue;
 
     /* Incident aléatoire : le train perd un tick. La progression étant calculée
@@ -221,19 +226,15 @@ async function runLineTrains(weather: string) {
        valent tous les deux 1, donc l'avantage Premium annoncé était nul depuis
        le début. On accumule désormais l'usure en dixièmes de point, ce qui rend
        les fractions réelles au lieu d'être avalées par l'arrondi. */
-    let wearRate = WEAR_PER_TICK;
-    if (companiesWithMecanicien.has(train.companyId)) {
-      wearRate = WEAR_PER_TICK / 2;
-    }
+    // l'équipe de mécaniciens réduit l'usure des rames qu'elle couvre (voir staff.service)
+    let wearRate = WEAR_PER_TICK * fx.wearMultiplier;
     if (weather === "CANICULE") wearRate = wearRate * 1.5;
-    const newWear = Math.min(100, Math.round(train.wear + wearRate));
+    const newWear = Math.min(100, train.wear + stochasticRound(wearRate));
     if (newWear >= 100) {
       /* Réparation automatique en Premium : c'est du confort, pas un avantage
          économique — la facture est identique, seul l'aller-retour manuel
          disparaît. Si la trésorerie ne suit pas, la rame reste en panne. */
-      const repaired = premiumCompanyIds.has(train.companyId)
-        ? await tryAutoRepair(train.id, train.companyId, train.name)
-        : false;
+      const repaired = await tryAutoRepair(train.id, train.companyId, train.name, train.lineId);
 
       if (!repaired) {
         await prisma.train.update({
@@ -261,7 +262,7 @@ async function runLineTrains(weather: string) {
       // et par le directeur commercial en Premium), puis le trajet repart aussitôt
       const reputation = await computeReputation(train.companyId);
       const reputationMultiplier = 0.5 + (reputation / 100) * 0.5; // de 0.5x (mauvaise réputation) à 1x (parfaite)
-      const directeurBonus = companiesWithDirecteur.has(train.companyId) ? 1.15 : 1;
+      const directeurBonus = fx.revenueMultiplier;
       const revenue = Math.round(
         train.line.durationMinutes *
           REVENUE_PER_MINUTE *
@@ -283,6 +284,8 @@ async function runLineTrains(weather: string) {
             companyId: train.companyId,
             type: "REVENU_LIGNE",
             amount: revenue,
+            trainId: train.id,
+            lineId: train.lineId,
             description: `Trajet voyageurs : ${train.name} sur ${train.line.departureStation} → ${train.line.arrivalStation}`,
           },
         }),
@@ -301,14 +304,25 @@ async function runFreightContracts(weather: string) {
     where: { status: "EN_COURS" },
     include: { train: true },
   });
-  const companiesWithDirecteur = await getCompaniesWithDirecteurCommercial();
   const premiumCompanyIds = await getPremiumCompanyIds();
+  const staffEffects = await staffEffectsByCompany();
   const reputationByClient = await getReputationByCompany();
   const cargoIndex = await getCargoIndexMap();
   const incidentChance = weather === "VERGLAS" ? INCIDENT_CHANCE * 2 : INCIDENT_CHANCE;
 
   for (const contract of activeContracts) {
     if (!contract.train || !contract.acceptedAt) continue;
+
+    /* Usure du fret. Elle manquait purement et simplement : une rame affectée
+       au fret roulait indéfiniment sans jamais tomber en panne, alors que le
+       fret paie mieux qu'une ligne voyageurs. Le choix entre les deux n'en
+       était donc pas un. Mêmes règles que pour les lignes : le mécanicien
+       divise l'usure par deux, la canicule la multiplie par 1,5, et on
+       accumule en fractions pour que l'arrondi n'avale pas le bonus. */
+    const ffx = staffEffects.get(contract.companyId as string) ?? NO_STAFF;
+    let freightWearRate = WEAR_PER_TICK * ffx.wearMultiplier;
+    if (weather === "CANICULE") freightWearRate = freightWearRate * 1.5;
+    const wearNow = Math.min(100, contract.train.wear + stochasticRound(freightWearRate));
 
     // Même risque de retard aléatoire que sur les lignes voyageurs, renforcé par temps de verglas
     if (Math.random() < incidentChance) {
@@ -318,6 +332,15 @@ async function runFreightContracts(weather: string) {
           message: `Retard signalé sur le fret : ${contract.train.name} (${contract.cargoType})`,
         },
       });
+      /* Le retard doit vraiment retarder : la progression étant calculée depuis
+         l'heure d'acceptation, décaler cette heure est le seul moyen de rendre
+         l'incident réel. Sans cela, il ne coûtait rien — et faisait même sauter
+         l'usure du tour, ce qui en faisait un bonus. */
+      await prisma.contract.update({
+        where: { id: contract.id },
+        data: { acceptedAt: new Date(new Date(contract.acceptedAt).getTime() + TICK_INTERVAL_MS) },
+      });
+      await prisma.train.update({ where: { id: contract.train.id }, data: { wear: wearNow } });
       continue;
     }
 
@@ -330,8 +353,8 @@ async function runFreightContracts(weather: string) {
       // fortement la récompense et abîmant le train ; sinon récompense pleine.
       // Une rame Fret Lourd rapporte 25% de récompense en plus, le directeur commercial 15% de plus (Premium).
       let baseReward = contract.train.model === "FRET_LOURD" ? Math.round(contract.reward * 1.25) : contract.reward;
-      if (companiesWithDirecteur.has(contract.companyId as string)) {
-        baseReward = Math.round(baseReward * 1.15);
+      if (ffx.revenueMultiplier > 1) {
+        baseReward = Math.round(baseReward * ffx.revenueMultiplier);
       }
       /* Fidélité client : la réputation gagnée en honorant des ordres majore
          le tarif de TOUTES les cargaisons de ce donneur d'ordre. C'est ce qui
@@ -351,7 +374,11 @@ async function runFreightContracts(weather: string) {
       if (contract.insured) effectiveDamageChance /= 2; // la prime d'assurance réduit encore le risque de moitié
       const damaged = contract.risky && Math.random() < effectiveDamageChance;
       const payout = damaged ? Math.round(baseReward * DAMAGE_PAYOUT_RATIO) : baseReward;
-      const newWear = damaged ? Math.min(100, contract.train.wear + DAMAGE_WEAR_PENALTY) : contract.train.wear;
+      const newWear = Math.min(100, damaged ? wearNow + DAMAGE_WEAR_PENALTY : wearNow);
+      /* Une rame qui atteint l'usure maximale rentre en panne — mais seulement
+         à l'arrivée. L'immobiliser en pleine livraison laisserait la cargaison
+         dans les limbes et le contrat sans issue. */
+      const arrivesBroken = newWear >= 100;
 
       const updates: Prisma.PrismaPromise<any>[] = [
         prisma.contract.update({
@@ -360,7 +387,12 @@ async function runFreightContracts(weather: string) {
         }),
         prisma.train.update({
           where: { id: contract.train.id },
-          data: { status: "IDLE", progress: 0, departedAt: null, wear: newWear },
+          data: {
+            status: arrivesBroken ? "MAINTENANCE" : "IDLE",
+            progress: 0,
+            departedAt: null,
+            wear: newWear,
+          },
         }),
         prisma.company.update({
           where: { id: contract.companyId as string },
@@ -371,6 +403,7 @@ async function runFreightContracts(weather: string) {
             companyId: contract.companyId as string,
             type: "FRET",
             amount: payout,
+            trainId: contract.train.id,
             description: damaged
               ? `Cargaison endommagée en route : ${contract.cargoType} (${contract.originStation} → ${contract.destinationStation})`
               : `Livraison "${contract.cargoType}" (${contract.originStation} → ${contract.destinationStation})`,
@@ -396,10 +429,23 @@ async function runFreightContracts(weather: string) {
       if (!damaged) {
         await creditDelivery(contract.companyId as string, contract.cargoType);
       }
-    } else if (progress !== contract.train.progress) {
+
+      // même règle qu'en ligne : la rame qui rentre en panne est réparée si la trésorerie suit
+      if (arrivesBroken) {
+        const repaired = await tryAutoRepair(contract.train.id, contract.companyId as string, contract.train.name, null);
+        if (!repaired) {
+          await prisma.incident.create({
+            data: {
+              trainId: contract.train.id,
+              message: `${contract.train.name} est rentré en panne et nécessite une réparation`,
+            },
+          });
+        }
+      }
+    } else {
       await prisma.train.update({
         where: { id: contract.train.id },
-        data: { progress },
+        data: { progress, wear: wearNow },
       });
     }
   }
@@ -414,25 +460,47 @@ async function runFreightContracts(weather: string) {
    dégradent plus vite tant que les comptes ne suivent pas. */
 /* Tarif identique à la réparation manuelle : un chef de dépôt divise le coût
    par deux, sinon 2 pi. par point d'usure. */
-async function tryAutoRepair(trainId: string, companyId: string, trainName: string) {
-  const [company, chef] = await Promise.all([
+/* Réparation automatique — désormais pour toutes les compagnies.
+
+   Elle était réservée aux abonnés, et c'était un avantage de revenu déguisé :
+   la flotte d'un abonné continuait de rouler la nuit pendant que celle d'un
+   joueur gratuit s'arrêtait à la première panne. La facture est identique pour
+   tout le monde, seul le clic disparaît — il n'y avait donc aucune raison de le
+   faire payer.
+
+   Elle garde une limite, qui est la vraie sanction : si la trésorerie ne suit
+   pas, la rame reste en panne jusqu'à ce que le joueur intervienne.
+
+   Et elle corrige au passage un défaut : la rame réparée repassait « à quai »,
+   alors que la simulation ne fait rouler que les rames « en route ». Une rame
+   de ligne réparée automatiquement s'arrêtait donc net. Elle repart désormais
+   sur sa ligne, comme après une réparation manuelle. */
+async function tryAutoRepair(trainId: string, companyId: string, trainName: string, lineId: string | null) {
+  const [company, fx] = await Promise.all([
     prisma.company.findUnique({ where: { id: companyId }, select: { balance: true } }),
-    prisma.staff.findFirst({ where: { companyId, role: "CHEF_DEPOT" }, select: { id: true } }),
+    staffEffectsFor(companyId),
   ]);
   if (!company) return false;
 
-  const cost = Math.round(100 * (chef ? 1 : 2));
+  const cost = Math.ceil(100 * repairCostPerPoint(fx));
   if (company.balance < cost) return false;
 
   await prisma.$transaction([
-    prisma.train.update({ where: { id: trainId }, data: { wear: 0, status: "IDLE", progress: 0, departedAt: null } }),
+    prisma.train.update({
+      where: { id: trainId },
+      data: lineId
+        ? { wear: 0, status: "EN_ROUTE", progress: 0, departedAt: new Date() }
+        : { wear: 0, status: "IDLE", progress: 0, departedAt: null },
+    }),
     prisma.company.update({ where: { id: companyId }, data: { balance: { decrement: cost } } }),
     prisma.transaction.create({
       data: {
         companyId,
         type: "REPARATION",
         amount: -cost,
-        description: `Réparation automatique de ${trainName} (Premium)`,
+        description: `Réparation automatique de ${trainName}`,
+        trainId,
+        lineId,
       },
     }),
   ]);
@@ -474,10 +542,26 @@ async function runUpkeep() {
   }
 }
 
+/* Chômage technique : un mécanicien ou un chef de dépôt n'est payé que si la
+   compagnie a au moins une rame en service. Sans cela, une flotte de fret à
+   quai toute la nuit — elle attend qu'on lui confie un contrat — payait une
+   équipe qui n'avait rien à entretenir, et le joueur avait l'impression de
+   devoir rester connecté pour ne pas perdre d'argent. Le directeur commercial
+   reste payé : son travail ne dépend pas des rames qui roulent. */
+const ROLES_IDLE_WITH_FLEET = new Set(["MECANICIEN", "CHEF_DEPOT"]);
+
 async function runPayroll() {
-  const staffMembers = await prisma.staff.findMany();
+  const [staffMembers, running] = await Promise.all([
+    prisma.staff.findMany(),
+    prisma.train.groupBy({ by: ["companyId"], where: { status: "EN_ROUTE" }, _count: { _all: true } }),
+  ]);
+  const hasRunning = new Set(
+    (running as { companyId: string; _count: { _all: number } }[]).filter((r) => r._count._all > 0).map((r) => r.companyId)
+  );
 
   for (const staff of staffMembers) {
+    if (ROLES_IDLE_WITH_FLEET.has(staff.role) && !hasRunning.has(staff.companyId)) continue;
+
     const company = await prisma.company.findUnique({ where: { id: staff.companyId } });
     if (!company) continue;
 
@@ -490,7 +574,7 @@ async function runPayroll() {
             companyId: staff.companyId,
             type: "PERSONNEL",
             amount: 0,
-            description: `Un employé a quitté la compagnie faute de trésorerie suffisante`,
+            description: `${staff.name || "Un employé"} a quitté la compagnie faute de trésorerie suffisante`,
           },
         }),
       ]);

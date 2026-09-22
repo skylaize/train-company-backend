@@ -26,6 +26,27 @@ const STATION_COORDS: Record<string, { x: number; y: number }> = {
   "Bordeaux": { x: 108, y: 269 },
   "Toulouse": { x: 154, y: 322 },
   "Marseille": { x: 242, y: 335 },
+  // v1.3 — vingt gares de plus, placées avec la même projection (longitude, latitude réelles)
+  "Brest": { x: 21, y: 116 },
+  "Caen": { x: 113, y: 82 },
+  "Amiens": { x: 173, y: 52 },
+  "Reims": { x: 212, y: 79 },
+  "Troyes": { x: 213, y: 120 },
+  "Orléans": { x: 164, y: 137 },
+  "Tours": { x: 137, y: 159 },
+  "Angers": { x: 109, y: 156 },
+  "Poitiers": { x: 129, y: 194 },
+  "La Rochelle": { x: 96, y: 212 },
+  "Limoges": { x: 150, y: 226 },
+  "Clermont-Ferrand": { x: 190, y: 228 },
+  "Saint-Étienne": { x: 220, y: 243 },
+  "Besançon": { x: 256, y: 166 },
+  "Avignon": { x: 229, y: 307 },
+  "Montpellier": { x: 208, y: 322 },
+  "Nice": { x: 284, y: 318 },
+  "Perpignan": { x: 186, y: 361 },
+  "Pau": { x: 113, y: 335 },
+  "Bayonne": { x: 89, y: 327 },
 };
 
 export const STATIONS = Object.keys(STATION_COORDS);

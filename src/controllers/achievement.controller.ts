@@ -1,6 +1,7 @@
 import { Response } from "express";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
+import { mechanicCoverage } from "../services/staff.service";
 
 export async function listMyAchievements(req: AuthRequest, res: Response) {
   const company = await prisma.company.findUnique({
@@ -33,6 +34,8 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     cargoSales,
     constructionsDone,
     stockLots,
+    staffRows,
+    preventiveCount,
   ] = await Promise.all([
     prisma.contract.count({ where: { companyId: company.id, status: "LIVREE" } }),
     prisma.transaction.count({ where: { companyId: company.id, type: "REPARATION" } }),
@@ -63,6 +66,11 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     }),
     prisma.construction.count({ where: { companyId: company.id, done: true } }),
     prisma.stockLot.findMany({ where: { companyId: company.id }, select: { quantity: true } }),
+    // v1.3 : personnel nommé et révisions préventives
+    prisma.staff.findMany({ where: { companyId: company.id }, select: { role: true, level: true } }),
+    prisma.transaction.count({
+      where: { companyId: company.id, type: "REPARATION", description: { startsWith: "Révision préventive" } },
+    }),
   ]);
 
   const rank = allCompanies.findIndex((c) => c.id === company.id) + 1;
@@ -85,6 +93,21 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
   });
   const bestSale = sales.length > 0 ? Math.max(...sales) : 0;
   const totalSpeculation = sales.reduce((sum, g) => sum + g, 0);
+  /* Personnel : depuis la 1.3, on peut avoir plusieurs employés au même poste.
+     « Deux postes pourvus » compte donc les POSTES, pas les personnes — trois
+     mécaniciens ne font pas une équipe complète. */
+  const staffList = staffRows as Array<{ role: string; level: number }>;
+  const rolesFilled = new Set(staffList.map((s) => s.role)).size;
+  const bestStaffLevel = staffList.reduce((max, s) => Math.max(max, s.level), 0);
+  const mechanics = staffList.filter((s) => s.role === "MECANICIEN");
+  const mechanicSeats = mechanics.reduce((sum, m) => sum + mechanicCoverage(m.level), 0);
+  const trainCount = company._count.trains;
+
+  const lineList = linesForStations as Array<{ departureStation: string; arrivalStation: string }>;
+  const servesStation = (name: string) => lineList.some((l) => l.departureStation === name || l.arrivalStation === name);
+  const hasLine = (a: string, b: string) =>
+    lineList.some((l) => (l.departureStation === a && l.arrivalStation === b) || (l.departureStation === b && l.arrivalStation === a));
+
   const storedUnits = (stockLots as Array<{ quantity: number }>).reduce((sum, l) => sum + l.quantity, 0);
 
   // Condition remplie "en ce moment" pour chaque succès. Un succès déjà persisté reste acquis
@@ -154,7 +177,7 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
       id: "duo-gagnant",
       name: "Duo gagnant",
       description: "Avoir au moins deux postes de personnel pourvus en même temps",
-      liveMet: staffCount >= 2,
+      liveMet: rolesFilled >= 2,
     },
     {
       id: "preneur-de-risques",
@@ -208,7 +231,7 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
       id: "equipe-complete",
       name: "Équipe complète",
       description: "Avoir les trois postes de personnel pourvus en même temps",
-      liveMet: staffCount >= 3,
+      liveMet: rolesFilled >= 3,
     },
     {
       id: "assure-comme-il-faut",
@@ -319,6 +342,114 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
       name: "Bâtisseur",
       description: "Mener dix chantiers à leur terme",
       liveMet: constructionsDone >= 10,
+    },
+
+    // ---- v1.3 : le réseau s'étend ----
+    {
+      id: "tour-de-france",
+      name: "Tour de France",
+      description: "Desservir 15 gares différentes",
+      liveMet: distinctStations >= 15,
+    },
+    {
+      id: "maillage-national",
+      name: "Maillage national",
+      description: "Desservir 30 gares différentes",
+      liveMet: distinctStations >= 30,
+    },
+    {
+      id: "finistere",
+      name: "Au bout de la terre",
+      description: "Desservir Brest",
+      liveMet: servesStation("Brest"),
+    },
+    {
+      id: "train-bleu",
+      name: "Le Train bleu",
+      description: "Ouvrir une ligne entre Paris et Nice",
+      liveMet: hasLine("Paris", "Nice"),
+    },
+    {
+      id: "bout-a-bout",
+      name: "D'un bout à l'autre",
+      description: "Relier Brest et Nice, la plus longue ligne du réseau",
+      liveMet: hasLine("Brest", "Nice"),
+    },
+
+    // ---- v1.3 : le personnel ----
+    {
+      id: "bon-patron",
+      name: "Bon patron",
+      description: "Accorder une première augmentation",
+      liveMet: bestStaffLevel >= 2,
+    },
+    {
+      id: "pilier-de-la-maison",
+      name: "Pilier de la maison",
+      description: "Garder un employé jusqu'au niveau 5",
+      liveMet: bestStaffLevel >= 5,
+    },
+    {
+      id: "grand-atelier",
+      name: "Grand atelier",
+      description: "Employer quatre mécaniciens en même temps",
+      liveMet: mechanics.length >= 4,
+    },
+    {
+      id: "flotte-couverte",
+      name: "Personne n'est oublié",
+      description: "Couvrir une flotte de 8 rames ou plus entièrement par vos mécaniciens",
+      liveMet: trainCount >= 8 && mechanicSeats >= trainCount,
+    },
+    {
+      id: "mieux-vaut-prevenir",
+      name: "Mieux vaut prévenir",
+      description: "Faire réviser 10 rames avant la panne",
+      liveMet: preventiveCount >= 10,
+    },
+
+    // ---- v1.3 : les grands nombres ----
+    {
+      id: "gare-de-triage",
+      name: "Gare de triage",
+      description: "Porter le dépôt à 12 places",
+      liveMet: company.maxTrains >= 12,
+    },
+    {
+      id: "coffre-fort",
+      name: "Coffre-fort",
+      description: "Atteindre 10 000 pièces de trésorerie",
+      liveMet: company.balance >= 10_000,
+    },
+    {
+      id: "tresor-de-guerre",
+      name: "Trésor de guerre",
+      description: "Atteindre 50 000 pièces de trésorerie",
+      liveMet: company.balance >= 50_000,
+    },
+    {
+      id: "transporteur",
+      name: "Transporteur",
+      description: "Livrer 50 contrats de fret",
+      liveMet: deliveredCount >= 50,
+    },
+    {
+      id: "roi-du-fret",
+      name: "Roi du fret",
+      description: "Livrer 250 contrats de fret",
+      liveMet: deliveredCount >= 250,
+    },
+    {
+      id: "assidu",
+      name: "Assidu",
+      description: "Récupérer 30 défis quotidiens",
+      liveMet: claimedChallengesCount >= 30,
+    },
+    {
+      id: "cent-jours",
+      name: "Cent jours de service",
+      description: "Exploiter votre compagnie depuis 100 jours",
+      liveMet: daysSinceCreation >= 100,
     },
   ];
 

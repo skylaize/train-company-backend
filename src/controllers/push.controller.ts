@@ -64,14 +64,32 @@ export async function testPush(req: AuthRequest, res: Response) {
   const company = await companyOf(req);
   if (!company) return res.status(404).json({ error: "Créez d'abord votre compagnie" });
 
-  await sendToCompany(company.id, {
+  /* L'essai dit ce qui s'est passé au lieu de répondre « ok » quoi qu'il
+     arrive : c'est le seul outil du joueur (et le nôtre) pour savoir où ça
+     coince. */
+  const report = await sendToCompany(company.id, {
     title: "Réseau",
     body: "Les notifications fonctionnent. Vous serez prévenu même jeu fermé.",
     url: "/dashboard",
     tag: "test",
   });
 
-  return res.json({ ok: true });
+  if (!report) {
+    return res.status(503).json({ error: "Les notifications ne sont pas configurées sur le serveur (clés VAPID absentes)" });
+  }
+  if (report.subscriptions === 0) {
+    return res.status(409).json({ error: "Aucun appareil abonné : réactivez les notifications sur cet appareil" });
+  }
+  if (report.delivered === 0) {
+    return res.status(502).json({
+      error:
+        report.removed > 0
+          ? "L'abonnement de cet appareil n'était plus valide et a été supprimé : réactivez les notifications"
+          : `Le service de notification a refusé l'envoi (${report.lastError ?? "erreur inconnue"})`,
+      report,
+    });
+  }
+  return res.json({ ok: true, ...report });
 }
 
 export async function listPushSubscriptions(req: AuthRequest, res: Response) {

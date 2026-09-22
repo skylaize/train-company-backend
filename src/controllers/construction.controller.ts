@@ -4,6 +4,9 @@ import { prisma } from "../prisma";
 import {
   quoteFor,
   activeConstruction,
+  queuedConstruction,
+  orderConstruction,
+  cancelQueued,
   ConstructionKind,
   WAREHOUSE_CAPACITY_STEP,
 } from "../services/construction.service";
@@ -21,9 +24,9 @@ export async function getConstructions(req: AuthRequest, res: Response) {
   const company = await companyOf(req);
   if (!company) return res.status(404).json({ error: "Créez d'abord votre compagnie" });
 
-  const [current, quotes, warehouse, recent] = await Promise.all([
+  const [current, queued, warehouse, recent] = await Promise.all([
     activeConstruction(company.id),
-    Promise.all(KINDS.map((k) => quoteFor(company.id, k))),
+    queuedConstruction(company.id),
     prisma.warehouse.findUnique({ where: { companyId: company.id } }),
     prisma.construction.findMany({
       where: { companyId: company.id, done: true },
@@ -32,8 +35,16 @@ export async function getConstructions(req: AuthRequest, res: Response) {
     }),
   ]);
 
+  /* Pendant un chantier, les devis portent sur l'état d'APRÈS : c'est ce que
+     coûterait le chantier mis en file. */
+  const quotes = await Promise.all(KINDS.map((k) => quoteFor(company.id, k, current ? current.kind : null)));
+
   return res.json({
     current,
+    queued,
+    // la file : Premium, un seul chantier en attente, et seulement s'il y a un chantier en cours
+    canQueue: company.isPremium && Boolean(current) && !queued,
+    isPremium: company.isPremium,
     quotes: quotes.filter(Boolean),
     warehouse,
     capacityStep: WAREHOUSE_CAPACITY_STEP,
@@ -51,45 +62,17 @@ export async function startConstruction(req: AuthRequest, res: Response) {
     return res.status(400).json({ error: "Type de chantier inconnu" });
   }
 
-  /* Un seul chantier à la fois : c'est toute la règle. Sans elle, une grosse
-     trésorerie lancerait dix chantiers en parallèle et le temps cesserait
-     d'être une contrainte. */
-  const running = await activeConstruction(company.id);
-  if (running) {
-    return res.status(409).json({ error: "Un chantier est déjà en cours" });
-  }
+  /* Un seul chantier à la fois reste la règle : la file Premium n'en fait pas
+     avancer deux, elle en fait seulement attendre un. */
+  const result = await orderConstruction(company.id, kind);
+  if ("error" in result) return res.status(result.status).json({ error: result.error });
+  return res.status(201).json({ ...(result.construction as object), queued: result.queued });
+}
 
-  const quote = await quoteFor(company.id, kind);
-  if (!quote) return res.status(404).json({ error: "Devis indisponible" });
-  if (!quote.available) {
-    return res.status(409).json({ error: quote.reason ?? "Ce chantier n'est pas disponible" });
-  }
-  if (company.balance < quote.cost) {
-    return res.status(409).json({ error: `Trésorerie insuffisante (${quote.cost} pièces)` });
-  }
-
-  const endsAt = new Date(Date.now() + quote.hours * 3600_000);
-
-  const [construction] = await prisma.$transaction([
-    prisma.construction.create({
-      data: {
-        companyId: company.id,
-        kind,
-        label: quote.label,
-        cost: quote.cost,
-        endsAt,
-      },
-    }),
-    prisma.company.update({ where: { id: company.id }, data: { balance: { decrement: quote.cost } } }),
-    prisma.transaction.create({
-      data: {
-        companyId: company.id,
-        type: "CHANTIER",
-        amount: -quote.cost,
-        description: `${quote.label} — chantier lancé`,
-      },
-    }),
-  ]);
-
-  return res.status(201).json(construction);
+export async function cancelQueuedConstruction(req: AuthRequest, res: Response) {
+  const company = await companyOf(req);
+  if (!company) return res.status(404).json({ error: "Créez d'abord votre compagnie" });
+  const result = await cancelQueued(company.id);
+  if ("error" in result) return res.status(result.status).json({ error: result.error });
+  return res.json(result);
 }

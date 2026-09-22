@@ -32,6 +32,7 @@ export interface LeaderRow {
   id: string;
   name: string;
   liveryColor: string;
+  emblem: string | null;
   grade: string;
   gradeId: number;
   title: string | null;
@@ -73,6 +74,7 @@ export async function buildLeaderRows(): Promise<LeaderRow[]> {
           id: true,
           name: true,
           liveryColor: true,
+          emblem: true,
           balance: true,
           maxTrains: true,
           title: true,
@@ -157,6 +159,7 @@ export async function buildLeaderRows(): Promise<LeaderRow[]> {
     id: string;
     name: string;
     liveryColor: string;
+    emblem: string | null;
     balance: number;
     maxTrains: number;
     title: string | null;
@@ -183,6 +186,7 @@ export async function buildLeaderRows(): Promise<LeaderRow[]> {
       id: c.id,
       name: c.name,
       liveryColor: c.liveryColor,
+      emblem: c.emblem,
       grade: rankFromContext(ctx).name,
       gradeId: rankFromContext(ctx).id,
       title: c.title,
