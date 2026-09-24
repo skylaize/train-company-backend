@@ -42,6 +42,7 @@ model Company {
   referralMilestone Int  @default(0) // plus haut palier de parrainage déjà accordé (3, 5, 10 filleuls)
   title        String?  // titre affiché au classement : gagné (palier 5) ou choisi parmi ceux de la boutique
   emblem       String?  // emblème porté devant le nom de la compagnie, choisi parmi ceux débloqués
+  cabSkin      String?  // matériel de collection affiché dans la vue cabine (1.4), choisi parmi ceux achetés
   // Bilan de retour (Premium) : dernière activité connue, et fenêtre d'absence à résumer
   lastActiveAt       DateTime?
   lastActiveBalance  Int?
@@ -279,6 +280,9 @@ model Line {
   trains            Train[]
 
   createdAt         DateTime @default(now())
+  // concurrence (1.4) : dernier état connu, pour prévenir quand il change
+  rivals            Int      @default(0)
+  leading           Boolean  @default(true)
 }
 
 enum TrainStatus {
@@ -406,7 +410,22 @@ model Staff {
 
 model WeatherEvent {
   id        String   @id @default(uuid())
-  type      String   // BROUILLARD | CANICULE | VERGLAS
+  type      String   // BROUILLARD | CANICULE | VERGLAS | NEIGE (hiver seulement)
   startedAt DateTime @default(now())
   endsAt    DateTime
+}
+
+// Événement de gare (1.4) : salon, festival, grève… Modifie la demande d'une
+// gare pendant quelques heures, pour tout le réseau. Annoncé une heure avant
+// son début (visible des abonnés).
+model StationEvent {
+  id         String   @id @default(uuid())
+  station    String
+  label      String
+  multiplier Float
+  startsAt   DateTime @default(now())
+  endsAt     DateTime
+  createdAt  DateTime @default(now())
+
+  @@index([endsAt])
 }

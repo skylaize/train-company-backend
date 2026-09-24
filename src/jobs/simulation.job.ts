@@ -9,6 +9,8 @@ import { computeReputation } from "../services/reputation.service";
 import { runMarketTick, runStorageFees, getCargoIndexMap, freightMultiplier } from "../services/market.service";
 import { completeConstructions } from "../services/construction.service";
 import { runMorningDigest } from "../services/report.service";
+import { activeStationEvents, competitionMap, lineDemand, lineHasBoost, maybeSpawnStationEvent, pairKey, watchCompetition } from "../services/station.service";
+import { sendToCompany } from "../services/push.service";
 import { checkPriceAlerts, runStandingOrders } from "../controllers/market.controller";
 import { staffEffectsByCompany, runStaffExperience, repairCostPerPoint, staffEffectsFor, CompanyStaffEffects, WEAR_PER_TICK } from "../services/staff.service";
 
@@ -57,6 +59,8 @@ const MILESTONE_EVERY = 10;
 async function runSimulationTick() {
   tickCount += 1;
   await maybeChangeWeather();
+  // gares : un événement naît de temps en temps, annoncé une heure à l'avance
+  await maybeSpawnStationEvent().catch((err) => console.error("[gares] échec :", (err as Error).message));
   const weather = await getActiveWeather();
   await runLineTrains(weather);
   await runFreightContracts(weather);
@@ -76,6 +80,16 @@ async function runSimulationTick() {
   await runStandingOrders();
   // chantiers arrivés à terme : dépôt agrandi, entrepôt livré
   await completeConstructions();
+  // veille concurrentielle : toutes les cinq minutes suffit, un changement de tête n'est pas à la seconde
+  if (tickCount % 10 === 0) {
+    await competitionMap()
+      .then((map) =>
+        watchCompetition(map, async (companyId, title, body) => {
+          await sendToCompany(companyId, { title, body, url: "/dashboard", tag: "concurrence" });
+        })
+      )
+      .catch((err) => console.error("[concurrence] échec :", (err as Error).message));
+  }
   // bilan du matin : isolé, un raté ne doit pas interrompre le tick
   await runMorningDigest().catch((err) => console.error("[bilan] échec :", (err as Error).message));
   if (tickCount % MILESTONE_EVERY === 0) await processReferralMilestones();
@@ -148,13 +162,26 @@ async function getActiveWeather(): Promise<string> {
   return active?.type ?? "CLAIR";
 }
 
+/* La météo suit la saison, à l'heure de Paris : la neige seulement de décembre
+   à février, le verglas de novembre à mars, la canicule de mai à septembre.
+   Le brouillard peut tomber toute l'année. Une entrée apparaît plusieurs fois
+   quand elle doit être plus fréquente. */
+export function seasonalWeatherTypes(now = new Date()): string[] {
+  const month = Number(new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Paris", month: "numeric" }).format(now));
+  const types = ["BROUILLARD"];
+  if (month === 12 || month <= 2) types.push("NEIGE", "NEIGE");
+  if (month >= 11 || month <= 3) types.push("VERGLAS");
+  if (month >= 5 && month <= 9) types.push("CANICULE", ...(month >= 6 && month <= 8 ? ["CANICULE"] : []));
+  return types;
+}
+
 async function maybeChangeWeather() {
   const active = await prisma.weatherEvent.findFirst({ where: { endsAt: { gt: new Date() } } });
   if (active) return;
 
   // ~15% de chance par tick de déclencher un nouvel épisode météo (dure 3 à 6 minutes)
   if (Math.random() < 0.15) {
-    const types = ["BROUILLARD", "CANICULE", "VERGLAS"];
+    const types = seasonalWeatherTypes();
     const type = types[Math.floor(Math.random() * types.length)];
     const durationMinutes = 3 + Math.floor(Math.random() * 4);
     await prisma.weatherEvent.create({
@@ -189,7 +216,9 @@ async function runLineTrains(weather: string) {
     include: { line: true },
   });
   const staffEffects = await staffEffectsByCompany();
-  const incidentChance = weather === "VERGLAS" ? INCIDENT_CHANCE * 2 : INCIDENT_CHANCE;
+  const incidentChance = weather === "VERGLAS" ? INCIDENT_CHANCE * 2 : weather === "NEIGE" ? INCIDENT_CHANCE * 1.5 : INCIDENT_CHANCE;
+  // gares et concurrence : calculées une fois pour tout le tour
+  const [stationEvents, competition] = await Promise.all([activeStationEvents(), competitionMap()]);
 
   for (const train of runningTrains) {
     const fx = staffEffects.get(train.companyId) ?? NO_STAFF;
@@ -215,8 +244,8 @@ async function runLineTrains(weather: string) {
       continue;
     }
 
-    // Par temps de brouillard, un train peut être ralenti (pas d'avancée ce tick, sans pénalité d'usure)
-    if (weather === "BROUILLARD" && Math.random() < FOG_SLOWDOWN_CHANCE) {
+    // Par temps de brouillard ou de neige, un train peut être ralenti (pas d'avancée ce tick, sans pénalité d'usure)
+    if ((weather === "BROUILLARD" || weather === "NEIGE") && Math.random() < FOG_SLOWDOWN_CHANCE) {
       continue;
     }
 
@@ -263,12 +292,23 @@ async function runLineTrains(weather: string) {
       const reputation = await computeReputation(train.companyId);
       const reputationMultiplier = 0.5 + (reputation / 100) * 0.5; // de 0.5x (mauvaise réputation) à 1x (parfaite)
       const directeurBonus = fx.revenueMultiplier;
+      /* 1.4 : la recette dépend aussi des deux gares (taille et événements du
+         moment) et, sur une liaison partagée, de la part des voyageurs que la
+         compagnie arrive à attirer face aux autres. */
+      const dep = train.line.departureStation;
+      const arr = train.line.arrivalStation;
+      const demand = lineDemand(dep, arr, stationEvents);
+      const contenders = competition.get(pairKey(dep, arr)) ?? [];
+      const competitionMultiplier = contenders.find((c) => c.companyId === train.companyId)?.multiplier ?? 1;
+      const boosted = lineHasBoost(dep, arr, stationEvents);
       const revenue = Math.round(
         train.line.durationMinutes *
           REVENUE_PER_MINUTE *
           lengthYield(train.line.durationMinutes) *
           reputationMultiplier *
-          directeurBonus
+          directeurBonus *
+          demand *
+          competitionMultiplier
       );
       await prisma.$transaction([
         prisma.train.update({
@@ -286,7 +326,7 @@ async function runLineTrains(weather: string) {
             amount: revenue,
             trainId: train.id,
             lineId: train.lineId,
-            description: `Trajet voyageurs : ${train.name} sur ${train.line.departureStation} → ${train.line.arrivalStation}`,
+            description: `Trajet voyageurs : ${train.name} sur ${train.line.departureStation} → ${train.line.arrivalStation}${boosted ? " · affluence" : ""}`,
           },
         }),
       ]);
@@ -308,7 +348,7 @@ async function runFreightContracts(weather: string) {
   const staffEffects = await staffEffectsByCompany();
   const reputationByClient = await getReputationByCompany();
   const cargoIndex = await getCargoIndexMap();
-  const incidentChance = weather === "VERGLAS" ? INCIDENT_CHANCE * 2 : INCIDENT_CHANCE;
+  const incidentChance = weather === "VERGLAS" ? INCIDENT_CHANCE * 2 : weather === "NEIGE" ? INCIDENT_CHANCE * 1.5 : INCIDENT_CHANCE;
 
   for (const contract of activeContracts) {
     if (!contract.train || !contract.acceptedAt) continue;

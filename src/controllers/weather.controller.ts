@@ -6,6 +6,7 @@ export const WEATHER_LABELS: Record<string, string> = {
   BROUILLARD: "Brouillard sur le réseau — trains ralentis",
   CANICULE: "Canicule — usure du matériel accélérée",
   VERGLAS: "Verglas — risque de retard accru",
+  NEIGE: "Neige sur le réseau — trains ralentis, retards plus fréquents",
 };
 
 export async function getCurrentWeather(_req: AuthRequest, res: Response) {

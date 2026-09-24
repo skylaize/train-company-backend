@@ -2,6 +2,8 @@ import { Response } from "express";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
 import { mechanicCoverage } from "../services/staff.service";
+import { stationSize, STATION_SIZE } from "../services/station.service";
+import { computeCareerStatus, RANK_DEFINITIONS } from "../services/career.service";
 
 export async function listMyAchievements(req: AuthRequest, res: Response) {
   const company = await prisma.company.findUnique({
@@ -36,6 +38,8 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     stockLots,
     staffRows,
     preventiveCount,
+    affluenceTrips,
+    career,
   ] = await Promise.all([
     prisma.contract.count({ where: { companyId: company.id, status: "LIVREE" } }),
     prisma.transaction.count({ where: { companyId: company.id, type: "REPARATION" } }),
@@ -46,7 +50,10 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     prisma.contract.count({ where: { companyId: company.id, risky: true } }),
     prisma.dailyChallenge.count({ where: { companyId: company.id, claimed: true } }),
     prisma.transaction.count({ where: { companyId: company.id } }),
-    prisma.line.findMany({ where: { companyId: company.id }, select: { departureStation: true, arrivalStation: true } }),
+    prisma.line.findMany({
+      where: { companyId: company.id },
+      select: { departureStation: true, arrivalStation: true, rivals: true, leading: true },
+    }),
     prisma.achievementUnlock.findMany({ where: { companyId: company.id }, select: { achievementId: true } }),
     prisma.train.findMany({ where: { companyId: company.id }, select: { model: true }, distinct: ["model"] }),
     prisma.contract.count({ where: { companyId: company.id, insured: true } }),
@@ -71,6 +78,12 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     prisma.transaction.count({
       where: { companyId: company.id, type: "REPARATION", description: { startsWith: "Révision préventive" } },
     }),
+    // v1.4 : trajets encaissés pendant une affluence en gare
+    prisma.transaction.count({
+      where: { companyId: company.id, type: "REVENU_LIGNE", description: { endsWith: "· affluence" } },
+    }),
+    // v1.4 : carrière à dix grades
+    computeCareerStatus(company.id),
   ]);
 
   const rank = allCompanies.findIndex((c) => c.id === company.id) + 1;
@@ -103,10 +116,21 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
   const mechanicSeats = mechanics.reduce((sum, m) => sum + mechanicCoverage(m.level), 0);
   const trainCount = company._count.trains;
 
-  const lineList = linesForStations as Array<{ departureStation: string; arrivalStation: string }>;
+  const lineList = linesForStations as Array<{ departureStation: string; arrivalStation: string; rivals: number; leading: boolean }>;
+  const sharedLines = lineList.filter((l) => l.rivals >= 1);
+  const parisLines = lineList.filter((l) => l.departureStation === "Paris" || l.arrivalStation === "Paris").length;
+  const servedBig = new Set(
+    lineList.flatMap((l) => [l.departureStation, l.arrivalStation]).filter((s) => stationSize(s) >= 4)
+  ).size;
+  const bigTotal = Object.values(STATION_SIZE).filter((n) => n >= 4).length;
+  const smallLine = lineList.some((l) => stationSize(l.departureStation) <= 2 && stationSize(l.arrivalStation) <= 2);
   const servesStation = (name: string) => lineList.some((l) => l.departureStation === name || l.arrivalStation === name);
   const hasLine = (a: string, b: string) =>
     lineList.some((l) => (l.departureStation === a && l.arrivalStation === b) || (l.departureStation === b && l.arrivalStation === a));
+
+  const gradeId = career.currentRank.id;
+  const careerTitleShown = company.title != null && RANK_DEFINITIONS.some((r) => r.name === company.title);
+  const hints = (company.hintsSeen || "").split(",");
 
   const storedUnits = (stockLots as Array<{ quantity: number }>).reduce((sum, l) => sum + l.quantity, 0);
 
@@ -444,6 +468,73 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
       name: "Assidu",
       description: "Récupérer 30 défis quotidiens",
       liveMet: claimedChallengesCount >= 30,
+    },
+    // ---- v1.4 : gares vivantes et concurrence ----
+    {
+      id: "face-a-face",
+      name: "Face à face",
+      description: "Faire rouler une rame sur une ligne exploitée par une autre compagnie",
+      liveMet: sharedLines.length >= 1,
+    },
+    {
+      id: "tete-de-ligne",
+      name: "Tête de ligne",
+      description: "Prendre la tête sur une ligne partagée",
+      liveMet: sharedLines.some((l) => l.leading),
+    },
+    {
+      id: "ligne-disputee",
+      name: "Ligne disputée",
+      description: "Rester en tête face à au moins deux compagnies concurrentes",
+      liveMet: sharedLines.some((l) => l.leading && l.rivals >= 2),
+    },
+    {
+      id: "tous-les-chemins",
+      name: "Tous les chemins mènent à Paris",
+      description: "Exploiter cinq lignes au départ ou à l'arrivée de Paris",
+      liveMet: parisLines >= 5,
+    },
+    {
+      id: "metropoles",
+      name: "Les grandes métropoles",
+      description: "Desservir Paris et les huit métropoles",
+      liveMet: servedBig >= bigTotal,
+    },
+    {
+      id: "desserte-fine",
+      name: "Desserte fine",
+      description: "Ouvrir une ligne entre deux petites ou moyennes villes",
+      liveMet: smallLine,
+    },
+    {
+      id: "le-bon-moment",
+      name: "Le bon moment",
+      description: "Encaisser 10 trajets pendant une affluence en gare",
+      liveMet: affluenceTrips >= 10,
+    },
+    {
+      id: "en-cabine",
+      name: "En cabine",
+      description: "Monter à bord d'une de vos rames avec la vue cabine",
+      liveMet: hints.includes("cabine"),
+    },
+    {
+      id: "directeur-regional",
+      name: "Directeur régional",
+      description: "Atteindre le grade de Directeur régional",
+      liveMet: gradeId >= 5,
+    },
+    {
+      id: "legende-du-rail",
+      name: "Légende du rail",
+      description: "Atteindre le dernier grade de la carrière",
+      liveMet: gradeId >= RANK_DEFINITIONS.length - 1,
+    },
+    {
+      id: "nom-qui-compte",
+      name: "Un nom qui compte",
+      description: "Afficher un grade de carrière comme titre de compagnie",
+      liveMet: careerTitleShown,
     },
     {
       id: "cent-jours",

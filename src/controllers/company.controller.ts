@@ -111,7 +111,7 @@ function mergeHint(current: string, id: string) {
 }
 
 export async function updateCompany(req: AuthRequest, res: Response) {
-  const { name, liveryColor, tutorialSeen, theme, lastSeenVersion, seenHint, emblem, title } = req.body;
+  const { name, liveryColor, tutorialSeen, theme, lastSeenVersion, seenHint, emblem, title, cabSkin } = req.body;
 
   const company = await prisma.company.findUnique({ where: { ownerId: req.userId as string } });
   if (!company) {
@@ -137,6 +137,9 @@ export async function updateCompany(req: AuthRequest, res: Response) {
   if (title !== undefined && title !== null && !unlocked.titles.has(String(title))) {
     return res.status(403).json({ error: "Ce titre n'est pas débloqué pour votre compagnie" });
   }
+  if (cabSkin !== undefined && cabSkin !== null && !unlocked.cabSkins.has(String(cabSkin))) {
+    return res.status(403).json({ error: "Ce matériel n'est pas débloqué" });
+  }
   if (theme !== undefined && !unlocked.themes.has(String(theme))) {
     return res.status(403).json({ error: "Cet habillage n'est pas débloqué pour votre compagnie" });
   }
@@ -151,6 +154,7 @@ export async function updateCompany(req: AuthRequest, res: Response) {
       ...(theme !== undefined ? { theme: String(theme) } : {}),
       ...(emblem !== undefined ? { emblem: emblem === null ? null : String(emblem) } : {}),
       ...(title !== undefined ? { title: title === null ? null : String(title) } : {}),
+      ...(cabSkin !== undefined ? { cabSkin: cabSkin === null ? null : String(cabSkin) } : {}),
       ...(typeof lastSeenVersion === "string" && lastSeenVersion.length <= 20
         ? { lastSeenVersion }
         : {}),

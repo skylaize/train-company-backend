@@ -29,12 +29,14 @@ export async function getShop(req: AuthRequest, res: Response) {
       title: company.title,
       theme: company.theme,
       livery: company.liveryColor,
+      cabSkin: (company as { cabSkin?: string | null }).cabSkin ?? null,
     },
     unlocked: {
       emblems: [...unlocked.emblems],
       titles: [...unlocked.titles],
       themes: [...unlocked.themes],
       liveries: [...unlocked.liveries],
+      cabSkins: [...unlocked.cabSkins],
     },
   });
 }

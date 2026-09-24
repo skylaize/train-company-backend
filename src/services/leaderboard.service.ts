@@ -62,12 +62,38 @@ function sumByCompany(pairs: Array<[string | null, number]>) {
 const ROWS_TTL_MS = 15_000;
 let rowsCache: { at: number; rows: LeaderRow[] } | null = null;
 
+/* Décalage de Paris par rapport à UTC à un instant donné, en millisecondes
+   (+1 h l'hiver, +2 h l'été). */
+function parisOffsetMs(at: Date) {
+  const p = Object.fromEntries(
+    new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Europe/Paris", hourCycle: "h23",
+      year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit",
+    }).formatToParts(at).map((x) => [x.type, x.value])
+  );
+  const asUtc = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second);
+  return asUtc - Math.floor(at.getTime() / 1000) * 1000;
+}
+
+/* Début de la semaine en cours : lundi 00 h 00, heure de Paris. Le classement
+   « Fret de la semaine » repart de zéro à ce moment-là, et non sur sept jours
+   glissants. Le changement d'heure tombe un dimanche : on recalcule le décalage
+   à l'instant visé pour ne pas se tromper d'une heure. */
+export function startOfParisWeek(now = new Date()) {
+  const local = new Date(now.getTime() + parisOffsetMs(now)); // horloge de Paris, lue en UTC
+  const daysSinceMonday = (local.getUTCDay() + 6) % 7;
+  const mondayLocal = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate() - daysSinceMonday);
+  let guess = mondayLocal - parisOffsetMs(now);
+  guess = mondayLocal - parisOffsetMs(new Date(guess));
+  return new Date(guess);
+}
+
 export async function buildLeaderRows(): Promise<LeaderRow[]> {
-  if (rowsCache && Date.now() - rowsCache.at < ROWS_TTL_MS) return rowsCache.rows;
+  const weekStart = startOfParisWeek();
+  // le cache ne doit pas survivre au passage du lundi, sinon l'ancienne semaine reste affichée
+  if (rowsCache && Date.now() - rowsCache.at < ROWS_TTL_MS && rowsCache.at >= weekStart.getTime()) return rowsCache.rows;
 
-  const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-
-  const [companies, trains, revenue, delivered, freightWeek, goodTrips, incidents, referrals] =
+  const [companies, trains, revenue, delivered, freightWeek, goodTrips, incidents, stationLines, referrals] =
     await Promise.all([
       prisma.company.findMany({
         select: {
@@ -94,7 +120,7 @@ export async function buildLeaderRows(): Promise<LeaderRow[]> {
       }),
       prisma.transaction.groupBy({
         by: ["companyId"],
-        where: { type: "FRET", amount: { gt: 0 }, createdAt: { gte: weekAgo } },
+        where: { type: "FRET", amount: { gt: 0 }, createdAt: { gte: weekStart } },
         _count: { _all: true },
       }),
       prisma.transaction.groupBy({
@@ -105,6 +131,8 @@ export async function buildLeaderRows(): Promise<LeaderRow[]> {
       // les incidents pointent sur un train : on remonte à la compagnie côté serveur
       prisma.incident.findMany({ select: { train: { select: { companyId: true } } } }),
       // un filleul ne compte que s'il a vraiment démarré (récompense déjà versée)
+      // gares desservies, pour les grades de la 1.4
+      prisma.line.findMany({ select: { companyId: true, departureStation: true, arrivalStation: true } }),
       prisma.company.groupBy({
         by: ["referredById"],
         where: { referredById: { not: null }, referralRewardGranted: true },
@@ -148,6 +176,13 @@ export async function buildLeaderRows(): Promise<LeaderRow[]> {
       1,
     ])
   );
+  const stationsBy = new Map<string, Set<string>>();
+  for (const l of stationLines as { companyId: string; departureStation: string; arrivalStation: string }[]) {
+    const set = stationsBy.get(l.companyId) ?? new Set<string>();
+    set.add(l.departureStation);
+    set.add(l.arrivalStation);
+    stationsBy.set(l.companyId, set);
+  }
   const referralsBy = sumByCompany(
     referrals.map((r: { referredById: string | null; _count: { _all: number } }): [string | null, number] => [
       r.referredById,
@@ -180,6 +215,7 @@ export async function buildLeaderRows(): Promise<LeaderRow[]> {
       totalRevenue: revenueBy.get(c.id) ?? 0,
       reputation: ponctualite,
       maxTrains: c.maxTrains,
+      distinctStations: stationsBy.get(c.id)?.size ?? 0,
     };
 
     return {
@@ -216,7 +252,7 @@ export const BOARDS: { id: BoardId; label: string; note: string; unit: string; m
   {
     id: "livraisons",
     label: "Fret de la semaine",
-    note: "Contrats livrés ces sept derniers jours",
+    note: "Contrats livrés depuis lundi, remise à zéro chaque lundi à 0 h",
     unit: "",
     missing: "Livrez un contrat de fret cette semaine pour y figurer.",
   },

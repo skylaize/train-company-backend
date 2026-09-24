@@ -1,4 +1,5 @@
 import { prisma } from "../prisma";
+import { computeCareerStatus, careerTitles } from "./career.service";
 
 /* ============================================================
    Boutique — objets cosmétiques.
@@ -17,7 +18,7 @@ import { prisma } from "../prisma";
    titres, eux, sont choisis dans une liste fermée pour la même raison.
    ============================================================ */
 
-export type ShopItemKind = "LIVREES" | "EMBLEMES" | "TITRES" | "THEME";
+export type ShopItemKind = "LIVREES" | "EMBLEMES" | "TITRES" | "THEME" | "CABINE";
 
 export interface ShopItem {
   id: string;
@@ -30,6 +31,7 @@ export interface ShopItem {
   emblems?: string[];
   titles?: string[];
   theme?: string;
+  cabSkins?: string[];
 }
 
 export const SHOP_ITEMS: ShopItem[] = [
@@ -65,6 +67,39 @@ export const SHOP_ITEMS: ShopItem[] = [
     priceCents: 199,
     titles: ["Chef de gare", "Maître aiguilleur", "Architecte du réseau", "Seigneur des rails"],
   },
+  // ---- 1.4 ----
+  {
+    id: "livrees-regionales",
+    kind: "LIVREES",
+    name: "Livrées régionales",
+    description: "Quatre couleurs de nos régions : bleu Bretagne, rouge Alsace, lavande de Provence, vert Normandie.",
+    priceCents: 199,
+    liveries: ["#1d4e89", "#b3261e", "#8a79b8", "#3f7d3a"],
+  },
+  {
+    id: "emblemes-reseau",
+    kind: "EMBLEMES",
+    name: "Emblèmes du réseau",
+    description: "Quatre emblèmes tirés du monde ferroviaire : le rail, la boussole, l'horloge de gare et le viaduc.",
+    priceCents: 299,
+    emblems: ["rail", "boussole", "horloge", "viaduc"],
+  },
+  {
+    id: "titres-legende",
+    kind: "TITRES",
+    name: "Titres de légende",
+    description: "Quatre titres de plus pour le classement : Roi des aiguillages, Voyageur infatigable, Grand horloger, Maître du fret.",
+    priceCents: 199,
+    titles: ["Roi des aiguillages", "Voyageur infatigable", "Grand horloger", "Maître du fret"],
+  },
+  {
+    id: "cabine-collection",
+    kind: "CABINE",
+    name: "Matériel de collection",
+    description: "Dans la vue cabine, faites rouler une locomotive à vapeur et son panache, ou une Micheline rouge et crème. Uniquement pour le plaisir des yeux.",
+    priceCents: 399,
+    cabSkins: ["vapeur", "micheline"],
+  },
   {
     id: "theme-plan-1935",
     kind: "THEME",
@@ -95,15 +130,17 @@ export async function ownedItemIds(companyId: string) {
    que consultent les vérifications serveur avant d'accepter un changement de
    livrée, d'emblème, de titre ou d'habillage. */
 export async function unlockedFor(companyId: string) {
-  const [owned, company] = await Promise.all([
+  const [owned, company, career] = await Promise.all([
     ownedItemIds(companyId),
     prisma.company.findUnique({ where: { id: companyId }, select: { referralMilestone: true } }),
+    computeCareerStatus(companyId),
   ]);
 
   const liveries = new Set<string>();
   const emblems = new Set<string>();
   const titles = new Set<string>();
   const themes = new Set<string>(["sombre", "papier"]);
+  const cabSkins = new Set<string>();
 
   for (const item of SHOP_ITEMS) {
     if (!owned.has(item.id)) continue;
@@ -111,9 +148,12 @@ export async function unlockedFor(companyId: string) {
     item.emblems?.forEach((e) => emblems.add(e));
     item.titles?.forEach((t) => titles.add(t));
     if (item.theme) themes.add(item.theme);
+    item.cabSkins?.forEach((c) => cabSkins.add(c));
   }
 
   if ((company?.referralMilestone ?? 0) >= 5) titles.add(EARNED_SPONSOR_TITLE);
+  // 1.4 : chaque grade à partir du Directeur régional donne son nom en titre
+  careerTitles(career.currentRank.id).forEach((t) => titles.add(t));
 
-  return { owned, liveries, emblems, titles, themes };
+  return { owned, liveries, emblems, titles, themes, cabSkins };
 }
