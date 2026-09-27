@@ -11,6 +11,9 @@ import { completeConstructions } from "../services/construction.service";
 import { runMorningDigest } from "../services/report.service";
 import { activeStationEvents, competitionMap, lineDemand, lineHasBoost, maybeSpawnStationEvent, pairKey, watchCompetition } from "../services/station.service";
 import { sendToCompany } from "../services/push.service";
+import { seasonalStationEvents } from "../services/season.service";
+import { allStationCounts, hubMultiplier } from "../services/hub.service";
+import { runTenders } from "../services/tender.service";
 import { checkPriceAlerts, runStandingOrders } from "../controllers/market.controller";
 import { staffEffectsByCompany, runStaffExperience, repairCostPerPoint, staffEffectsFor, CompanyStaffEffects, WEAR_PER_TICK } from "../services/staff.service";
 
@@ -43,10 +46,23 @@ export function startSimulationJob() {
      boucle toutes les trente secondes.
 
      On journalise et on laisse passer : le tour suivant retentera. */
+  /* Un tour qui dépasse 30 s (base lente, beaucoup de rames) ne doit pas se
+     superposer au suivant : deux tours en parallèle paieraient deux fois les
+     mêmes arrivées. Le suivant attend donc la fin du précédent. */
+  let ticking = false;
   setInterval(() => {
-    runSimulationTick().catch((err) => {
-      console.error("[simulation] tour ignoré après erreur :", err);
-    });
+    if (ticking) {
+      console.warn("[simulation] tour précédent encore en cours, celui-ci est sauté");
+      return;
+    }
+    ticking = true;
+    runSimulationTick()
+      .catch((err) => {
+        console.error("[simulation] tour ignoré après erreur :", err);
+      })
+      .finally(() => {
+        ticking = false;
+      });
   }, TICK_INTERVAL_MS);
   console.log("Simulation du réseau démarrée (tick toutes les 30s)");
 }
@@ -80,6 +96,10 @@ async function runSimulationTick() {
   await runStandingOrders();
   // chantiers arrivés à terme : dépôt agrandi, entrepôt livré
   await completeConstructions();
+  // appels d'offres (1.5) : annonce, ouverture, attribution, subventions, clôture
+  await runTenders(async (companyId, title, body) => {
+    await sendToCompany(companyId, { title, body, url: "/dashboard", tag: "appels" });
+  }).catch((err) => console.error("[appels d'offres] échec :", (err as Error).message));
   // veille concurrentielle : toutes les cinq minutes suffit, un changement de tête n'est pas à la seconde
   if (tickCount % 10 === 0) {
     await competitionMap()
@@ -218,7 +238,10 @@ async function runLineTrains(weather: string) {
   const staffEffects = await staffEffectsByCompany();
   const incidentChance = weather === "VERGLAS" ? INCIDENT_CHANCE * 2 : weather === "NEIGE" ? INCIDENT_CHANCE * 1.5 : INCIDENT_CHANCE;
   // gares et concurrence : calculées une fois pour tout le tour
-  const [stationEvents, competition] = await Promise.all([activeStationEvents(), competitionMap()]);
+  /* 1.5 : les gares d'un temps fort de saison s'ajoutent aux événements du
+     moment, et les correspondances de chaque compagnie sont comptées une fois. */
+  const [liveEvents, competition, hubCounts] = await Promise.all([activeStationEvents(), competitionMap(), allStationCounts()]);
+  const stationEvents = [...liveEvents, ...seasonalStationEvents()];
 
   for (const train of runningTrains) {
     const fx = staffEffects.get(train.companyId) ?? NO_STAFF;
@@ -301,6 +324,8 @@ async function runLineTrains(weather: string) {
       const contenders = competition.get(pairKey(dep, arr)) ?? [];
       const competitionMultiplier = contenders.find((c) => c.companyId === train.companyId)?.multiplier ?? 1;
       const boosted = lineHasBoost(dep, arr, stationEvents);
+      // correspondances : une gare où la compagnie a plusieurs lignes rapporte plus
+      const hub = hubMultiplier(hubCounts.get(train.companyId), dep, arr);
       const revenue = Math.round(
         train.line.durationMinutes *
           REVENUE_PER_MINUTE *
@@ -308,7 +333,8 @@ async function runLineTrains(weather: string) {
           reputationMultiplier *
           directeurBonus *
           demand *
-          competitionMultiplier
+          competitionMultiplier *
+          hub
       );
       await prisma.$transaction([
         prisma.train.update({

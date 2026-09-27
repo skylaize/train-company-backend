@@ -41,12 +41,27 @@ export async function deleteAccount(req: AuthRequest, res: Response) {
     // suppression en cascade manuelle, dans l'ordre qui respecte les contraintes de clé étrangère
     await prisma.$transaction([
       prisma.incident.deleteMany({ where: { trainId: { in: trainIds } } }),
-      prisma.contract.deleteMany({ where: { companyId: company.id } }),
+      prisma.contract.deleteMany({ where: { OR: [{ companyId: company.id }, { trainId: { in: trainIds } }] } }),
       prisma.transaction.deleteMany({ where: { companyId: company.id } }),
       prisma.dailyChallenge.deleteMany({ where: { companyId: company.id } }),
       prisma.staff.deleteMany({ where: { companyId: company.id } }),
       prisma.achievementUnlock.deleteMany({ where: { companyId: company.id } }),
       prisma.adWatch.deleteMany({ where: { companyId: company.id } }),
+      prisma.tenderBid.deleteMany({ where: { companyId: company.id } }),
+      // un marché en cours sans titulaire se referme, sans quoi sa clôture échouerait à chaque tour
+      prisma.tender.updateMany({ where: { winnerId: company.id, status: "ATTRIBUE" }, data: { status: "TERMINE", objectiveMet: false } }),
+      /* Tout ce qui s'est ajouté depuis la 1.1 : sans ces lignes, la base
+         refusait de supprimer la compagnie dès que le joueur avait touché aux
+         missions, à l'entrepôt, aux alertes ou à la boutique. */
+      prisma.mission.deleteMany({ where: { companyId: company.id } }),
+      prisma.clientRelation.deleteMany({ where: { companyId: company.id } }),
+      prisma.standingOrder.deleteMany({ where: { companyId: company.id } }),
+      prisma.priceAlert.deleteMany({ where: { companyId: company.id } }),
+      prisma.stockLot.deleteMany({ where: { companyId: company.id } }),
+      prisma.warehouse.deleteMany({ where: { companyId: company.id } }),
+      prisma.construction.deleteMany({ where: { companyId: company.id } }),
+      prisma.pushSubscription.deleteMany({ where: { companyId: company.id } }),
+      prisma.shopPurchase.deleteMany({ where: { companyId: company.id } }),
       // si cette compagnie a parrainé d'autres joueurs, on détache la référence plutôt que
       // de les impacter (ils gardent leur historique, juste sans parrain associé)
       prisma.company.updateMany({ where: { referredById: company.id }, data: { referredById: null } }),

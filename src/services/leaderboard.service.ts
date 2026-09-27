@@ -1,3 +1,4 @@
+import { startOfParisWeek } from "./time.service";
 import { prisma } from "../prisma";
 import { rankFromContext, CareerContext } from "./career.service";
 
@@ -61,32 +62,6 @@ function sumByCompany(pairs: Array<[string | null, number]>) {
    ne refasse pas le même calcul pour chaque joueur. */
 const ROWS_TTL_MS = 15_000;
 let rowsCache: { at: number; rows: LeaderRow[] } | null = null;
-
-/* Décalage de Paris par rapport à UTC à un instant donné, en millisecondes
-   (+1 h l'hiver, +2 h l'été). */
-function parisOffsetMs(at: Date) {
-  const p = Object.fromEntries(
-    new Intl.DateTimeFormat("en-GB", {
-      timeZone: "Europe/Paris", hourCycle: "h23",
-      year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit",
-    }).formatToParts(at).map((x) => [x.type, x.value])
-  );
-  const asUtc = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second);
-  return asUtc - Math.floor(at.getTime() / 1000) * 1000;
-}
-
-/* Début de la semaine en cours : lundi 00 h 00, heure de Paris. Le classement
-   « Fret de la semaine » repart de zéro à ce moment-là, et non sur sept jours
-   glissants. Le changement d'heure tombe un dimanche : on recalcule le décalage
-   à l'instant visé pour ne pas se tromper d'une heure. */
-export function startOfParisWeek(now = new Date()) {
-  const local = new Date(now.getTime() + parisOffsetMs(now)); // horloge de Paris, lue en UTC
-  const daysSinceMonday = (local.getUTCDay() + 6) % 7;
-  const mondayLocal = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate() - daysSinceMonday);
-  let guess = mondayLocal - parisOffsetMs(now);
-  guess = mondayLocal - parisOffsetMs(new Date(guess));
-  return new Date(guess);
-}
 
 export async function buildLeaderRows(): Promise<LeaderRow[]> {
   const weekStart = startOfParisWeek();

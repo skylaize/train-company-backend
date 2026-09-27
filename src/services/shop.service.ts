@@ -18,7 +18,7 @@ import { computeCareerStatus, careerTitles } from "./career.service";
    titres, eux, sont choisis dans une liste fermée pour la même raison.
    ============================================================ */
 
-export type ShopItemKind = "LIVREES" | "EMBLEMES" | "TITRES" | "THEME" | "CABINE";
+export type ShopItemKind = "LIVREES" | "EMBLEMES" | "TITRES" | "THEME" | "CABINE" | "SAISON";
 
 export interface ShopItem {
   id: string;
@@ -32,6 +32,8 @@ export interface ShopItem {
   titles?: string[];
   theme?: string;
   cabSkins?: string[];
+  // 1.5 : édition limitée, vendue seulement pendant ce temps fort de saison
+  season?: string;
 }
 
 export const SHOP_ITEMS: ShopItem[] = [
@@ -99,6 +101,47 @@ export const SHOP_ITEMS: ShopItem[] = [
     description: "Dans la vue cabine, faites rouler une locomotive à vapeur et son panache, ou une Micheline rouge et crème. Uniquement pour le plaisir des yeux.",
     priceCents: 399,
     cabSkins: ["vapeur", "micheline"],
+  },
+  // ---- 1.5 : éditions de saison, en vente seulement pendant leur temps fort ----
+  {
+    id: "coffret-vendanges",
+    kind: "SAISON",
+    name: "Coffret des Vendanges",
+    description: "Édition limitée : la livrée lie-de-vin et l'emblème de la grappe. En vente pendant les Vendanges seulement.",
+    priceCents: 199,
+    liveries: ["#6b1f3a"],
+    emblems: ["grappe"],
+    season: "vendanges",
+  },
+  {
+    id: "coffret-noel",
+    kind: "SAISON",
+    name: "Coffret de Noël",
+    description: "Édition limitée : la livrée vert sapin et l'emblème du sapin. En vente pendant les Marchés de Noël seulement.",
+    priceCents: 199,
+    liveries: ["#1f4d3a"],
+    emblems: ["sapin"],
+    season: "noel",
+  },
+  {
+    id: "coffret-neiges",
+    kind: "SAISON",
+    name: "Coffret des Neiges",
+    description: "Édition limitée : la livrée blanc glacier et l'emblème du flocon. En vente pendant les Vacances de neige seulement.",
+    priceCents: 199,
+    liveries: ["#c9d9e6"],
+    emblems: ["flocon"],
+    season: "neige",
+  },
+  {
+    id: "coffret-ete",
+    kind: "SAISON",
+    name: "Coffret de l'Été",
+    description: "Édition limitée : la livrée jaune soleil et l'emblème du soleil. En vente pendant les Grandes Vacances seulement.",
+    priceCents: 199,
+    liveries: ["#e0a526"],
+    emblems: ["soleil"],
+    season: "ete",
   },
   {
     id: "theme-plan-1935",

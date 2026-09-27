@@ -4,6 +4,8 @@ import { prisma } from "../prisma";
 import { mechanicCoverage } from "../services/staff.service";
 import { stationSize, STATION_SIZE } from "../services/station.service";
 import { computeCareerStatus, RANK_DEFINITIONS } from "../services/career.service";
+import { SEASONAL_EVENTS, latestEdition } from "../services/season.service";
+import { stationCounts, withTrainCount } from "../services/hub.service";
 
 export async function listMyAchievements(req: AuthRequest, res: Response) {
   const company = await prisma.company.findUnique({
@@ -40,6 +42,8 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     preventiveCount,
     affluenceTrips,
     career,
+    wonTenders,
+    lineIdsByStation,
   ] = await Promise.all([
     prisma.contract.count({ where: { companyId: company.id, status: "LIVREE" } }),
     prisma.transaction.count({ where: { companyId: company.id, type: "REPARATION" } }),
@@ -84,7 +88,31 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     }),
     // v1.4 : carrière à dix grades
     computeCareerStatus(company.id),
+    // v1.5 : marchés remportés, et lignes par gare pour les succès de saison
+    prisma.tender.findMany({
+      where: { winnerId: company.id },
+      select: { budgetPerDay: true, winningBid: true, objectiveMet: true },
+    }),
+    prisma.line.findMany({ where: { companyId: company.id }, select: { id: true, departureStation: true, arrivalStation: true, _count: { select: { trains: true } } } }),
   ]);
+
+  /* Succès de saison : trajets encaissés sur une ligne qui dessert une gare du
+     temps fort, pendant sa dernière édition. On ne peut donc les gagner que
+     pendant la saison — une fois acquis, ils restent. */
+  const seasonTrips = new Map<string, number>();
+  for (const ev of SEASONAL_EVENTS) {
+    /* lu dans le libellé du trajet (« … sur A → B »), qui garde la liaison
+       du moment : une ligne réorientée après coup n'apporte pas ses trajets */
+    const w = latestEdition(ev);
+    const touches = ev.stations.flatMap((st) => [
+      { description: { contains: ` sur ${st} → ` } },
+      { description: { endsWith: ` → ${st}` } },
+      { description: { endsWith: ` → ${st} · affluence` } },
+    ]);
+    seasonTrips.set(ev.id, await prisma.transaction.count({
+      where: { companyId: company.id, type: "REVENU_LIGNE", createdAt: { gte: w.start, lt: w.end }, OR: touches },
+    }));
+  }
 
   const rank = allCompanies.findIndex((c) => c.id === company.id) + 1;
   const distinctStations = new Set(linesForStations.flatMap((l) => [l.departureStation, l.arrivalStation])).size;
@@ -131,6 +159,11 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
   const gradeId = career.currentRank.id;
   const careerTitleShown = company.title != null && RANK_DEFINITIONS.some((r) => r.name === company.title);
   const hints = (company.hintsSeen || "").split(",");
+
+  const won = wonTenders as { budgetPerDay: number; winningBid: number | null; objectiveMet: boolean | null }[];
+  const hubCounts = [...(stationCounts(
+    (lineIdsByStation as { departureStation: string; arrivalStation: string; _count: { trains: number } }[]).map((l) => ({ ...withTrainCount(l), companyId: company.id }))
+  ).get(company.id)?.values() ?? [])];
 
   const storedUnits = (stockLots as Array<{ quantity: number }>).reduce((sum, l) => sum + l.quantity, 0);
 
@@ -535,6 +568,75 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
       name: "Un nom qui compte",
       description: "Afficher un grade de carrière comme titre de compagnie",
       liveMet: careerTitleShown,
+    },
+    // ---- v1.5 : appels d'offres ----
+    {
+      id: "premier-marche",
+      name: "Premier marché",
+      description: "Remporter un appel d'offres",
+      liveMet: won.length >= 1,
+    },
+    {
+      id: "adjudicataire",
+      name: "Adjudicataire",
+      description: "Remporter cinq appels d'offres",
+      liveMet: won.length >= 5,
+    },
+    {
+      id: "contrat-rempli",
+      name: "Contrat rempli",
+      description: "Effectuer tous les trajets demandés par un appel d'offres",
+      liveMet: won.some((t) => t.objectiveMet === true),
+    },
+    {
+      id: "au-plus-juste",
+      name: "Au plus juste",
+      description: "Remporter un marché en demandant la moitié du budget ou moins",
+      liveMet: won.some((t) => t.winningBid !== null && t.winningBid <= t.budgetPerDay / 2),
+    },
+    // ---- v1.5 : correspondances ----
+    {
+      id: "premiere-correspondance",
+      name: "Première correspondance",
+      description: "Relier une gare à deux destinations, une rame sur chaque ligne",
+      liveMet: hubCounts.some((n) => n >= 2),
+    },
+    {
+      id: "noeud-ferroviaire",
+      name: "Nœud ferroviaire",
+      description: "Relier une gare à quatre destinations, une rame sur chaque ligne",
+      liveMet: hubCounts.some((n) => n >= 4),
+    },
+    {
+      id: "etoile-ferroviaire",
+      name: "Étoile ferroviaire",
+      description: "Avoir trois gares reliées chacune à au moins trois destinations",
+      liveMet: hubCounts.filter((n) => n >= 3).length >= 3,
+    },
+    // ---- v1.5 : temps forts de saison (à gagner pendant la saison) ----
+    {
+      id: "vendangeur",
+      name: "Vendangeur",
+      description: "Pendant les Vendanges, encaisser 50 trajets vers une gare des vignobles",
+      liveMet: (seasonTrips.get("vendanges") ?? 0) >= 50,
+    },
+    {
+      id: "esprit-de-noel",
+      name: "Esprit de Noël",
+      description: "Pendant les Marchés de Noël, encaisser 50 trajets vers une ville des marchés",
+      liveMet: (seasonTrips.get("noel") ?? 0) >= 50,
+    },
+    {
+      id: "neiges-eternelles",
+      name: "Neiges éternelles",
+      description: "Pendant les Vacances de neige, encaisser 50 trajets vers la montagne",
+      liveMet: (seasonTrips.get("neige") ?? 0) >= 50,
+    },
+    {
+      id: "grandes-vacances",
+      name: "Grandes vacances",
+      description: "Pendant les Grandes Vacances, encaisser 50 trajets vers la mer",
+      liveMet: (seasonTrips.get("ete") ?? 0) >= 50,
     },
     {
       id: "cent-jours",

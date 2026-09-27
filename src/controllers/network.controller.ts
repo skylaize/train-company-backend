@@ -14,6 +14,8 @@ import {
   SHARE_FLOOR,
   SHARE_CEIL,
 } from "../services/station.service";
+import { activeSeasonalEvent, seasonalStationEvents, upcomingSeasonalEvent } from "../services/season.service";
+import { HUB_CAP, HUB_STEP, hubMultiplier, hubsOf, stationCounts, withTrainCount } from "../services/hub.service";
 
 export async function getNetworkStats(_req: Request, res: Response) {
   const [activeCompanies, trainsInService, goodTrips, totalIncidents, recentIncidents] = await Promise.all([
@@ -51,15 +53,21 @@ export async function getNetworkMap(req: AuthRequest, res: Response) {
   });
   if (!company) return res.status(404).json({ error: "Créez d'abord votre compagnie" });
 
-  const [events, upcoming, competition, myLines] = await Promise.all([
+  const [liveEvents, upcoming, competition, myLines] = await Promise.all([
     activeStationEvents(),
     upcomingStationEvents(),
     competitionMap(),
     prisma.line.findMany({
       where: { companyId: company.id },
-      select: { id: true, departureStation: true, arrivalStation: true },
+      select: { id: true, departureStation: true, arrivalStation: true, _count: { select: { trains: true } } },
     }),
   ]);
+
+  // 1.5 : les gares du temps fort de saison comptent comme des événements
+  const events = [...liveEvents, ...seasonalStationEvents()];
+  const counts = stationCounts(
+    (myLines as { departureStation: string; arrivalStation: string; _count: { trains: number } }[]).map((l) => ({ ...withTrainCount(l), companyId: company.id }))
+  ).get(company.id);
 
   const stations = STATIONS.map((name) => ({
     name,
@@ -89,6 +97,7 @@ export async function getNetworkMap(req: AuthRequest, res: Response) {
     return {
       lineId: l.id,
       demand: Math.round(lineDemand(l.departureStation, l.arrivalStation, events) * 100) / 100,
+      hub: Math.round(hubMultiplier(counts, l.departureStation, l.arrivalStation) * 100) / 100,
       running: Boolean(mine),
       share: mine ? Math.round(mine.share * 1000) / 10 : null,
       multiplier: mine ? Math.round(mine.multiplier * 100) / 100 : null,
@@ -125,5 +134,17 @@ export async function getNetworkMap(req: AuthRequest, res: Response) {
     // le nombre seul, pour montrer au joueur gratuit qu'il se prépare quelque chose
     upcomingCount: upcoming.length,
     shareBounds: { floor: SHARE_FLOOR, ceil: SHARE_CEIL },
+    // 1.5 : correspondances de la compagnie, et règle pour prévoir l'effet d'une nouvelle ligne
+    hubs: hubsOf(counts),
+    hubRule: { step: HUB_STEP, cap: HUB_CAP },
+    season: seasonView(),
   });
+}
+
+function seasonView() {
+  const active = activeSeasonalEvent();
+  const next = active ? null : upcomingSeasonalEvent();
+  const pick = (e: any) =>
+    e && { id: e.id, name: e.name, blurb: e.blurb, stations: e.stations, multiplier: e.multiplier, startsAt: e.startsAt, endsAt: e.endsAt };
+  return { active: pick(active), next: pick(next) };
 }

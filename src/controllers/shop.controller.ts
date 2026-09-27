@@ -3,6 +3,7 @@ import Stripe from "stripe";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
 import { SHOP_ITEMS, findItem, unlockedFor } from "../services/shop.service";
+import { activeSeasonalEvent, nextEdition, seasonalEventById } from "../services/season.service";
 
 const secretKey = process.env.STRIPE_SECRET_KEY;
 const stripe = secretKey ? new Stripe(secretKey) : null;
@@ -10,7 +11,7 @@ const stripe = secretKey ? new Stripe(secretKey) : null;
 async function companyOf(req: AuthRequest) {
   return prisma.company.findUnique({
     where: { ownerId: req.userId as string },
-    select: { id: true, name: true, emblem: true, title: true, theme: true, liveryColor: true },
+    select: { id: true, name: true, emblem: true, title: true, theme: true, liveryColor: true, cabSkin: true },
   });
 }
 
@@ -22,7 +23,21 @@ export async function getShop(req: AuthRequest, res: Response) {
 
   return res.json({
     enabled: Boolean(stripe),
-    items: SHOP_ITEMS.map((item) => ({ ...item, owned: unlocked.owned.has(item.id) })),
+    /* Les éditions de saison n'apparaissent que pendant leur temps fort, ou
+       chez ceux qui les possèdent déjà. Les autres savent seulement quand
+       revient la prochaine. */
+    items: SHOP_ITEMS.filter((item) => !item.season || item.season === activeSeasonalEvent()?.id || unlocked.owned.has(item.id)).map((item) => {
+      const ev = item.season ? seasonalEventById(item.season) : null;
+      const active = ev && activeSeasonalEvent()?.id === ev.id;
+      return { ...item, owned: unlocked.owned.has(item.id), availableUntil: active ? nextEdition(ev!).end : null, seasonName: ev?.name ?? null };
+    }),
+    nextSeason: (() => {
+      if (activeSeasonalEvent()) return null;
+      const upcoming = SHOP_ITEMS.filter((i) => i.season).map((i) => ({ item: i, ev: seasonalEventById(i.season!)! }))
+        .map(({ item, ev }) => ({ name: ev.name, itemName: item.name, startsAt: nextEdition(ev).start }))
+        .sort((a, b) => a.startsAt.getTime() - b.startsAt.getTime());
+      return upcoming[0] ?? null;
+    })(),
     // ce que la compagnie porte en ce moment, pour cocher le bon choix à l'écran
     equipped: {
       emblem: company.emblem,
@@ -52,6 +67,9 @@ export async function createShopCheckout(req: AuthRequest, res: Response) {
 
   const item = findItem(String(req.body?.itemId ?? ""));
   if (!item) return res.status(404).json({ error: "Cet objet n'existe pas" });
+  if (item.season && activeSeasonalEvent()?.id !== item.season) {
+    return res.status(410).json({ error: "Cette édition limitée n'est plus en vente. Elle reviendra à sa saison." });
+  }
 
   const already = await prisma.shopPurchase.findUnique({
     where: { companyId_itemId: { companyId: company.id, itemId: item.id } },

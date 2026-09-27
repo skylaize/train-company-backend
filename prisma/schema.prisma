@@ -76,6 +76,7 @@ model Company {
   standingOrders StandingOrder[]
   pushSubscriptions PushSubscription[]
   shopPurchases ShopPurchase[]
+  tenderBids   TenderBid[]
 }
 
 // Un objet cosmétique acheté. Une ligne par objet et par compagnie : on ne
@@ -428,4 +429,51 @@ model StationEvent {
   createdAt  DateTime @default(now())
 
   @@index([endsAt])
+}
+
+// Appel d'offres (1.5) : chaque semaine, des régions cherchent une compagnie
+// pour exploiter une liaison. Offres sous pli fermé du lundi au mercredi, puis
+// la moins-disante (pondérée par la réputation) touche une subvention jusqu'au
+// lundi suivant, à condition de faire rouler ses rames sur la liaison.
+model Tender {
+  id            String   @id @default(uuid())
+  weekStart     DateTime // lundi 0 h (Paris) de la semaine du marché
+  region        String
+  stationA      String
+  stationB      String
+  budgetPerDay  Int      // plafond de subvention par jour
+  tripsRequired Int      // trajets à effectuer sur la durée du contrat
+  publishedAt   DateTime // visible des abonnés à partir d'ici
+  opensAt       DateTime // offres acceptées à partir d'ici
+  closesAt      DateTime // attribution, et début du contrat
+  endsAt        DateTime // fin du contrat
+  status        String   @default("ANNONCE") // ANNONCE | OUVERT | ATTRIBUE | INFRUCTUEUX | TERMINE
+  winnerId      String?
+  winningBid    Int?     // subvention par jour obtenue
+  activeTicks   Int      @default(0) // tours où une rame du titulaire roulait sur la liaison
+  paidTicks     Int      @default(0)
+  paidTotal     Int      @default(0)
+  trips         Int      @default(0) // trajets comptés à la clôture
+  objectiveMet  Boolean?
+  createdAt     DateTime @default(now())
+
+  bids          TenderBid[]
+
+  @@unique([weekStart, stationA, stationB])
+  @@index([status])
+  @@index([weekStart])
+}
+
+model TenderBid {
+  id        String   @id @default(uuid())
+  amount    Int      // subvention demandée par jour
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tender    Tender   @relation(fields: [tenderId], references: [id], onDelete: Cascade)
+  tenderId  String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  companyId String
+
+  @@unique([tenderId, companyId])
 }
