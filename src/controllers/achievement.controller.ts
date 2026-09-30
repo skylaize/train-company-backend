@@ -6,6 +6,7 @@ import { stationSize, STATION_SIZE } from "../services/station.service";
 import { computeCareerStatus, RANK_DEFINITIONS } from "../services/career.service";
 import { SEASONAL_EVENTS, latestEdition } from "../services/season.service";
 import { stationCounts, withTrainCount } from "../services/hub.service";
+import { INTERNATIONAL_STATIONS } from "../services/international.service";
 
 export async function listMyAchievements(req: AuthRequest, res: Response) {
   const company = await prisma.company.findUnique({
@@ -44,6 +45,8 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     career,
     wonTenders,
     lineIdsByStation,
+    intlTrips,
+    nightTrips,
   ] = await Promise.all([
     prisma.contract.count({ where: { companyId: company.id, status: "LIVREE" } }),
     prisma.transaction.count({ where: { companyId: company.id, type: "REPARATION" } }),
@@ -94,6 +97,19 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
       select: { budgetPerDay: true, winningBid: true, objectiveMet: true },
     }),
     prisma.line.findMany({ where: { companyId: company.id }, select: { id: true, departureStation: true, arrivalStation: true, _count: { select: { trains: true } } } }),
+    // v1.6 : trajets internationaux (lus dans le libellé « sur A → B ») et trajets de nuit
+    prisma.transaction.count({
+      where: {
+        companyId: company.id,
+        type: "REVENU_LIGNE",
+        OR: Object.keys(INTERNATIONAL_STATIONS).flatMap((st) => [
+          { description: { contains: ` sur ${st} → ` } },
+          { description: { endsWith: ` → ${st}` } },
+          { description: { endsWith: ` → ${st} · affluence` } },
+        ]),
+      },
+    }),
+    prisma.transaction.count({ where: { companyId: company.id, type: "REVENU_LIGNE", description: { startsWith: "Trajet de nuit" } } }),
   ]);
 
   /* Succès de saison : trajets encaissés sur une ligne qui dessert une gare du
@@ -161,6 +177,12 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
   const hints = (company.hintsSeen || "").split(",");
 
   const won = wonTenders as { budgetPerDay: number; winningBid: number | null; objectiveMet: boolean | null }[];
+  // 1.6 : décisions du directeur
+  const [decisionsTaken, promisesKept] = await Promise.all([
+    prisma.decision.count({ where: { companyId: company.id, status: "TRANCHEE" } }),
+    prisma.decision.count({ where: { companyId: company.id, goalDone: true } }),
+  ]);
+
   const hubCounts = [...(stationCounts(
     (lineIdsByStation as { departureStation: string; arrivalStation: string; _count: { trains: number } }[]).map((l) => ({ ...withTrainCount(l), companyId: company.id }))
   ).get(company.id)?.values() ?? [])];
@@ -638,13 +660,88 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
       description: "Pendant les Grandes Vacances, encaisser 50 trajets vers la mer",
       liveMet: (seasonTrips.get("ete") ?? 0) >= 50,
     },
+    // ---- v1.6 : l'international, la nuit, l'application ----
+    {
+      id: "passeport",
+      name: "Passeport ferroviaire",
+      description: "Obtenir la licence internationale",
+      liveMet: (company as { intlLicenceAt?: Date | null }).intlLicenceAt != null,
+    },
+    {
+      id: "premier-international",
+      name: "Passage de frontière",
+      description: "Encaisser un premier trajet vers ou depuis l'étranger",
+      liveMet: (intlTrips as number) >= 1,
+    },
+    {
+      id: "sous-la-manche",
+      name: "Sous la Manche",
+      description: "Exploiter une ligne vers Londres",
+      liveMet: (linesForStations as { departureStation: string; arrivalStation: string }[]).some((l) => l.departureStation === "Londres" || l.arrivalStation === "Londres"),
+    },
+    {
+      id: "tour-d-europe",
+      name: "Tour d'Europe",
+      description: "Desservir les six gares étrangères",
+      liveMet: Object.keys(INTERNATIONAL_STATIONS).every((st) =>
+        (linesForStations as { departureStation: string; arrivalStation: string }[]).some((l) => l.departureStation === st || l.arrivalStation === st)
+      ),
+    },
+    {
+      id: "train-de-nuit",
+      name: "Train de nuit",
+      description: "Mettre en service une rame couchettes",
+      liveMet: (distinctModels as { model: string }[]).some((m) => m.model === "COUCHETTES"),
+    },
+    {
+      id: "nuit-blanche",
+      name: "Nuit blanche",
+      description: "Encaisser 20 trajets de nuit en rame couchettes",
+      liveMet: (nightTrips as number) >= 20,
+    },
+    {
+      id: "sur-l-ecran",
+      name: "Sur l'écran d'accueil",
+      description: "Ouvrir Réseau depuis l'application installée",
+      liveMet: hints.includes("app"),
+    },
     {
       id: "cent-jours",
       name: "Cent jours de service",
       description: "Exploiter votre compagnie depuis 100 jours",
       liveMet: daysSinceCreation >= 100,
     },
+    // ---- 1.6 : décisions du directeur ----
+    {
+      id: "premier-arbitrage",
+      name: "Premier arbitrage",
+      description: "Trancher une décision avant son échéance",
+      liveMet: decisionsTaken >= 1,
+    },
+    {
+      id: "bureau-du-directeur",
+      name: "Le bureau du directeur",
+      description: "Trancher 25 décisions",
+      liveMet: decisionsTaken >= 25,
+    },
+    {
+      id: "promesse-tenue",
+      name: "Promesse tenue",
+      description: "Ouvrir la ligne promise à un maire dans les temps",
+      liveMet: promisesKept >= 1,
+    },
   ];
+
+  /* 1.6 : « Premiers pas » récompense la liste de départ au complet. Chaque étape
+     compte dès qu'elle a été franchie une fois, même si la rame a été vendue depuis. */
+  const FIRST_STEPS = ["premier-trace", "sur-les-rails", "entrepreneur-fret", "premiere-correspondance"];
+  const reached = (id: string) => alreadyUnlocked.has(id) || definitions.some((d) => d.id === id && d.liveMet);
+  definitions.push({
+    id: "premiers-pas",
+    name: "Premiers pas",
+    description: "Terminer la liste des premiers pas",
+    liveMet: FIRST_STEPS.every(reached),
+  });
 
   // les succès nouvellement atteints (mais pas encore persistés) sont enregistrés définitivement
   const newlyUnlocked = definitions.filter((d) => d.liveMet && !alreadyUnlocked.has(d.id));

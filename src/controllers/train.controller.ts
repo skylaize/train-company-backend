@@ -3,6 +3,7 @@ import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
 import { staffEffectsFor, repairCostPerPoint } from "../services/staff.service";
 import { buildLeaderRows } from "../services/leaderboard.service";
+import { RANK_DEFINITIONS } from "../services/career.service";
 
 async function getOwnedCompanyOrFail(userId: string) {
   return prisma.company.findUnique({ where: { ownerId: userId } });
@@ -16,7 +17,11 @@ export const TRAIN_MODELS: Record<string, { cost: number; minGradeId: number }> 
   STANDARD: { cost: 200, minGradeId: 0 },
   EXPRESS: { cost: 450, minGradeId: 1 },   // Gestionnaire confirmé
   FRET_LOURD: { cost: 450, minGradeId: 2 }, // Chef de réseau
+  COUCHETTES: { cost: 900, minGradeId: 2 }, // Chef de réseau (1.6) : train de nuit
 };
+
+/* 1.6 : la rame couchettes ne fait que les grandes lignes. */
+export const NIGHT_MIN_DURATION = 10;
 
 export async function buyTrain(req: AuthRequest, res: Response) {
   const { name, model } = req.body;
@@ -36,7 +41,7 @@ export async function buyTrain(req: AuthRequest, res: Response) {
     const rows = await buildLeaderRows();
     const gradeId = rows.find((r) => r.id === company.id)?.gradeId ?? 0;
     if (gradeId < minGradeId) {
-      const needed = minGradeId === 1 ? "Gestionnaire confirmé" : "Chef de réseau";
+      const needed = RANK_DEFINITIONS[minGradeId]?.name ?? "supérieur";
       return res.status(403).json({ error: `Ce modèle demande le grade « ${needed} »` });
     }
   }
@@ -92,6 +97,9 @@ export async function assignTrainToLine(req: AuthRequest, res: Response) {
   const line = await prisma.line.findFirst({ where: { id: lineId, companyId: company.id } });
   if (!line) {
     return res.status(404).json({ error: "Ligne introuvable" });
+  }
+  if (train.model === "COUCHETTES" && line.durationMinutes < NIGHT_MIN_DURATION) {
+    return res.status(409).json({ error: `Une rame couchettes ne fait que les grandes lignes (${NIGHT_MIN_DURATION} min de trajet ou plus)` });
   }
 
   const updated = await prisma.train.update({
@@ -223,9 +231,14 @@ export async function listMyTrains(req: AuthRequest, res: Response) {
     return res.status(404).json({ error: "Créez d'abord votre compagnie" });
   }
 
+  /* Ordre stable (1.6) : sans tri, Postgres rendait les rames dans l'ordre de
+     leur dernière mise à jour, et le tableau se réordonnait sous la souris à
+     chaque rafraîchissement — un joueur visait « Affecter » et tombait sur
+     la rame voisine. */
   const trains = await prisma.train.findMany({
     where: { companyId: company.id },
     include: { line: true },
+    orderBy: [{ purchasedAt: "asc" }, { name: "asc" }],
   });
 
   return res.json(trains);

@@ -8,6 +8,13 @@ import { depotBuildHours, activeConstruction, queuedConstruction, quoteFor, orde
 import { unlockedFor } from "../services/shop.service";
 import { touchActivity } from "../services/report.service";
 import { staffEffectsFor, repairCostPerPoint } from "../services/staff.service";
+import { buildLeaderRows } from "../services/leaderboard.service";
+import { licenceView, LICENCE_COST } from "../services/international.service";
+
+/* 1.6 : les explications « Nouveau dans cette version » annoncent un changement
+   aux joueurs déjà installés. Un nouveau joueur n'a rien connu d'avant : elles
+   lui sont épargnées d'emblée, et « Premiers pas » le guide à la place. */
+const NEWS_HINTS = ["entretien", "trains-de-nuit", "international", "correspondances", "concurrence", "carte", "classement"];
 
 const REFERRAL_SIGNUP_BONUS = 100; // versé immédiatement au nouveau joueur qui utilise un code
 const CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // sans caractères ambigus (0/O, 1/I...)
@@ -27,7 +34,7 @@ async function generateUniqueReferralCode(): Promise<string> {
 export async function createCompany(req: AuthRequest, res: Response) {
   const { name, liveryColor, referralCode } = req.body;
 
-  if (!name) {
+  if (!name || typeof name !== "string" || !name.trim()) {
     return res.status(400).json({ error: "Le nom de la compagnie est requis" });
   }
 
@@ -50,8 +57,9 @@ export async function createCompany(req: AuthRequest, res: Response) {
 
   const company = await prisma.company.create({
     data: {
-      name,
-      liveryColor: liveryColor || "#f2a900",
+      name: String(name).trim().slice(0, 40),
+      liveryColor: liveryColor && LIVERY_FREE.includes(String(liveryColor).toLowerCase()) ? String(liveryColor).toLowerCase() : "#f2a900",
+      hintsSeen: NEWS_HINTS.join(","),
       ownerId: req.userId as string,
       referralCode: newCode,
       referredById: referrer?.id ?? null,
@@ -245,4 +253,28 @@ export async function getMyCompany(req: AuthRequest, res: Response) {
     canQueue: company.isPremium && Boolean(construction) && !queuedChantier,
     upkeepPerHour: upkeepPerTick(trainCount) * TICKS_PER_HOUR,
   });
+}
+
+/* Licence internationale (1.6) : une fois achetée, les six gares étrangères
+   s'ouvrent aux lignes de la compagnie. */
+export async function buyLicence(req: AuthRequest, res: Response) {
+  const company = await prisma.company.findUnique({ where: { ownerId: req.userId as string } });
+  if (!company) return res.status(404).json({ error: "Créez d'abord votre compagnie" });
+
+  const rows = await buildLeaderRows();
+  const gradeId = rows.find((r) => r.id === company.id)?.gradeId ?? 0;
+  const view = await licenceView(company as typeof company & { intlLicenceAt: Date | null }, gradeId);
+  if (view.owned) return res.status(409).json({ error: "Votre compagnie a déjà sa licence internationale" });
+  if (!view.canBuy) return res.status(403).json({ error: view.reason ?? "Licence indisponible" });
+
+  // décompte conditionnel : deux clics rapides ne paient pas deux fois
+  const done = await prisma.company.updateMany({
+    where: { id: company.id, intlLicenceAt: null, balance: { gte: LICENCE_COST } },
+    data: { intlLicenceAt: new Date(), balance: { decrement: LICENCE_COST } },
+  });
+  if (done.count === 0) return res.status(409).json({ error: "Achat impossible, réessayez" });
+  await prisma.transaction.create({
+    data: { companyId: company.id, type: "LICENCE", amount: -LICENCE_COST, description: "Licence internationale : Londres, Bruxelles, Francfort, Genève, Milan, Barcelone" },
+  });
+  return res.status(201).json({ ok: true });
 }

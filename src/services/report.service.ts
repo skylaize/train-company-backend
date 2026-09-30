@@ -152,6 +152,8 @@ export async function profitability(companyId: string) {
       if (r[key] !== id) continue;
       const sum = r._sum.amount ?? 0;
       if (r.type === "REVENU_LIGNE") { lineRevenue += sum; trips += r._count._all; }
+      // 1.6 : le péage d'une ligne internationale se déduit de ce qu'elle rapporte
+      else if (r.type === "PEAGE") { lineRevenue += sum; }
       else if (r.type === "FRET") { freightRevenue += sum; deliveries += r._count._all; }
       else if (r.type === "REPARATION") { repairs += -sum; repairCount += r._count._all; }
     }
@@ -260,7 +262,7 @@ export async function profitability(companyId: string) {
 async function dailySeries(companyId: string, from: Date) {
   const rows = (await prisma.$queryRaw`
     SELECT to_char(date_trunc('day', ("createdAt" AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Paris'), 'YYYY-MM-DD') AS day,
-           COALESCE(SUM(CASE WHEN type IN ('REVENU_LIGNE', 'FRET') AND amount > 0 THEN amount ELSE 0 END), 0)::int AS revenue,
+           COALESCE(SUM(CASE WHEN type IN ('REVENU_LIGNE', 'FRET') AND amount > 0 THEN amount WHEN type = 'PEAGE' THEN amount ELSE 0 END), 0)::int AS revenue,
            COALESCE(SUM(CASE WHEN type = 'REPARATION' THEN -amount ELSE 0 END), 0)::int AS repairs,
            COALESCE(SUM(CASE WHEN type = 'ENTRETIEN' THEN -amount ELSE 0 END), 0)::int AS upkeep
     FROM "Transaction"
@@ -343,7 +345,7 @@ export async function windowReport(companyId: string, from: Date, to: Date) {
   }
 
   return {
-    lineRevenue: get("REVENU_LIGNE").sum,
+    lineRevenue: get("REVENU_LIGNE").sum + get("PEAGE").sum, // péages internationaux déduits
     trips: get("REVENU_LIGNE").count,
     freight: get("FRET").sum,
     deliveries: get("FRET").count,

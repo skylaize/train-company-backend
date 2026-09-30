@@ -28,6 +28,7 @@ import { pushRouter } from "./routes/push.routes";
 import { shopRouter } from "./routes/shop.routes";
 import { reportRouter } from "./routes/report.routes";
 import { tenderRouter } from "./routes/tender.routes";
+import { decisionRouter } from "./routes/decision.routes";
 import { handleStripeWebhook } from "./controllers/billing.controller";
 import { startSimulationJob } from "./jobs/simulation.job";
 
@@ -70,6 +71,7 @@ app.use("/api", pushRouter);
 app.use("/api", shopRouter);
 app.use("/api", reportRouter);
 app.use("/api", tenderRouter);
+app.use("/api", decisionRouter);
 app.use("/api", incidentRouter);
 app.use("/api", transactionRouter);
 app.use("/api", achievementRouter);

@@ -23,6 +23,22 @@ model User {
   createdAt DateTime @default(now())
 
   company   Company?
+  passwordResets PasswordReset[]
+}
+
+// Mot de passe oublié (1.6) : lien à usage unique, valable une heure. Seule
+// l'empreinte du jeton est gardée : une fuite de la base ne donne aucun lien.
+model PasswordReset {
+  id        String    @id @default(uuid())
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+
+  @@index([userId])
 }
 
 model Company {
@@ -43,6 +59,9 @@ model Company {
   title        String?  // titre affiché au classement : gagné (palier 5) ou choisi parmi ceux de la boutique
   emblem       String?  // emblème porté devant le nom de la compagnie, choisi parmi ceux débloqués
   cabSkin      String?  // matériel de collection affiché dans la vue cabine (1.4), choisi parmi ceux achetés
+  intlLicenceAt DateTime? // licence internationale (1.6) : date d'achat, null tant qu'elle n'est pas achetée
+  reputationAdjust Int  @default(0) // décisions (1.6) : points gagnés ou perdus, ajoutés à la réputation calculée
+  nextDecisionAt DateTime? // décisions (1.6) : pas de nouvelle décision avant cette heure
   // Bilan de retour (Premium) : dernière activité connue, et fenêtre d'absence à résumer
   lastActiveAt       DateTime?
   lastActiveBalance  Int?
@@ -77,6 +96,7 @@ model Company {
   pushSubscriptions PushSubscription[]
   shopPurchases ShopPurchase[]
   tenderBids   TenderBid[]
+  decisions    Decision[]
 }
 
 // Un objet cosmétique acheté. Une ligne par objet et par compagnie : on ne
@@ -295,7 +315,7 @@ enum TrainStatus {
 model Train {
   id           String      @id @default(uuid())
   name         String
-  model        String      @default("STANDARD") // STANDARD | EXPRESS | FRET_LOURD (Premium)
+  model        String      @default("STANDARD") // STANDARD | EXPRESS | FRET_LOURD | COUCHETTES (1.6)
   status       TrainStatus @default(IDLE)
 
   // progression du trajet en cours (0 = départ, 100 = arrivé)
@@ -476,4 +496,42 @@ model TenderBid {
   companyId String
 
   @@unique([tenderId, companyId])
+}
+
+// Décision (1.6) : une situation posée au directeur, avec deux ou trois
+// réponses et une échéance. Sans réponse, la réponse par défaut s'applique.
+// Certaines laissent un effet pour quelques heures (grève, tarifs) ou un
+// objectif à tenir (la ligne promise au maire).
+model Decision {
+  id              String    @id @default(uuid())
+  kind            String    // GREVE | FISSURE | FESTIVAL | MAIRE | PRESSE | RIVAL | METEO | VIP | OCCASION | TOURISME | TRAVAUX
+  title           String
+  body            String
+  place           String?
+  data            Json?     // contexte figé à la création : rame, gare, montants
+  choices         Json      // [{ id, label, effects: [{ text, tone }] }]
+  defaultChoiceId String
+  status          String    @default("OUVERTE") // OUVERTE | TRANCHEE | EXPIREE
+  chosenId        String?
+  outcome         String?
+  // effet sur la recette : une gare, ou une liaison « A|B »
+  effectKey        String?
+  effectMultiplier Float?
+  effectEndsAt     DateTime?
+  // objectif : une ligne vers cette gare avant l'échéance, contre une prime
+  goalStation     String?
+  goalReward      Int?
+  goalDeadline    DateTime?
+  goalDone        Boolean   @default(false)
+
+  company         Company   @relation(fields: [companyId], references: [id])
+  companyId       String
+
+  createdAt       DateTime  @default(now())
+  expiresAt       DateTime
+  resolvedAt      DateTime?
+
+  @@index([companyId, status])
+  @@index([status, expiresAt])
+  @@index([effectEndsAt])
 }

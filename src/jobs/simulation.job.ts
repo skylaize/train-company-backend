@@ -14,6 +14,9 @@ import { sendToCompany } from "../services/push.service";
 import { seasonalStationEvents } from "../services/season.service";
 import { allStationCounts, hubMultiplier } from "../services/hub.service";
 import { runTenders } from "../services/tender.service";
+import { runDecisions, activeDecisionEffects, decisionMultiplier } from "../services/decision.service";
+import { lineIsInternational, INTL_REVENUE_BONUS, TOLL_RATE } from "../services/international.service";
+import { isNightService, NIGHT_MULTIPLIER, DAY_COUCHETTES_MULTIPLIER } from "../services/time.service";
 import { checkPriceAlerts, runStandingOrders } from "../controllers/market.controller";
 import { staffEffectsByCompany, runStaffExperience, repairCostPerPoint, staffEffectsFor, CompanyStaffEffects, WEAR_PER_TICK } from "../services/staff.service";
 
@@ -109,6 +112,12 @@ async function runSimulationTick() {
         })
       )
       .catch((err) => console.error("[concurrence] échec :", (err as Error).message));
+  }
+  // décisions du directeur (1.6) : échéances, promesses, nouvelles situations
+  if (tickCount % 10 === 0) {
+    await runDecisions(async (companyId, title, body) => {
+      await sendToCompany(companyId, { title, body, url: "/dashboard", tag: "decision" });
+    }).catch((err) => console.error("[décisions] échec :", (err as Error).message));
   }
   // bilan du matin : isolé, un raté ne doit pas interrompre le tick
   await runMorningDigest().catch((err) => console.error("[bilan] échec :", (err as Error).message));
@@ -240,8 +249,9 @@ async function runLineTrains(weather: string) {
   // gares et concurrence : calculées une fois pour tout le tour
   /* 1.5 : les gares d'un temps fort de saison s'ajoutent aux événements du
      moment, et les correspondances de chaque compagnie sont comptées une fois. */
-  const [liveEvents, competition, hubCounts] = await Promise.all([activeStationEvents(), competitionMap(), allStationCounts()]);
+  const [liveEvents, competition, hubCounts, decisionEffects] = await Promise.all([activeStationEvents(), competitionMap(), allStationCounts(), activeDecisionEffects()]);
   const stationEvents = [...liveEvents, ...seasonalStationEvents()];
+  const night = isNightService();
 
   for (const train of runningTrains) {
     const fx = staffEffects.get(train.companyId) ?? NO_STAFF;
@@ -326,6 +336,13 @@ async function runLineTrains(weather: string) {
       const boosted = lineHasBoost(dep, arr, stationEvents);
       // correspondances : une gare où la compagnie a plusieurs lignes rapporte plus
       const hub = hubMultiplier(hubCounts.get(train.companyId), dep, arr);
+      /* 1.6 — la rame couchettes : moins confortable qu'une voiture assise le
+         jour, mais c'est elle que les voyageurs de nuit paient cher. */
+      const couchettes = train.model === "COUCHETTES";
+      const nightTrip = couchettes && night;
+      const nightMultiplier = couchettes ? (night ? NIGHT_MULTIPLIER : DAY_COUCHETTES_MULTIPLIER) : 1;
+      // 1.6 — une ligne qui passe la frontière rapporte plus, péage déduit à part
+      const international = lineIsInternational(dep, arr);
       const revenue = Math.round(
         train.line.durationMinutes *
           REVENUE_PER_MINUTE *
@@ -334,16 +351,21 @@ async function runLineTrains(weather: string) {
           directeurBonus *
           demand *
           competitionMultiplier *
-          hub
+          hub *
+          nightMultiplier *
+          // 1.6 : grève, travaux, campagne touristique… décidés par le directeur
+          decisionMultiplier(decisionEffects.get(train.companyId), dep, arr) *
+          (international ? INTL_REVENUE_BONUS : 1)
       );
-      await prisma.$transaction([
+      const toll = international ? Math.round(revenue * TOLL_RATE) : 0;
+      const ops: any[] = [
         prisma.train.update({
           where: { id: train.id },
           data: { progress: 0, departedAt: new Date(), wear: newWear },
         }),
         prisma.company.update({
           where: { id: train.companyId },
-          data: { balance: { increment: revenue } },
+          data: { balance: { increment: revenue - toll } },
         }),
         prisma.transaction.create({
           data: {
@@ -352,10 +374,25 @@ async function runLineTrains(weather: string) {
             amount: revenue,
             trainId: train.id,
             lineId: train.lineId,
-            description: `Trajet voyageurs : ${train.name} sur ${train.line.departureStation} → ${train.line.arrivalStation}${boosted ? " · affluence" : ""}`,
+            // le libellé finit toujours par « sur A → B » (et « · affluence ») : les
+            // appels d'offres et les succès de saison le relisent. La nuit se lit au début.
+            description: `${nightTrip ? "Trajet de nuit" : "Trajet voyageurs"} : ${train.name} sur ${train.line.departureStation} → ${train.line.arrivalStation}${boosted ? " · affluence" : ""}`,
           },
         }),
-      ]);
+      ];
+      if (toll > 0) {
+        ops.push(prisma.transaction.create({
+          data: {
+            companyId: train.companyId,
+            type: "PEAGE",
+            amount: -toll,
+            trainId: train.id,
+            lineId: train.lineId,
+            description: `Péage de sillon : ${train.line.departureStation} → ${train.line.arrivalStation}`,
+          },
+        }));
+      }
+      await prisma.$transaction(ops);
     } else if (progress !== train.progress || newWear !== train.wear) {
       await prisma.train.update({
         where: { id: train.id },

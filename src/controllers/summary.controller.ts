@@ -21,7 +21,8 @@ export async function getTodaySummary(req: AuthRequest, res: Response) {
     prisma.incident.count({ where: { train: { companyId: company.id }, createdAt: { gte: since } } }),
   ]);
 
-  const income = transactionsToday.filter((t) => t.amount > 0).reduce((sum, t) => sum + t.amount, 0);
+  // le capital de fondation n'est pas une recette : sinon le premier jour affiche +500 pi. sans avoir roulé
+  const income = transactionsToday.filter((t) => t.amount > 0 && t.type !== "FONDATION").reduce((sum, t) => sum + t.amount, 0);
   const expenses = transactionsToday.filter((t) => t.amount < 0).reduce((sum, t) => sum + t.amount, 0);
   const lineTrips = transactionsToday.filter((t) => t.type === "REVENU_LIGNE").length;
   const freightDeliveries = transactionsToday.filter((t) => t.type === "FRET").length;

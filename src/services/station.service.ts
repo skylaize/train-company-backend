@@ -30,6 +30,8 @@ export const STATION_SIZE: Record<string, number> = {
   "Le Havre": 2, "Le Mans": 2, Brest: 2, Caen: 2, Amiens: 2, Limoges: 2, Avignon: 2, Mulhouse: 2,
   Perpignan: 2, "Besançon": 2, Poitiers: 2, Pau: 2, Bayonne: 2,
   Chartres: 1, Troyes: 1, "La Rochelle": 1,
+  // 1.6 : l'étranger
+  Londres: 5, Bruxelles: 4, Francfort: 4, Milan: 4, Barcelone: 4, "Genève": 3,
 };
 
 export const SIZE_LABEL: Record<number, string> = {
@@ -71,7 +73,7 @@ const EVENT_TEMPLATES: EventTemplate[] = [
     multiplier: 1.3,
     minHours: 3,
     maxHours: 6,
-    stations: ["Nice", "Marseille", "Perpignan", "Bayonne", "La Rochelle", "Montpellier", "Avignon", "Brest", "Paris", "Pau"],
+    stations: ["Nice", "Marseille", "Perpignan", "Bayonne", "La Rochelle", "Montpellier", "Avignon", "Brest", "Paris", "Pau", "Londres", "Barcelone"],
   },
   { label: "Grève locale", multiplier: 0.65, minHours: 1, maxHours: 3, minSize: 1 },
   { label: "Travaux en gare", multiplier: 0.8, minHours: 2, maxHours: 4, minSize: 1 },

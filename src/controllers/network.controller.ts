@@ -16,6 +16,10 @@ import {
 } from "../services/station.service";
 import { activeSeasonalEvent, seasonalStationEvents, upcomingSeasonalEvent } from "../services/season.service";
 import { HUB_CAP, HUB_STEP, hubMultiplier, hubsOf, stationCounts, withTrainCount } from "../services/hub.service";
+import { INTERNATIONAL_STATIONS, INTL_REVENUE_BONUS, TOLL_RATE, licenceView } from "../services/international.service";
+import { isNightService, NIGHT_FROM, NIGHT_TO, NIGHT_MULTIPLIER, DAY_COUCHETTES_MULTIPLIER } from "../services/time.service";
+import { buildLeaderRows } from "../services/leaderboard.service";
+import { NIGHT_MIN_DURATION } from "./train.controller";
 
 export async function getNetworkStats(_req: Request, res: Response) {
   const [activeCompanies, trainsInService, goodTrips, totalIncidents, recentIncidents] = await Promise.all([
@@ -49,9 +53,10 @@ export async function getNetworkStats(_req: Request, res: Response) {
 export async function getNetworkMap(req: AuthRequest, res: Response) {
   const company = await prisma.company.findUnique({
     where: { ownerId: req.userId as string },
-    select: { id: true, isPremium: true },
+    select: { id: true, isPremium: true, balance: true, intlLicenceAt: true },
   });
   if (!company) return res.status(404).json({ error: "Créez d'abord votre compagnie" });
+  const gradeId = (await buildLeaderRows()).find((r) => r.id === company.id)?.gradeId ?? 0;
 
   const [liveEvents, upcoming, competition, myLines] = await Promise.all([
     activeStationEvents(),
@@ -138,6 +143,14 @@ export async function getNetworkMap(req: AuthRequest, res: Response) {
     hubs: hubsOf(counts),
     hubRule: { step: HUB_STEP, cap: HUB_CAP },
     season: seasonView(),
+    // 1.6 : gares à l'étranger et licence, service de nuit
+    international: {
+      stations: Object.entries(INTERNATIONAL_STATIONS).map(([name, v]) => ({ name, ...v })),
+      licence: await licenceView(company as { intlLicenceAt: Date | null; isPremium: boolean; balance: number }, gradeId),
+      revenueBonus: INTL_REVENUE_BONUS,
+      tollRate: TOLL_RATE,
+    },
+    night: { active: isNightService(), from: NIGHT_FROM, to: NIGHT_TO, multiplier: NIGHT_MULTIPLIER, dayMultiplier: DAY_COUCHETTES_MULTIPLIER, minDuration: NIGHT_MIN_DURATION },
   });
 }
 

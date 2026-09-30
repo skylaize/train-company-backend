@@ -42,3 +42,23 @@ export function startOfParisWeek(now = new Date()) {
 }
 
 export const DAY_MS = 86_400_000;
+
+/* Heure de Paris (0–23) à un instant donné. */
+export function parisHour(at = new Date()) {
+  return new Date(at.getTime() + parisOffsetMs(at)).getUTCHours();
+}
+
+/* Service de nuit (1.6) : de 22 h à 6 h, heure de Paris. */
+export const NIGHT_FROM = 22;
+export const NIGHT_TO = 6;
+export function isNightService(at = new Date()) {
+  const h = parisHour(at);
+  return h >= NIGHT_FROM || h < NIGHT_TO;
+}
+
+/* Trains de nuit : de 22 h à 6 h, un trajet en rame couchettes rapporte trois
+   fois plus ; le jour, 20 % de moins qu'une rame assise. Sur une journée, elle
+   rapporte environ une fois et demie une rame Standard, pour un prix plus de
+   quatre fois plus élevé. */
+export const NIGHT_MULTIPLIER = 3;
+export const DAY_COUCHETTES_MULTIPLIER = 0.8;
