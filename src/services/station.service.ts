@@ -145,6 +145,15 @@ export function lineDemand(a: string, b: string, events: StationEvent[]) {
   return (stationDemand(a, events) + stationDemand(b, events)) / 2;
 }
 
+/* 1.7 : demande d'un itinéraire complet, arrêts compris : la moyenne de ses gares. */
+export function routeDemand(route: string[], events: StationEvent[]) {
+  return route.reduce((sum, s) => sum + stationDemand(s, events), 0) / Math.max(1, route.length);
+}
+
+export function routeHasBoost(route: string[], events: StationEvent[]) {
+  return events.some((e) => route.includes(e.station) && e.multiplier > 1);
+}
+
 export function lineHasBoost(a: string, b: string, events: StationEvent[]) {
   return events.some((e) => (e.station === a || e.station === b) && e.multiplier > 1);
 }

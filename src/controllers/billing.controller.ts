@@ -3,6 +3,7 @@ import Stripe from "stripe";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
 import { grantShopItem } from "./shop.controller";
+import { hasAdFree, AD_FREE_ITEM } from "../services/shop.service";
 
 /* ============================================================
    Paiement du statut Premium, via Stripe Checkout.
@@ -18,6 +19,18 @@ import { grantShopItem } from "./shop.controller";
 
 const secretKey = process.env.STRIPE_SECRET_KEY;
 const priceId = process.env.STRIPE_PREMIUM_PRICE_ID;
+/* 1.7 : passage au Premium pour qui a déjà le billet sans pub. Second prix
+   libre dans Stripe, avec un minimum plus bas (4 €) ; sans lui, le prix normal. */
+const upgradePriceId = process.env.STRIPE_PREMIUM_UPGRADE_PRICE_ID;
+/* Montants affichés dans le jeu. Ils doivent correspondre aux réglages des prix
+   dans Stripe : minimum, et « montant prédéfini » (le prix conseillé, pré-rempli). */
+const cents = (v: string | undefined, d: number) => (v && /^\d+$/.test(v) ? Number(v) : d);
+const PRICES = {
+  min: cents(process.env.PREMIUM_MIN_CENTS, 599),
+  suggested: cents(process.env.PREMIUM_SUGGESTED_CENTS, 799),
+  upgradeMin: cents(process.env.PREMIUM_UPGRADE_MIN_CENTS, 400),
+  upgradeSuggested: cents(process.env.PREMIUM_UPGRADE_SUGGESTED_CENTS, 599),
+};
 const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
 /* Tant que les variables d'environnement ne sont pas renseignées, la vente est
@@ -29,8 +42,18 @@ export function billingEnabled() {
   return Boolean(stripe && priceId && webhookSecret);
 }
 
-export async function getBillingStatus(_req: AuthRequest, res: Response) {
-  return res.json({ enabled: billingEnabled() });
+export async function getBillingStatus(req: AuthRequest, res: Response) {
+  const company = req.userId
+    ? ((await prisma.company.findUnique({ where: { ownerId: req.userId as string }, select: { id: true } })) as { id: string } | null)
+    : null;
+  const upgrade = Boolean(company && upgradePriceId && (await hasAdFree(company.id)));
+  return res.json({
+    enabled: billingEnabled(),
+    upgrade,
+    minCents: upgrade ? PRICES.upgradeMin : PRICES.min,
+    suggestedCents: upgrade ? PRICES.upgradeSuggested : PRICES.suggested,
+    adFreeCents: AD_FREE_ITEM.priceCents,
+  });
 }
 
 export async function createCheckoutSession(req: AuthRequest, res: Response) {
@@ -60,7 +83,8 @@ export async function createCheckoutSession(req: AuthRequest, res: Response) {
   try {
     const session = await stripe.checkout.sessions.create({
       mode: "payment", // achat unique : pas d'abonnement, donc pas de renouvellement à gérer
-      line_items: [{ price: priceId, quantity: 1 }],
+      // 1.7 : déjà propriétaire du billet sans pub → second prix libre, minimum plus bas
+      line_items: [{ price: upgradePriceId && (await hasAdFree(company.id)) ? upgradePriceId : priceId, quantity: 1 }],
       /* C'est par là que le webhook retrouvera la compagnie à créditer. On ne se
          fie pas à l'e-mail : un joueur peut payer avec une autre adresse. */
       client_reference_id: company.id,

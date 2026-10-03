@@ -11,7 +11,7 @@ const stripe = secretKey ? new Stripe(secretKey) : null;
 async function companyOf(req: AuthRequest) {
   return prisma.company.findUnique({
     where: { ownerId: req.userId as string },
-    select: { id: true, name: true, emblem: true, title: true, theme: true, liveryColor: true, cabSkin: true },
+    select: { id: true, name: true, emblem: true, title: true, theme: true, liveryColor: true, cabSkin: true, plate: true },
   });
 }
 
@@ -45,6 +45,7 @@ export async function getShop(req: AuthRequest, res: Response) {
       theme: company.theme,
       livery: company.liveryColor,
       cabSkin: (company as { cabSkin?: string | null }).cabSkin ?? null,
+      plate: (company as { plate?: string | null }).plate ?? null,
     },
     unlocked: {
       emblems: [...unlocked.emblems],
@@ -52,6 +53,7 @@ export async function getShop(req: AuthRequest, res: Response) {
       themes: [...unlocked.themes],
       liveries: [...unlocked.liveries],
       cabSkins: [...unlocked.cabSkins],
+      plates: [...unlocked.plates],
     },
   });
 }
@@ -69,6 +71,10 @@ export async function createShopCheckout(req: AuthRequest, res: Response) {
   if (!item) return res.status(404).json({ error: "Cet objet n'existe pas" });
   if (item.season && activeSeasonalEvent()?.id !== item.season) {
     return res.status(410).json({ error: "Cette édition limitée n'est plus en vente. Elle reviendra à sa saison." });
+  }
+
+  if (item.kind === "SANS_PUB" && (company as { isPremium?: boolean }).isPremium) {
+    return res.status(409).json({ error: "Le Premium n'affiche déjà aucune publicité" });
   }
 
   const already = await prisma.shopPurchase.findUnique({
@@ -102,7 +108,7 @@ export async function createShopCheckout(req: AuthRequest, res: Response) {
       custom_text: {
         submit: {
           message:
-            "Objet cosmétique livré immédiatement dans votre compagnie. En payant, vous demandez cette livraison immédiate et renoncez au délai de rétractation de 14 jours.",
+            "Contenu numérique livré immédiatement dans votre compagnie. En payant, vous demandez cette livraison immédiate et renoncez au délai de rétractation de 14 jours.",
         },
       },
       success_url: `${site}/dashboard?boutique=ok&objet=${encodeURIComponent(item.id)}`,

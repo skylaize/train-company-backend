@@ -1,3 +1,4 @@
+import { AD_FREE_ITEM_ID } from "../services/shop.service";
 import { Response } from "express";
 import { Prisma } from "@prisma/client";
 import { AuthRequest } from "../middleware/auth.middleware";
@@ -119,7 +120,7 @@ function mergeHint(current: string, id: string) {
 }
 
 export async function updateCompany(req: AuthRequest, res: Response) {
-  const { name, liveryColor, tutorialSeen, theme, lastSeenVersion, seenHint, emblem, title, cabSkin } = req.body;
+  const { name, liveryColor, tutorialSeen, theme, lastSeenVersion, seenHint, emblem, title, cabSkin, plate } = req.body;
 
   const company = await prisma.company.findUnique({ where: { ownerId: req.userId as string } });
   if (!company) {
@@ -148,6 +149,9 @@ export async function updateCompany(req: AuthRequest, res: Response) {
   if (cabSkin !== undefined && cabSkin !== null && !unlocked.cabSkins.has(String(cabSkin))) {
     return res.status(403).json({ error: "Ce matériel n'est pas débloqué" });
   }
+  if (plate !== undefined && plate !== null && !unlocked.plates.has(String(plate))) {
+    return res.status(403).json({ error: "Cette plaque n'est pas débloquée" });
+  }
   if (theme !== undefined && !unlocked.themes.has(String(theme))) {
     return res.status(403).json({ error: "Cet habillage n'est pas débloqué pour votre compagnie" });
   }
@@ -163,6 +167,7 @@ export async function updateCompany(req: AuthRequest, res: Response) {
       ...(emblem !== undefined ? { emblem: emblem === null ? null : String(emblem) } : {}),
       ...(title !== undefined ? { title: title === null ? null : String(title) } : {}),
       ...(cabSkin !== undefined ? { cabSkin: cabSkin === null ? null : String(cabSkin) } : {}),
+      ...(plate !== undefined ? { plate: plate === null ? null : String(plate) } : {}),
       ...(typeof lastSeenVersion === "string" && lastSeenVersion.length <= 20
         ? { lastSeenVersion }
         : {}),
@@ -252,6 +257,8 @@ export async function getMyCompany(req: AuthRequest, res: Response) {
     queuedConstruction: queuedChantier,
     canQueue: company.isPremium && Boolean(construction) && !queuedChantier,
     upkeepPerHour: upkeepPerTick(trainCount) * TICKS_PER_HOUR,
+    // 1.7 : billet sans pub (le Premium n'en affiche pas non plus)
+    adFree: unlocked.owned.has(AD_FREE_ITEM_ID),
   });
 }
 

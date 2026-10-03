@@ -1,6 +1,8 @@
+import { isInternational } from "./international.service";
 import { startOfParisWeek } from "./time.service";
 import { prisma } from "../prisma";
 import { rankFromContext, CareerContext } from "./career.service";
+import { extraWorth } from "./infrastructure.service";
 
 /* Prix d'achat des rames : sert à valoriser le parc, pas seulement les liquidités.
    Doit rester aligné sur TRAIN_MODELS dans train.controller.ts. */
@@ -8,6 +10,7 @@ const TRAIN_VALUE: Record<string, number> = {
   STANDARD: 200,
   EXPRESS: 450,
   FRET_LOURD: 450,
+  COUCHETTES: 900,
 };
 
 /* Une rame usée à 100 % ne vaut plus que la moitié de son prix. */
@@ -37,6 +40,7 @@ export interface LeaderRow {
   grade: string;
   gradeId: number;
   title: string | null;
+  plate: string | null; // 1.7 : plaque d'honneur
   trains: number;
   lines: number;
   valeur: number;
@@ -68,7 +72,7 @@ export async function buildLeaderRows(): Promise<LeaderRow[]> {
   // le cache ne doit pas survivre au passage du lundi, sinon l'ancienne semaine reste affichée
   if (rowsCache && Date.now() - rowsCache.at < ROWS_TTL_MS && rowsCache.at >= weekStart.getTime()) return rowsCache.rows;
 
-  const [companies, trains, revenue, delivered, freightWeek, goodTrips, incidents, stationLines, referrals] =
+  const [companies, trains, revenue, delivered, freightWeek, goodTrips, incidents, stationLines, referrals, extra, owned17, workshops17, electrified17] =
     await Promise.all([
       prisma.company.findMany({
         select: {
@@ -79,6 +83,7 @@ export async function buildLeaderRows(): Promise<LeaderRow[]> {
           balance: true,
           maxTrains: true,
           title: true,
+          plate: true,
           _count: { select: { trains: true, lines: true, staff: true } },
         },
       }),
@@ -107,13 +112,23 @@ export async function buildLeaderRows(): Promise<LeaderRow[]> {
       prisma.incident.findMany({ select: { train: { select: { companyId: true } } } }),
       // un filleul ne compte que s'il a vraiment démarré (récompense déjà versée)
       // gares desservies, pour les grades de la 1.4
-      prisma.line.findMany({ select: { companyId: true, departureStation: true, arrivalStation: true } }),
+      prisma.line.findMany({ select: { companyId: true, departureStation: true, arrivalStation: true, stops: true } }),
       prisma.company.groupBy({
         by: ["referredById"],
         where: { referredById: { not: null }, referralRewardGranted: true },
         _count: { _all: true },
       }),
+      // 1.7 : gares, ateliers, actions détenues, moins les emprunts en cours
+      extraWorth(),
+      // 1.7 : pour les grades de l'infrastructure
+      prisma.stationOwnership.groupBy({ by: ["companyId"], _count: { _all: true } }),
+      prisma.workshop.groupBy({ by: ["companyId"], _count: { _all: true } }),
+      prisma.line.groupBy({ by: ["companyId"], where: { electrified: true }, _count: { _all: true } }),
     ]);
+  const countBy = (rows: unknown) => new Map((rows as { companyId: string; _count: { _all: number } }[]).map((r) => [r.companyId, r._count._all]));
+  const ownedBy = countBy(owned17);
+  const workshopsBy = countBy(workshops17);
+  const electrifiedBy = countBy(electrified17);
 
   const trainWorthByCompany = sumByCompany(
     trains.map((t: { companyId: string; model: string; wear: number }): [string | null, number] => [
@@ -152,10 +167,11 @@ export async function buildLeaderRows(): Promise<LeaderRow[]> {
     ])
   );
   const stationsBy = new Map<string, Set<string>>();
-  for (const l of stationLines as { companyId: string; departureStation: string; arrivalStation: string }[]) {
+  for (const l of stationLines as { companyId: string; departureStation: string; arrivalStation: string; stops?: string[] }[]) {
     const set = stationsBy.get(l.companyId) ?? new Set<string>();
     set.add(l.departureStation);
     set.add(l.arrivalStation);
+    for (const s of l.stops ?? []) set.add(s);
     stationsBy.set(l.companyId, set);
   }
   const referralsBy = sumByCompany(
@@ -191,6 +207,10 @@ export async function buildLeaderRows(): Promise<LeaderRow[]> {
       reputation: ponctualite,
       maxTrains: c.maxTrains,
       distinctStations: stationsBy.get(c.id)?.size ?? 0,
+      stationsOwned: ownedBy.get(c.id) ?? 0,
+      workshops: workshopsBy.get(c.id) ?? 0,
+      electrifiedLines: electrifiedBy.get(c.id) ?? 0,
+      foreignStations: [...(stationsBy.get(c.id) ?? [])].filter(isInternational).length,
     };
 
     return {
@@ -201,10 +221,11 @@ export async function buildLeaderRows(): Promise<LeaderRow[]> {
       grade: rankFromContext(ctx).name,
       gradeId: rankFromContext(ctx).id,
       title: c.title,
+      plate: (c as { plate?: string | null }).plate ?? null,
       trains: c._count.trains,
       lines: c._count.lines,
       // la valeur remplace la trésorerie brute : acheter une rame ne fait plus reculer
-      valeur: c.balance + (trainWorthByCompany.get(c.id) ?? 0) + depotInvestment(c.maxTrains),
+      valeur: c.balance + (trainWorthByCompany.get(c.id) ?? 0) + depotInvestment(c.maxTrains) + ((extra as Map<string, number>).get(c.id) ?? 0),
       livraisons: freightWeekBy.get(c.id) ?? 0,
       ponctualite,
       ponctualiteSample: sample,

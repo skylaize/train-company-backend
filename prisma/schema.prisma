@@ -58,6 +58,7 @@ model Company {
   referralMilestone Int  @default(0) // plus haut palier de parrainage déjà accordé (3, 5, 10 filleuls)
   title        String?  // titre affiché au classement : gagné (palier 5) ou choisi parmi ceux de la boutique
   emblem       String?  // emblème porté devant le nom de la compagnie, choisi parmi ceux débloqués
+  plate        String?  // 1.7.1 : plaque d'honneur portée au classement (laiton, email, or)
   cabSkin      String?  // matériel de collection affiché dans la vue cabine (1.4), choisi parmi ceux achetés
   intlLicenceAt DateTime? // licence internationale (1.6) : date d'achat, null tant qu'elle n'est pas achetée
   reputationAdjust Int  @default(0) // décisions (1.6) : points gagnés ou perdus, ajoutés à la réputation calculée
@@ -97,6 +98,17 @@ model Company {
   shopPurchases ShopPurchase[]
   tenderBids   TenderBid[]
   decisions    Decision[]
+  // 1.7 : infrastructures, emprunts, bourse
+  stationsOwned StationOwnership[]
+  workshops    Workshop[]
+  loans        Loan[]
+  holdings     Shareholding[] @relation("Holder")
+  shareholders Shareholding[] @relation("Issuer")
+  sharePrices  SharePrice[]
+  stockOrders  StockOrder[]
+  sharePrice   Float    @default(0) // cours de référence, recalculé toutes les heures
+  lastWeeklyReport String? // semaine (AAAA-MM-JJ du lundi, heure de Paris) du dernier rapport hebdo notifié
+  lastDividendOn String?  // jour (AAAA-MM-JJ, heure de Paris) du dernier versement de dividendes
 }
 
 // Un objet cosmétique acheté. Une ligne par objet et par compagnie : on ne
@@ -293,7 +305,12 @@ model Line {
   name              String
   departureStation  String
   arrivalStation    String
-  durationMinutes   Int      // temps de trajet simulé, en minutes
+  durationMinutes   Int      // temps de trajet simulé, en minutes (arrêts compris)
+  // 1.7 : arrêts intermédiaires dans l'ordre, prix du billet (1 = prix normal), électrification
+  stops             String[] @default([])
+  priceRatio        Float    @default(1)
+  electrified       Boolean  @default(false)
+  autoPrice         Boolean  @default(false) // Premium : le prix se cale chaque heure sur le prix conseillé
 
   company           Company  @relation(fields: [companyId], references: [id])
   companyId         String
@@ -321,9 +338,14 @@ model Train {
   // progression du trajet en cours (0 = départ, 100 = arrivé)
   progress     Int         @default(0)
   departedAt   DateTime?
-
   // usure du matériel (0 = neuf, 100 = en panne, nécessite réparation)
   wear         Int         @default(0)
+
+  // 1.7 : sens de marche (0 = aller, 1 = retour), voitures ajoutées, dernier trajet
+  direction      Int      @default(0)
+  cars           String[] @default([])
+  lastPassengers Int?
+  lastSeats      Int?
 
   company      Company     @relation(fields: [companyId], references: [id])
   companyId    String
@@ -534,4 +556,122 @@ model Decision {
   @@index([companyId, status])
   @@index([status, expiresAt])
   @@index([effectEndsAt])
+}
+
+
+// ============================================================
+// 1.7 — Infrastructures
+// ============================================================
+
+// Une gare achetée. Un seul propriétaire par gare : les autres compagnies qui
+// s'y arrêtent lui versent une redevance de quai, et tous les voyageurs qui y
+// passent font vivre ses commerces. Rachetable par un concurrent (au prix fort)
+// une fois la période de protection passée.
+model StationOwnership {
+  station        String   @id
+  level          Int      @default(1) // 1 à 3 : taille des commerces
+  invested       Int      // prix d'achat + agrandissements, base du rachat
+  protectedUntil DateTime
+  pendingFees    Int      @default(0) // redevances de quai en attente de versement (versées toutes les heures)
+  pendingShops   Int      @default(0) // recettes des commerces en attente de versement
+  totalFees      Int      @default(0)
+  totalShops     Int      @default(0)
+  boughtAt       DateTime @default(now())
+  protectionNotified Boolean @default(false) // Premium : fin de protection déjà signalée
+
+  company        Company  @relation(fields: [companyId], references: [id])
+  companyId      String
+}
+
+// Un atelier régional : les rames qui desservent sa gare s'usent moins.
+model Workshop {
+  id        String   @id @default(uuid())
+  station   String
+  createdAt DateTime @default(now())
+
+  company   Company  @relation(fields: [companyId], references: [id])
+  companyId String
+
+  @@unique([companyId, station])
+}
+
+// ============================================================
+// 1.7 — Finances
+// ============================================================
+
+// Un emprunt bancaire, remboursé automatiquement par mensualités horaires.
+model Loan {
+  id          String    @id @default(uuid())
+  principal   Int
+  ratePct     Float     // intérêt total sur la durée, en %
+  totalDue    Int       // principal + intérêts
+  remaining   Int
+  hours       Int       // durée, en heures
+  missed      Int       @default(0) // échéances impayées
+  createdAt   DateTime  @default(now())
+  lastPaidAt  DateTime  @default(now())
+  closedAt    DateTime?
+  warnedAt    DateTime? // Premium : alerte « trésorerie trop basse pour l'échéance » déjà envoyée
+
+  company     Company   @relation(fields: [companyId], references: [id])
+  companyId   String
+
+  @@index([companyId, closedAt])
+}
+
+// Actions d'une compagnie détenues par une autre.
+model Shareholding {
+  id        String  @id @default(uuid())
+  shares    Int
+  invested  Int     // pièces dépensées (frais compris), pour la plus-value
+
+  holder    Company @relation("Holder", fields: [holderId], references: [id])
+  holderId  String
+  issuer    Company @relation("Issuer", fields: [issuerId], references: [id])
+  issuerId  String
+
+  @@unique([holderId, issuerId])
+  @@index([issuerId])
+}
+
+// Historique horaire du cours d'une compagnie.
+model SharePrice {
+  id        String   @id @default(uuid())
+  price     Float
+  at        DateTime @default(now())
+
+  company   Company  @relation(fields: [companyId], references: [id])
+  companyId String
+
+  @@index([companyId, at])
+}
+
+// Premium : un ordre de bourse à cours limite, exécuté par la simulation.
+model StockOrder {
+  id         String   @id @default(uuid())
+  issuerId   String
+  side       String   // BUY | SELL
+  shares     Int
+  limitPrice Float
+  createdAt  DateTime @default(now())
+
+  company    Company  @relation(fields: [companyId], references: [id])
+  companyId  String
+
+  @@index([companyId])
+}
+
+// Remplissage d'une ligne heure par heure (48 h gardées), pour la courbe Premium.
+model LineLoadHour {
+  id         String   @id @default(uuid())
+  lineId     String
+  companyId  String
+  hour       DateTime // début de l'heure
+  trips      Int      @default(0)
+  passengers Int      @default(0)
+  seats      Int      @default(0)
+  left       Int      @default(0)
+
+  @@unique([lineId, hour])
+  @@index([companyId, hour])
 }

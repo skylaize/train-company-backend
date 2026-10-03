@@ -3,7 +3,9 @@ import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
 import { mechanicCoverage } from "../services/staff.service";
 import { stationSize, STATION_SIZE } from "../services/station.service";
-import { computeCareerStatus, RANK_DEFINITIONS } from "../services/career.service";
+import { computeCareerStatus, RANK_DEFINITIONS, LEGEND_RANK } from "../services/career.service";
+import { PEAK_HOURS, OFF_PEAK_HOURS } from "../services/peak.service";
+import { parisHour } from "../services/time.service";
 import { SEASONAL_EVENTS, latestEdition } from "../services/season.service";
 import { stationCounts, withTrainCount } from "../services/hub.service";
 import { INTERNATIONAL_STATIONS } from "../services/international.service";
@@ -59,7 +61,7 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     prisma.transaction.count({ where: { companyId: company.id } }),
     prisma.line.findMany({
       where: { companyId: company.id },
-      select: { departureStation: true, arrivalStation: true, rivals: true, leading: true },
+      select: { departureStation: true, arrivalStation: true, stops: true, rivals: true, leading: true },
     }),
     prisma.achievementUnlock.findMany({ where: { companyId: company.id }, select: { achievementId: true } }),
     prisma.train.findMany({ where: { companyId: company.id }, select: { model: true }, distinct: ["model"] }),
@@ -96,7 +98,7 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
       where: { winnerId: company.id },
       select: { budgetPerDay: true, winningBid: true, objectiveMet: true },
     }),
-    prisma.line.findMany({ where: { companyId: company.id }, select: { id: true, departureStation: true, arrivalStation: true, _count: { select: { trains: true } } } }),
+    prisma.line.findMany({ where: { companyId: company.id }, select: { id: true, departureStation: true, arrivalStation: true, stops: true, _count: { select: { trains: true } } } }),
     // v1.6 : trajets internationaux (lus dans le libellé « sur A → B ») et trajets de nuit
     prisma.transaction.count({
       where: {
@@ -131,7 +133,7 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
   }
 
   const rank = allCompanies.findIndex((c) => c.id === company.id) + 1;
-  const distinctStations = new Set(linesForStations.flatMap((l) => [l.departureStation, l.arrivalStation])).size;
+  const distinctStations = new Set((linesForStations as { departureStation: string; arrivalStation: string; stops?: string[] }[]).flatMap((l) => [l.departureStation, ...(l.stops ?? []), l.arrivalStation])).size;
   const alreadyUnlocked = new Set(existingUnlocks.map((u) => u.achievementId));
   const daysSinceCreation = (Date.now() - new Date(company.createdAt).getTime()) / (1000 * 60 * 60 * 24);
 
@@ -182,9 +184,35 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     prisma.decision.count({ where: { companyId: company.id, status: "TRANCHEE" } }),
     prisma.decision.count({ where: { companyId: company.id, goalDone: true } }),
   ]);
+  // 1.7 : itinéraires, composition, infrastructures, finances
+  const [lines17, trains17, stationsOwned, electrified, workshopsOpen, loansRepaid, dividends] = (await Promise.all([
+    prisma.line.findMany({ where: { companyId: company.id }, select: { stops: true, priceRatio: true } }),
+    prisma.train.findMany({ where: { companyId: company.id }, select: { cars: true, lastPassengers: true, lastSeats: true } }),
+    prisma.stationOwnership.count({ where: { companyId: company.id } }),
+    prisma.line.count({ where: { companyId: company.id, electrified: true } }),
+    prisma.workshop.count({ where: { companyId: company.id } }),
+    prisma.loan.count({ where: { companyId: company.id, closedAt: { not: null }, missed: 0 } }),
+    prisma.transaction.count({ where: { companyId: company.id, type: "DIVIDENDE" } }),
+  ])) as [
+    { stops: string[]; priceRatio: number }[],
+    { cars: string[]; lastPassengers: number | null; lastSeats: number | null }[],
+    number, number, number, number, number
+  ];
+  const longestRoute = Math.max(0, ...lines17.map((l) => (l.stops ?? []).length));
+  /* 1.7 : heures de pointe. Le remplissage heure par heure des deux derniers
+     jours dit si une ligne a fait le plein à la pointe, ou rempli ses rames en
+     plein creux de l'après-midi. */
+  const loadHours = (await prisma.lineLoadHour.findMany({
+    where: { companyId: company.id, trips: { gt: 0 } },
+    select: { hour: true, passengers: true, seats: true },
+  })) as { hour: Date; passengers: number; seats: number }[];
+  const rushFull = loadHours.some((h) => PEAK_HOURS.includes(parisHour(h.hour)) && h.seats > 0 && h.passengers >= h.seats);
+  const offPeakFull = loadHours.some((h) => OFF_PEAK_HOURS.includes(parisHour(h.hour)) && h.seats > 0 && h.passengers >= h.seats * 0.9);
+  const fullTrain = trains17.some((t) => t.lastSeats && (t.lastPassengers ?? 0) >= t.lastSeats);
+  const fullConsist = trains17.some((t) => (t.cars ?? []).length >= 3);
 
   const hubCounts = [...(stationCounts(
-    (lineIdsByStation as { departureStation: string; arrivalStation: string; _count: { trains: number } }[]).map((l) => ({ ...withTrainCount(l), companyId: company.id }))
+    (lineIdsByStation as { departureStation: string; arrivalStation: string; stops: string[]; _count: { trains: number } }[]).map((l) => ({ ...withTrainCount(l), companyId: company.id }))
   ).get(company.id)?.values() ?? [])];
 
   const storedUnits = (stockLots as Array<{ quantity: number }>).reduce((sum, l) => sum + l.quantity, 0);
@@ -582,8 +610,8 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     {
       id: "legende-du-rail",
       name: "Légende du rail",
-      description: "Atteindre le dernier grade de la carrière",
-      liveMet: gradeId >= RANK_DEFINITIONS.length - 1,
+      description: "Atteindre le grade de Légende du rail",
+      liveMet: gradeId >= LEGEND_RANK,
     },
     {
       id: "nom-qui-compte",
@@ -730,6 +758,20 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
       description: "Ouvrir la ligne promise à un maire dans les temps",
       liveMet: promisesKept >= 1,
     },
+    // ---- 1.7 : itinéraires, rames, infrastructures, finances ----
+    { id: "omnibus", name: "Omnibus", description: "Tracer une ligne qui dessert trois arrêts intermédiaires", liveMet: longestRoute >= 3 },
+    { id: "salle-comble", name: "Salle comble", description: "Remplir une rame jusqu'à la dernière place", liveMet: fullTrain },
+    { id: "rame-longue", name: "Rame longue", description: "Atteler trois voitures à une même rame", liveMet: fullConsist },
+    { id: "chef-de-gare", name: "Chef de gare", description: "Posséder une gare", liveMet: stationsOwned >= 1 },
+    { id: "fil-de-contact", name: "Fil de contact", description: "Électrifier une ligne", liveMet: electrified >= 1 },
+    { id: "atelier-regional", name: "Atelier régional", description: "Ouvrir un atelier régional", liveMet: workshopsOpen >= 1 },
+    { id: "bon-payeur", name: "Bon payeur", description: "Rembourser un emprunt sans une seule échéance manquée", liveMet: loansRepaid >= 1 },
+    { id: "actionnaire", name: "Actionnaire", description: "Toucher ses premiers dividendes", liveMet: dividends >= 1 },
+    // ---- 1.7 : heures de pointe, grades de l'infrastructure ----
+    { id: "heure-de-pointe", name: "Heure de pointe", description: "Remplir une ligne jusqu'à la dernière place à la pointe du matin ou du soir", liveMet: rushFull },
+    { id: "heures-creuses", name: "Heures creuses", description: "Remplir ses rames à 90 % entre 14 h et 16 h", liveMet: offPeakFull },
+    { id: "batisseur", name: "Bâtisseur", description: "Atteindre le grade de Bâtisseur de gares", liveMet: gradeId >= LEGEND_RANK + 1 },
+    { id: "empereur-du-rail", name: "Empereur du rail", description: "Atteindre le dernier grade de la carrière", liveMet: gradeId >= RANK_DEFINITIONS.length - 1 },
   ];
 
   /* 1.6 : « Premiers pas » récompense la liste de départ au complet. Chaque étape

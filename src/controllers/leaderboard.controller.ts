@@ -27,6 +27,7 @@ export async function getLeaderboard(req: AuthRequest, res: Response) {
     emblem: r.emblem,
     grade: r.grade,
     title: r.title,
+    plate: r.plate,
     trains: r.trains,
     lines: r.lines,
     metric: r[board],

@@ -1,5 +1,6 @@
 import { prisma } from "../prisma";
 import { computeReputation } from "./reputation.service";
+import { isInternational } from "./international.service";
 
 export interface CareerRequirement {
   label: string;
@@ -26,6 +27,11 @@ export interface CareerContext {
   reputation: number;
   maxTrains: number;
   distinctStations: number;
+  // 1.7 : grades de l'infrastructure et de l'Europe
+  stationsOwned?: number;
+  workshops?: number;
+  electrifiedLines?: number;
+  foreignStations?: number;
 }
 
 type Req = { label: string; value: (ctx: CareerContext) => number; target: number };
@@ -125,7 +131,52 @@ export const RANK_DEFINITIONS: { name: string; reward: string | null; requiremen
       req("Avoir généré 1 000 000 pi. de recettes cumulées", (c) => c.totalRevenue, 1000000),
     ],
   },
+  /* 1.7 : quatre grades après la Légende, pour les compagnies qui ont tout
+     desservi. On n'y monte plus seulement en roulant : il faut bâtir (gares,
+     ateliers, caténaires) et passer les frontières. */
+  {
+    name: "Bâtisseur de gares",
+    reward: "Titre « Bâtisseur de gares » au classement",
+    requirements: [
+      req("Posséder 3 gares", (c) => c.stationsOwned ?? 0, 3),
+      req("Ouvrir 2 ateliers régionaux", (c) => c.workshops ?? 0, 2),
+      req("Avoir généré 1 500 000 pi. de recettes cumulées", (c) => c.totalRevenue, 1500000),
+    ],
+  },
+  {
+    name: "Maître des caténaires",
+    reward: "Titre « Maître des caténaires » au classement",
+    requirements: [
+      req("Électrifier 6 lignes", (c) => c.electrifiedLines ?? 0, 6),
+      req("Posséder au moins 16 rames", (c) => c.trainCount, 16),
+      req("Avoir livré 400 contrats de fret", (c) => c.freightDelivered, 400),
+      req("Avoir généré 2 500 000 pi. de recettes cumulées", (c) => c.totalRevenue, 2500000),
+    ],
+  },
+  {
+    name: "Magnat européen",
+    reward: "Titre « Magnat européen » au classement",
+    requirements: [
+      req("Desservir les 6 gares étrangères", (c) => c.foreignStations ?? 0, 6),
+      req("Posséder 6 gares", (c) => c.stationsOwned ?? 0, 6),
+      req("Réputation d'au moins 92 %", (c) => c.reputation, 92),
+      req("Avoir généré 4 000 000 pi. de recettes cumulées", (c) => c.totalRevenue, 4000000),
+    ],
+  },
+  {
+    name: "Empereur du rail",
+    reward: "Titre « Empereur du rail » au classement",
+    requirements: [
+      req("Posséder au moins 18 rames", (c) => c.trainCount, 18),
+      req("Posséder 10 gares", (c) => c.stationsOwned ?? 0, 10),
+      req("Employer au moins 8 membres du personnel", (c) => c.staffCount, 8),
+      req("Avoir généré 7 500 000 pi. de recettes cumulées", (c) => c.totalRevenue, 7500000),
+    ],
+  },
 ];
+
+// 1.7 : la Légende n'est plus le dernier grade, mais son succès garde son nom
+export const LEGEND_RANK = RANK_DEFINITIONS.findIndex((r) => r.name === "Légende du rail");
 
 // titres gagnés en carrière : le nom de chaque grade à partir du Directeur régional
 export const CAREER_TITLE_FROM = 5;
@@ -148,7 +199,7 @@ export function rankFromContext(ctx: CareerContext) {
 export async function computeCareerStatus(companyId: string) {
   const [trainCount, lines, staffCount, freightDelivered, revenueAgg, reputation, company] = await Promise.all([
     prisma.train.count({ where: { companyId } }),
-    prisma.line.findMany({ where: { companyId }, select: { departureStation: true, arrivalStation: true } }),
+    prisma.line.findMany({ where: { companyId }, select: { departureStation: true, arrivalStation: true, stops: true } }),
     prisma.staff.count({ where: { companyId } }),
     prisma.contract.count({ where: { companyId, status: "LIVREE" } }),
     prisma.transaction.aggregate({
@@ -158,8 +209,13 @@ export async function computeCareerStatus(companyId: string) {
     computeReputation(companyId),
     prisma.company.findUnique({ where: { id: companyId }, select: { maxTrains: true } }),
   ]);
+  const [stationsOwned, workshops, electrifiedLines] = (await Promise.all([
+    prisma.stationOwnership.count({ where: { companyId } }),
+    prisma.workshop.count({ where: { companyId } }),
+    prisma.line.count({ where: { companyId, electrified: true } }),
+  ])) as [number, number, number];
 
-  const lineList = lines as { departureStation: string; arrivalStation: string }[];
+  const lineList = lines as { departureStation: string; arrivalStation: string; stops?: string[] }[];
   const ctx: CareerContext = {
     trainCount,
     lineCount: lineList.length,
@@ -168,7 +224,12 @@ export async function computeCareerStatus(companyId: string) {
     totalRevenue: revenueAgg._sum.amount ?? 0,
     reputation,
     maxTrains: company?.maxTrains ?? 2,
-    distinctStations: new Set(lineList.flatMap((l) => [l.departureStation, l.arrivalStation])).size,
+    // 1.7 : les arrêts desservis comptent
+    distinctStations: new Set(lineList.flatMap((l) => [l.departureStation, ...(l.stops ?? []), l.arrivalStation])).size,
+    stationsOwned,
+    workshops,
+    electrifiedLines,
+    foreignStations: new Set(lineList.flatMap((l) => [l.departureStation, ...(l.stops ?? []), l.arrivalStation]).filter(isInternational)).size,
   };
 
   const ranks: CareerRank[] = RANK_DEFINITIONS.map((def, id) => ({

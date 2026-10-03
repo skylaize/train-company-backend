@@ -1,3 +1,4 @@
+import { lineRidership } from "../services/pricing.service";
 import { Request, Response } from "express";
 import { prisma } from "../prisma";
 import { AuthRequest } from "../middleware/auth.middleware";
@@ -8,7 +9,7 @@ import {
   competitionMap,
   stationSize,
   stationDemand,
-  lineDemand,
+  routeDemand,
   pairKey,
   SIZE_LABEL,
   SHARE_FLOOR,
@@ -17,6 +18,7 @@ import {
 import { activeSeasonalEvent, seasonalStationEvents, upcomingSeasonalEvent } from "../services/season.service";
 import { HUB_CAP, HUB_STEP, hubMultiplier, hubsOf, stationCounts, withTrainCount } from "../services/hub.service";
 import { INTERNATIONAL_STATIONS, INTL_REVENUE_BONUS, TOLL_RATE, licenceView } from "../services/international.service";
+import { peakInfo } from "../services/peak.service";
 import { isNightService, NIGHT_FROM, NIGHT_TO, NIGHT_MULTIPLIER, DAY_COUCHETTES_MULTIPLIER } from "../services/time.service";
 import { buildLeaderRows } from "../services/leaderboard.service";
 import { NIGHT_MIN_DURATION } from "./train.controller";
@@ -64,14 +66,17 @@ export async function getNetworkMap(req: AuthRequest, res: Response) {
     competitionMap(),
     prisma.line.findMany({
       where: { companyId: company.id },
-      select: { id: true, departureStation: true, arrivalStation: true, _count: { select: { trains: true } } },
+      select: {
+        id: true, departureStation: true, arrivalStation: true, stops: true, priceRatio: true, autoPrice: true, _count: { select: { trains: true } },
+        trains: { select: { model: true, cars: true, status: true, lastPassengers: true, lastSeats: true } },
+      },
     }),
   ]);
 
   // 1.5 : les gares du temps fort de saison comptent comme des événements
   const events = [...liveEvents, ...seasonalStationEvents()];
   const counts = stationCounts(
-    (myLines as { departureStation: string; arrivalStation: string; _count: { trains: number } }[]).map((l) => ({ ...withTrainCount(l), companyId: company.id }))
+    (myLines as { departureStation: string; arrivalStation: string; stops: string[]; _count: { trains: number } }[]).map((l) => ({ ...withTrainCount(l), companyId: company.id }))
   ).get(company.id);
 
   const stations = STATIONS.map((name) => ({
@@ -95,13 +100,18 @@ export async function getNetworkMap(req: AuthRequest, res: Response) {
     };
   });
 
-  const lines = (myLines as { id: string; departureStation: string; arrivalStation: string }[]).map((l) => {
-    const contenders = competition.get(pairKey(l.departureStation, l.arrivalStation)) ?? [];
-    const mine = contenders.find((c) => c.companyId === company.id) ?? null;
+  type MyLine = {
+    id: string; departureStation: string; arrivalStation: string; stops: string[]; priceRatio: number; autoPrice?: boolean;
+    trains: { model: string; cars: string[]; status: string; lastPassengers: number | null; lastSeats: number | null }[];
+  };
+  const lines = (myLines as MyLine[]).map((l) => {
+    /* 1.7 : voyageurs, places et remplissage, tels que la simulation les calcule */
+    const { demand, mine, contenders, ridership } = lineRidership(l, company.id, events, competition);
     const rivals = contenders.filter((c) => c.companyId !== company.id);
     return {
       lineId: l.id,
-      demand: Math.round(lineDemand(l.departureStation, l.arrivalStation, events) * 100) / 100,
+      demand: Math.round(demand * 100) / 100,
+      ridership: { ...ridership, auto: Boolean(l.autoPrice) },
       hub: Math.round(hubMultiplier(counts, l.departureStation, l.arrivalStation) * 100) / 100,
       running: Boolean(mine),
       share: mine ? Math.round(mine.share * 1000) / 10 : null,
@@ -150,6 +160,14 @@ export async function getNetworkMap(req: AuthRequest, res: Response) {
       revenueBonus: INTL_REVENUE_BONUS,
       tollRate: TOLL_RATE,
     },
+    // 1.7 : gares achetées (la carte des abonnés montre les leurs à leurs couleurs)
+    ownedStations: ((await prisma.stationOwnership.findMany({ select: { station: true, companyId: true, level: true } })) as { station: string; companyId: string; level: number }[]).map((o) => ({
+      station: o.station,
+      mine: o.companyId === company.id,
+      level: o.level,
+    })),
+    // 1.7 : heures de pointe
+    peak: peakInfo(),
     night: { active: isNightService(), from: NIGHT_FROM, to: NIGHT_TO, multiplier: NIGHT_MULTIPLIER, dayMultiplier: DAY_COUCHETTES_MULTIPLIER, minDuration: NIGHT_MIN_DURATION },
   });
 }

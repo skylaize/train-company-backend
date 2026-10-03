@@ -22,7 +22,7 @@ export function hubBonus(linesAtStation: number) {
   return Math.min(HUB_CAP, HUB_STEP * Math.max(0, linesAtStation - 1));
 }
 
-type LineEnds = { companyId: string; departureStation: string; arrivalStation: string; trains?: number };
+type LineEnds = { companyId: string; departureStation: string; arrivalStation: string; stops?: string[] | null; trains?: number };
 
 /* Pour chaque compagnie : nombre de gares DISTINCTES reliées à chaque gare,
    par des lignes où roule au moins une rame. Compter les lignes brutes
@@ -35,10 +35,12 @@ export function stationCounts(lines: LineEnds[]) {
     if (l.trains === 0 || l.departureStation === l.arrivalStation) continue;
     let m = links.get(l.companyId);
     if (!m) { m = new Map(); links.set(l.companyId, m); }
-    for (const [s, other] of [[l.departureStation, l.arrivalStation], [l.arrivalStation, l.departureStation]]) {
+    // 1.7 : chaque gare desservie (arrêts compris) est reliée à toutes les autres de la ligne
+    const route = [l.departureStation, ...(l.stops ?? []), l.arrivalStation];
+    for (const s of route) {
       let set = m.get(s);
       if (!set) { set = new Set(); m.set(s, set); }
-      set.add(other);
+      for (const other of route) if (other !== s) set.add(other);
     }
   }
   const byCompany = new Map<string, Map<string, number>>();
@@ -55,7 +57,7 @@ export function withTrainCount<T extends { _count?: { trains: number } }>(l: T) 
 
 export async function allStationCounts() {
   const lines = (await prisma.line.findMany({
-    select: { companyId: true, departureStation: true, arrivalStation: true, _count: { select: { trains: true } } },
+    select: { companyId: true, departureStation: true, arrivalStation: true, stops: true, _count: { select: { trains: true } } },
   })) as (LineEnds & { _count: { trains: number } })[];
   return stationCounts(lines.map(withTrainCount));
 }

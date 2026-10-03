@@ -9,14 +9,22 @@ import { computeReputation } from "../services/reputation.service";
 import { runMarketTick, runStorageFees, getCargoIndexMap, freightMultiplier } from "../services/market.service";
 import { completeConstructions } from "../services/construction.service";
 import { runMorningDigest } from "../services/report.service";
-import { activeStationEvents, competitionMap, lineDemand, lineHasBoost, maybeSpawnStationEvent, pairKey, watchCompetition } from "../services/station.service";
+import { activeStationEvents, competitionMap, routeDemand, routeHasBoost, maybeSpawnStationEvent, pairKey, watchCompetition } from "../services/station.service";
+import { routeOf, routeInDirection } from "../services/route.service";
+import { passengersPerDeparture, tripLoad, speedFactor } from "../services/ridership.service";
+import { stationOwners, stationEffects, accruePending, payStationIncome, workshopsByCompany, WORKSHOP_WEAR, ELECTRIC_SPEED, ELECTRIC_WEAR } from "../services/infrastructure.service";
+import { runLoanPayments, runSharePrices, runDividends, runWeeklyReports, runStockOrders, runPremiumAlerts } from "../services/finance.service";
+import { runAutoPricing } from "../services/pricing.service";
 import { sendToCompany } from "../services/push.service";
 import { seasonalStationEvents } from "../services/season.service";
 import { allStationCounts, hubMultiplier } from "../services/hub.service";
 import { runTenders } from "../services/tender.service";
 import { runDecisions, activeDecisionEffects, decisionMultiplier } from "../services/decision.service";
-import { lineIsInternational, INTL_REVENUE_BONUS, TOLL_RATE } from "../services/international.service";
+import { isInternational, INTL_REVENUE_BONUS, TOLL_RATE } from "../services/international.service";
 import { isNightService, NIGHT_MULTIPLIER, DAY_COUCHETTES_MULTIPLIER } from "../services/time.service";
+import { peakFactor } from "../services/peak.service";
+import { parisHour } from "../services/time.service";
+let lastPricingHour = -1;
 import { checkPriceAlerts, runStandingOrders } from "../controllers/market.controller";
 import { staffEffectsByCompany, runStaffExperience, repairCostPerPoint, staffEffectsFor, CompanyStaffEffects, WEAR_PER_TICK } from "../services/staff.service";
 
@@ -119,6 +127,31 @@ async function runSimulationTick() {
       await sendToCompany(companyId, { title, body, url: "/dashboard", tag: "decision" });
     }).catch((err) => console.error("[décisions] échec :", (err as Error).message));
   }
+  // 1.7 : revenus des gares (toutes les heures), échéances d'emprunt, cours de bourse, dividendes, rapport hebdo
+  if (tickCount % 120 === 0) await payStationIncome().catch((err) => console.error("[gares] échec :", (err as Error).message));
+  await runLoanPayments(async (companyId, title, body) => {
+    await sendToCompany(companyId, { title, body, url: "/dashboard", tag: "banque" });
+  }).catch((err) => console.error("[emprunts] échec :", (err as Error).message));
+  if (tickCount % 120 === 1) await runSharePrices().catch((err) => console.error("[bourse] échec :", (err as Error).message));
+  // Premium : prix automatique (toutes les heures), ordres de bourse, alertes
+  // 1.7 : et dès que l'heure change, pour suivre la pointe du matin et du soir
+  const hourNow = parisHour();
+  if (tickCount % 120 === 3 || hourNow !== lastPricingHour) {
+    lastPricingHour = hourNow;
+    await runAutoPricing().catch((err) => console.error("[prix auto] échec :", (err as Error).message));
+  }
+  if (tickCount % 120 === 4) await prisma.lineLoadHour.deleteMany({ where: { hour: { lt: new Date(Date.now() - 48 * 3600_000) } } }).catch(() => {});
+  const premiumNotify = async (companyId: string, title: string, body: string, tag: string) => {
+    await sendToCompany(companyId, { title, body, url: "/dashboard", tag });
+  };
+  await runStockOrders((id, t, b) => premiumNotify(id, t, b, "bourse")).catch((err) => console.error("[ordres de bourse] échec :", (err as Error).message));
+  if (tickCount % 4 === 0) {
+    await runPremiumAlerts((id, t, b) => premiumNotify(id, t, b, "alerte")).catch((err) => console.error("[alertes] échec :", (err as Error).message));
+  }
+  await runDividends().catch((err) => console.error("[dividendes] échec :", (err as Error).message));
+  await runWeeklyReports(async (companyId, title, body) => {
+    await sendToCompany(companyId, { title, body, url: "/dashboard", tag: "rapport" });
+  }).catch((err) => console.error("[rapport hebdo] échec :", (err as Error).message));
   // bilan du matin : isolé, un raté ne doit pas interrompre le tick
   await runMorningDigest().catch((err) => console.error("[bilan] échec :", (err as Error).message));
   if (tickCount % MILESTONE_EVERY === 0) await processReferralMilestones();
@@ -239,7 +272,7 @@ async function getPremiumCompanyIds(): Promise<Set<string>> {
   return new Set(rows.map((r) => r.id));
 }
 
-async function runLineTrains(weather: string) {
+export async function runLineTrains(weather: string) {
   const runningTrains = await prisma.train.findMany({
     where: { status: "EN_ROUTE", lineId: { not: null } },
     include: { line: true },
@@ -249,9 +282,28 @@ async function runLineTrains(weather: string) {
   // gares et concurrence : calculées une fois pour tout le tour
   /* 1.5 : les gares d'un temps fort de saison s'ajoutent aux événements du
      moment, et les correspondances de chaque compagnie sont comptées une fois. */
-  const [liveEvents, competition, hubCounts, decisionEffects] = await Promise.all([activeStationEvents(), competitionMap(), allStationCounts(), activeDecisionEffects()]);
+  const [liveEvents, competition, hubCounts, decisionEffects, owners, workshops] = await Promise.all([
+    activeStationEvents(),
+    competitionMap(),
+    allStationCounts(),
+    activeDecisionEffects(),
+    stationOwners(),
+    workshopsByCompany(),
+  ]);
+  // 1.7 : redevances et commerces dus aux propriétaires de gares, versés d'un bloc chaque heure
+  const pending = new Map<string, { fees: number; shops: number }>();
+  const owe = (station: string, key: "fees" | "shops", amount: number) => {
+    const p = pending.get(station) ?? { fees: 0, shops: 0 };
+    p[key] += amount;
+    pending.set(station, p);
+  };
   const stationEvents = [...liveEvents, ...seasonalStationEvents()];
   const night = isNightService();
+  // 1.7 : heures de pointe, la demande suit l'heure de la journée
+  const rush = peakFactor();
+  // 1.7 : rames de chaque ligne en circulation, qui se partagent ses voyageurs
+  const runningOnLine = new Map<string, number>();
+  for (const t of runningTrains) if (t.lineId) runningOnLine.set(t.lineId, (runningOnLine.get(t.lineId) ?? 0) + 1);
 
   for (const train of runningTrains) {
     const fx = staffEffects.get(train.companyId) ?? NO_STAFF;
@@ -291,6 +343,12 @@ async function runLineTrains(weather: string) {
     // l'équipe de mécaniciens réduit l'usure des rames qu'elle couvre (voir staff.service)
     let wearRate = WEAR_PER_TICK * fx.wearMultiplier;
     if (weather === "CANICULE") wearRate = wearRate * 1.5;
+    const lineX = train.line as typeof train.line & { stops?: string[]; priceRatio?: number; electrified?: boolean };
+    const trainX = train as typeof train & { cars?: string[]; direction?: number };
+    // 1.7 : une ligne électrifiée use moins le matériel, un atelier sur l'itinéraire aussi
+    if (lineX.electrified) wearRate = wearRate * ELECTRIC_WEAR;
+    const shops = workshops.get(train.companyId);
+    if (shops && routeOf(lineX).some((st) => shops.has(st))) wearRate = wearRate * WORKSHOP_WEAR;
     const newWear = Math.min(100, train.wear + stochasticRound(wearRate));
     if (newWear >= 100) {
       /* Réparation automatique en Premium : c'est du confort, pas un avantage
@@ -315,8 +373,10 @@ async function runLineTrains(weather: string) {
 
     const elapsedMs = Date.now() - new Date(train.departedAt).getTime();
     const elapsedMinutes = elapsedMs / 60_000;
-    // Une rame Express effectue le trajet 30% plus vite (Premium)
-    const effectiveDuration = train.model === "EXPRESS" ? train.line.durationMinutes * 0.7 : train.line.durationMinutes;
+    // Une rame Express effectue le trajet 30% plus vite ; 1.7 : chaque voiture ajoutée ralentit,
+    // l'électrification fait gagner 10 %
+    const effectiveDuration =
+      train.line.durationMinutes * (train.model === "EXPRESS" ? 0.7 : 1) * speedFactor(trainX) * (lineX.electrified ? ELECTRIC_SPEED : 1);
     const progress = Math.min(100, Math.floor((elapsedMinutes / effectiveDuration) * 100));
 
     if (progress >= 100) {
@@ -330,10 +390,21 @@ async function runLineTrains(weather: string) {
          compagnie arrive à attirer face aux autres. */
       const dep = train.line.departureStation;
       const arr = train.line.arrivalStation;
-      const demand = lineDemand(dep, arr, stationEvents);
+      /* 1.7 : les gares de tout l'itinéraire comptent, et le sens de marche
+         donne les deux bouts du trajet qui vient de se terminer */
+      const route = routeOf(lineX);
+      const [from, to] = ((r) => [r[0], r[r.length - 1]])(routeInDirection(lineX, trainX.direction ?? 0));
+      const demand = routeDemand(route, stationEvents);
       const contenders = competition.get(pairKey(dep, arr)) ?? [];
       const competitionMultiplier = contenders.find((c) => c.companyId === train.companyId)?.multiplier ?? 1;
-      const boosted = lineHasBoost(dep, arr, stationEvents);
+      const boosted = routeHasBoost(route, stationEvents);
+      const price = lineX.priceRatio ?? 1;
+      const load = tripLoad(
+        trainX,
+        passengersPerDeparture(demand * (train.model === "COUCHETTES" ? 1 : rush), route.length - 2, competitionMultiplier, price),
+        runningOnLine.get(train.lineId as string) ?? 1,
+        price
+      );
       // correspondances : une gare où la compagnie a plusieurs lignes rapporte plus
       const hub = hubMultiplier(hubCounts.get(train.companyId), dep, arr);
       /* 1.6 — la rame couchettes : moins confortable qu'une voiture assise le
@@ -342,41 +413,50 @@ async function runLineTrains(weather: string) {
       const nightTrip = couchettes && night;
       const nightMultiplier = couchettes ? (night ? NIGHT_MULTIPLIER : DAY_COUCHETTES_MULTIPLIER) : 1;
       // 1.6 — une ligne qui passe la frontière rapporte plus, péage déduit à part
-      const international = lineIsInternational(dep, arr);
+      const international = route.some(isInternational);
       const revenue = Math.round(
         train.line.durationMinutes *
           REVENUE_PER_MINUTE *
           lengthYield(train.line.durationMinutes) *
           reputationMultiplier *
           directeurBonus *
-          demand *
-          competitionMultiplier *
+          // 1.7 : voyageurs réellement emportés × prix du billet (demande et concurrence y sont)
+          load.revenueFactor *
           hub *
           nightMultiplier *
           // 1.6 : grève, travaux, campagne touristique… décidés par le directeur
           decisionMultiplier(decisionEffects.get(train.companyId), dep, arr) *
           (international ? INTL_REVENUE_BONUS : 1)
       );
+      /* 1.7 : gares achetées. Chez soi, le trajet rapporte un peu plus ; chez
+         les autres, il leur doit une redevance de quai ; partout où il y a des
+         commerces, ses voyageurs y dépensent. */
+      const infra = stationEffects(route, train.companyId, revenue, load.passengers, owners);
+      const revenueHome = Math.round(revenue * infra.homeBonus);
+      const platformFees = infra.fees.reduce((a, f) => a + f.amount, 0);
+      for (const f of infra.fees) owe(f.station, "fees", f.amount);
+      for (const sh of infra.shops) owe(sh.station, "shops", sh.amount);
       const toll = international ? Math.round(revenue * TOLL_RATE) : 0;
       const ops: any[] = [
         prisma.train.update({
           where: { id: train.id },
-          data: { progress: 0, departedAt: new Date(), wear: newWear },
+          // 1.7 : la rame repart dans l'autre sens
+          data: { progress: 0, departedAt: new Date(), wear: newWear, direction: (trainX.direction ?? 0) === 0 ? 1 : 0, lastPassengers: load.passengers, lastSeats: load.seats },
         }),
         prisma.company.update({
           where: { id: train.companyId },
-          data: { balance: { increment: revenue - toll } },
+          data: { balance: { increment: revenueHome - toll - platformFees } },
         }),
         prisma.transaction.create({
           data: {
             companyId: train.companyId,
             type: "REVENU_LIGNE",
-            amount: revenue,
+            amount: revenueHome,
             trainId: train.id,
             lineId: train.lineId,
             // le libellé finit toujours par « sur A → B » (et « · affluence ») : les
             // appels d'offres et les succès de saison le relisent. La nuit se lit au début.
-            description: `${nightTrip ? "Trajet de nuit" : "Trajet voyageurs"} : ${train.name} sur ${train.line.departureStation} → ${train.line.arrivalStation}${boosted ? " · affluence" : ""}`,
+            description: `${nightTrip ? "Trajet de nuit" : "Trajet voyageurs"} : ${train.name} sur ${from} → ${to}${boosted ? " · affluence" : ""}`,
           },
         }),
       ];
@@ -392,6 +472,25 @@ async function runLineTrains(weather: string) {
           },
         }));
       }
+      // 1.7 : remplissage heure par heure, pour la courbe des abonnés
+      const hourStart = new Date(Math.floor(Date.now() / 3600_000) * 3600_000);
+      ops.push(prisma.lineLoadHour.upsert({
+        where: { lineId_hour: { lineId: train.lineId as string, hour: hourStart } },
+        create: { lineId: train.lineId as string, companyId: train.companyId, hour: hourStart, trips: 1, passengers: load.passengers, seats: load.seats, left: load.left },
+        update: { trips: { increment: 1 }, passengers: { increment: load.passengers }, seats: { increment: load.seats }, left: { increment: load.left } },
+      }));
+      if (platformFees > 0) {
+        ops.push(prisma.transaction.create({
+          data: {
+            companyId: train.companyId,
+            type: "REDEVANCE_QUAI",
+            amount: -platformFees,
+            trainId: train.id,
+            lineId: train.lineId,
+            description: `Redevance de quai : ${infra.fees.map((f) => f.station).join(", ")}`,
+          },
+        }));
+      }
       await prisma.$transaction(ops);
     } else if (progress !== train.progress || newWear !== train.wear) {
       await prisma.train.update({
@@ -400,6 +499,7 @@ async function runLineTrains(weather: string) {
       });
     }
   }
+  await accruePending(pending).catch((err) => console.error("[gares] redevances non enregistrées :", (err as Error).message));
 }
 
 async function runFreightContracts(weather: string) {

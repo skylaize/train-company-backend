@@ -1,5 +1,6 @@
 import { Response } from "express";
 import { AuthRequest } from "../middleware/auth.middleware";
+import { CARS, MAX_CARS, seatsOf } from "../services/ridership.service";
 import { prisma } from "../prisma";
 import { staffEffectsFor, repairCostPerPoint } from "../services/staff.service";
 import { buildLeaderRows } from "../services/leaderboard.service";
@@ -109,10 +110,52 @@ export async function assignTrainToLine(req: AuthRequest, res: Response) {
       status: "EN_ROUTE",
       progress: 0,
       departedAt: new Date(),
+      direction: 0, // 1.7 : toute nouvelle affectation commence par l'aller
     },
   });
 
   return res.json(updated);
+}
+
+/* ============================================================
+   Composition des rames (1.7) : ajouter ou retirer une voiture.
+   Une voiture retirée est reprise à moitié prix.
+   ============================================================ */
+export async function changeCars(req: AuthRequest, res: Response) {
+  const { trainId, car, action } = req.body ?? {};
+  const def = CARS[String(car)];
+  if (!trainId || !def || (action !== "add" && action !== "remove")) {
+    return res.status(400).json({ error: "trainId, car (SECONDE, PREMIERE, BAR) et action (add, remove) sont requis" });
+  }
+  const company = await getOwnedCompanyOrFail(req.userId as string);
+  if (!company) return res.status(404).json({ error: "Créez d'abord votre compagnie" });
+  const train = await prisma.train.findFirst({ where: { id: trainId, companyId: company.id } });
+  if (!train) return res.status(404).json({ error: "Train introuvable" });
+  const cars = [...((train as { cars?: string[] }).cars ?? [])];
+
+  if (action === "add") {
+    if (cars.length >= MAX_CARS) return res.status(409).json({ error: `Une rame tire ${MAX_CARS} voitures au plus` });
+    if (def.unique && cars.includes(String(car))) return res.status(409).json({ error: `${def.label} : une seule par rame` });
+    if (company.balance < def.price) return res.status(409).json({ error: `Trésorerie insuffisante (${def.price} pi.)` });
+    cars.push(String(car));
+    const done = await prisma.company.updateMany({ where: { id: company.id, balance: { gte: def.price } }, data: { balance: { decrement: def.price } } });
+    if (done.count === 0) return res.status(409).json({ error: `Trésorerie insuffisante (${def.price} pi.)` });
+    await prisma.$transaction([
+      prisma.train.update({ where: { id: train.id }, data: { cars } }),
+      prisma.transaction.create({ data: { companyId: company.id, type: "COMPOSITION", amount: -def.price, description: `${def.label} ajoutée à ${train.name}`, trainId: train.id } }),
+    ]);
+  } else {
+    const i = cars.lastIndexOf(String(car));
+    if (i < 0) return res.status(409).json({ error: "Cette rame n'a pas cette voiture" });
+    cars.splice(i, 1);
+    const refund = Math.floor(def.price / 2);
+    await prisma.$transaction([
+      prisma.train.update({ where: { id: train.id }, data: { cars } }),
+      prisma.company.update({ where: { id: company.id }, data: { balance: { increment: refund } } }),
+      prisma.transaction.create({ data: { companyId: company.id, type: "COMPOSITION", amount: refund, description: `${def.label} retirée de ${train.name}`, trainId: train.id } }),
+    ]);
+  }
+  return res.json({ cars, seats: seatsOf({ model: train.model, cars }) });
 }
 
 
@@ -219,7 +262,7 @@ export async function releaseTrain(req: AuthRequest, res: Response) {
 
   const updated = await prisma.train.update({
     where: { id: trainId },
-    data: { lineId: null, status: "IDLE", progress: 0, departedAt: null },
+    data: { lineId: null, status: "IDLE", progress: 0, departedAt: null, direction: 0 },
   });
 
   return res.json(updated);

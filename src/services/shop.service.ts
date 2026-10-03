@@ -1,3 +1,4 @@
+import { RELEASE_171 } from "../release";
 import { prisma } from "../prisma";
 import { computeCareerStatus, careerTitles } from "./career.service";
 
@@ -18,7 +19,7 @@ import { computeCareerStatus, careerTitles } from "./career.service";
    titres, eux, sont choisis dans une liste fermée pour la même raison.
    ============================================================ */
 
-export type ShopItemKind = "LIVREES" | "EMBLEMES" | "TITRES" | "THEME" | "CABINE" | "SAISON";
+export type ShopItemKind = "LIVREES" | "EMBLEMES" | "TITRES" | "THEME" | "CABINE" | "SAISON" | "SANS_PUB" | "COFFRET" | "PLAQUE";
 
 export interface ShopItem {
   id: string;
@@ -32,11 +33,17 @@ export interface ShopItem {
   titles?: string[];
   theme?: string;
   cabSkins?: string[];
+  // 1.7 : plaques d'honneur, visibles par tous au classement
+  plates?: string[];
   // 1.5 : édition limitée, vendue seulement pendant ce temps fort de saison
   season?: string;
+  // 1.7 : mis en avant en tête de boutique
+  isNew?: boolean;
+  // 1.7 : prix des pièces achetées séparément, pour afficher l'économie d'un coffret
+  worthCents?: number;
 }
 
-export const SHOP_ITEMS: ShopItem[] = [
+const ALL_ITEMS: ShopItem[] = [
   {
     id: "livrees-epoque",
     kind: "LIVREES",
@@ -143,6 +150,60 @@ export const SHOP_ITEMS: ShopItem[] = [
     emblems: ["soleil"],
     season: "ete",
   },
+  // ---- 1.7 ----
+  {
+    id: "coffret-belle-epoque",
+    kind: "COFFRET",
+    name: "Coffret Belle Époque",
+    description: "Tout le chic des grands express d'antan : les voitures Pullman bordeaux filetées d'or en vue cabine, la livrée bordeaux impérial, l'emblème de la lanterne et le titre « Compagnie Belle Époque ».",
+    priceCents: 499,
+    worthCents: 799,
+    liveries: ["#5b1e2d"],
+    emblems: ["lanterne"],
+    titles: ["Compagnie Belle Époque"],
+    cabSkins: ["pullman"],
+    isNew: true,
+  },
+  {
+    id: "coffret-grande-vitesse",
+    kind: "COFFRET",
+    name: "Coffret Grande Vitesse",
+    description: "Une rame à grande vitesse au long nez profilé en vue cabine, la livrée argent, l'emblème de la flèche et le titre « Pionnier de la grande vitesse ».",
+    priceCents: 399,
+    worthCents: 649,
+    liveries: ["#c4ccd4"],
+    emblems: ["fleche"],
+    titles: ["Pionnier de la grande vitesse"],
+    cabSkins: ["grande-vitesse"],
+    isNew: true,
+  },
+  {
+    id: "cabine-duplex",
+    kind: "CABINE",
+    name: "Rame à deux niveaux",
+    description: "En vue cabine, une rame à étage aux deux rangées de fenêtres, à votre livrée. La nuit, les deux niveaux s'allument.",
+    priceCents: 299,
+    cabSkins: ["duplex"],
+    isNew: true,
+  },
+  {
+    id: "plaques-honneur",
+    kind: "PLAQUE",
+    name: "Plaques d'honneur",
+    description: "Votre nom encadré au classement, vu par tous les joueurs : laiton gravé, émail bleu de gare ou or fin. Trois plaques, à changer quand vous voulez.",
+    priceCents: 249,
+    plates: ["laiton", "email", "or"],
+    isNew: true,
+  },
+  {
+    id: "emblemes-atelier",
+    kind: "EMBLEMES",
+    name: "Emblèmes de l'atelier",
+    description: "Deux emblèmes de plus, tirés du dépôt : l'aiguillage et le sifflet du chef de gare.",
+    priceCents: 149,
+    emblems: ["aiguillage", "sifflet"],
+    isNew: true,
+  },
   {
     id: "theme-plan-1935",
     kind: "THEME",
@@ -153,7 +214,29 @@ export const SHOP_ITEMS: ShopItem[] = [
   },
 ];
 
+// 1.7.1 : ces objets n'apparaissent qu'à la sortie de la 1.7.1 (src/release.ts)
+const ITEMS_171 = new Set(["coffret-belle-epoque", "coffret-grande-vitesse", "cabine-duplex", "plaques-honneur", "emblemes-atelier"]);
+export const SHOP_ITEMS: ShopItem[] = ALL_ITEMS.filter((i) => RELEASE_171 || !ITEMS_171.has(i.id));
+
+/* 1.7 : le billet sans pub. Vendu par le même circuit que la boutique (prix
+   transmis à Stripe à la volée), mais pas affiché parmi les objets : il a son
+   bouton sous la bannière. Le Premium inclut déjà l'absence de publicité. */
+export const AD_FREE_ITEM_ID = "sans-pub";
+export const AD_FREE_ITEM: ShopItem = {
+  id: AD_FREE_ITEM_ID,
+  kind: "SANS_PUB",
+  name: "Billet sans pub",
+  description: "Plus aucune bannière publicitaire dans Réseau, pour toujours. Les vidéos récompensées restent possibles, si vous les demandez.",
+  priceCents: 199,
+};
+
+export async function hasAdFree(companyId: string) {
+  const row = await prisma.shopPurchase.findUnique({ where: { companyId_itemId: { companyId, itemId: AD_FREE_ITEM_ID } } });
+  return Boolean(row);
+}
+
 export function findItem(id: string) {
+  if (id === AD_FREE_ITEM_ID) return RELEASE_171 ? AD_FREE_ITEM : null;
   return SHOP_ITEMS.find((i) => i.id === id) ?? null;
 }
 
@@ -184,6 +267,7 @@ export async function unlockedFor(companyId: string) {
   const titles = new Set<string>();
   const themes = new Set<string>(["sombre", "papier"]);
   const cabSkins = new Set<string>();
+  const plates = new Set<string>();
 
   for (const item of SHOP_ITEMS) {
     if (!owned.has(item.id)) continue;
@@ -192,11 +276,12 @@ export async function unlockedFor(companyId: string) {
     item.titles?.forEach((t) => titles.add(t));
     if (item.theme) themes.add(item.theme);
     item.cabSkins?.forEach((c) => cabSkins.add(c));
+    item.plates?.forEach((p) => plates.add(p));
   }
 
   if ((company?.referralMilestone ?? 0) >= 5) titles.add(EARNED_SPONSOR_TITLE);
   // 1.4 : chaque grade à partir du Directeur régional donne son nom en titre
   careerTitles(career.currentRank.id).forEach((t) => titles.add(t));
 
-  return { owned, liveries, emblems, titles, themes, cabSkins };
+  return { owned, liveries, emblems, titles, themes, cabSkins, plates };
 }
