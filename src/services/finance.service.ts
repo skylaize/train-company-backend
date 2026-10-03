@@ -103,7 +103,7 @@ export const DIVIDEND_HOUR = 20; // versés chaque soir à 20 h
 export async function runSharePrices() {
   const rows = await buildLeaderRows();
   const since = new Date(Date.now() - DAY_MS);
-  const revenue = (await prisma.transaction.groupBy({
+  const revenue = (await (prisma.transaction.groupBy as any)({
     by: ["companyId"],
     where: { type: "REVENU_LIGNE", createdAt: { gte: since } },
     _sum: { amount: true },
@@ -121,7 +121,7 @@ export async function runSharePrices() {
 }
 
 export async function heldByIssuer() {
-  const rows = (await prisma.shareholding.groupBy({ by: ["issuerId"], _sum: { shares: true } })) as { issuerId: string; _sum: { shares: number | null } }[];
+  const rows = (await (prisma.shareholding.groupBy as any)({ by: ["issuerId"], _sum: { shares: true } })) as { issuerId: string; _sum: { shares: number | null } }[];
   return new Map(rows.map((r) => [r.issuerId, r._sum.shares ?? 0]));
 }
 

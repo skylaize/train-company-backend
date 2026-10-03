@@ -138,7 +138,7 @@ export async function getMarket(req: AuthRequest, res: Response) {
   }
   const mineBy = new Map(mine.map((m) => [m.issuerId, m]));
   const since24 = new Date(Date.now() - 86_400_000);
-  const revenue = (await prisma.transaction.groupBy({
+  const revenue = (await (prisma.transaction.groupBy as any)({
     by: ["companyId"],
     where: { type: "REVENU_LIGNE", createdAt: { gte: since24 }, companyId: { in: listed.map((c) => c.id) } },
     _sum: { amount: true },
