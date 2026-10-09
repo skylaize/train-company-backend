@@ -68,10 +68,22 @@ function sumByCompany(pairs: Array<[string | null, number]>) {
    redemande le classement toutes les dix secondes. Quinze secondes de cache :
    assez court pour que le classement reste vivant, assez long pour que la base
    ne refasse pas le même calcul pour chaque joueur. */
-const ROWS_TTL_MS = 15_000;
+const ROWS_TTL_MS = 45_000;
 let rowsCache: { at: number; rows: LeaderRow[] } | null = null;
+// 2.0 : à l'expiration du cache, un seul calcul pour tous les appels qui arrivent en même temps
+let rowsInflight: Promise<LeaderRow[]> | null = null;
 
 export async function buildLeaderRows(): Promise<LeaderRow[]> {
+  const weekStart = startOfParisWeek();
+  if (rowsCache && Date.now() - rowsCache.at < ROWS_TTL_MS && rowsCache.at >= weekStart.getTime()) return rowsCache.rows;
+  if (rowsInflight) return rowsInflight;
+  rowsInflight = computeLeaderRows().finally(() => {
+    rowsInflight = null;
+  });
+  return rowsInflight;
+}
+
+async function computeLeaderRows(): Promise<LeaderRow[]> {
   const weekStart = startOfParisWeek();
   // le cache ne doit pas survivre au passage du lundi, sinon l'ancienne semaine reste affichée
   if (rowsCache && Date.now() - rowsCache.at < ROWS_TTL_MS && rowsCache.at >= weekStart.getTime()) return rowsCache.rows;

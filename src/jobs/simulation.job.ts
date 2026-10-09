@@ -79,8 +79,14 @@ export function startSimulationJob() {
       return;
     }
     ticking = true;
+    const started = Date.now();
     holdLease()
       .then((mine) => (mine ? runSimulationTick() : undefined))
+      .then(() => {
+        // 2.0 : un tour lent se voit dans les journaux de Coolify
+        const ms = Date.now() - started;
+        if (ms > 8000) console.warn(`[simulation] tour lent : ${(ms / 1000).toFixed(1)} s`);
+      })
       .catch((err) => {
         console.error("[simulation] tour ignoré après erreur :", err);
       })

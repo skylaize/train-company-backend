@@ -32,6 +32,7 @@ import { decisionRouter } from "./routes/decision.routes";
 import { infrastructureRouter } from "./routes/infrastructure.routes";
 import { financeRouter } from "./routes/finance.routes";
 import { v2Router } from "./routes/v2.routes";
+import { responseCache } from "./middleware/responseCache";
 import { handleStripeWebhook } from "./controllers/billing.controller";
 import { startSimulationJob } from "./jobs/simulation.job";
 
@@ -54,6 +55,8 @@ app.options("*", cors(corsOptions));
 app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), handleStripeWebhook);
 
 app.use(express.json());
+// 2.0 : réponses lourdes gardées quelques secondes par joueur (voir responseCache)
+app.use(responseCache);
 
 app.get("/", (_req, res) => {
   res.json({ status: "ok", service: "train-company-backend" });
