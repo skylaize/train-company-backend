@@ -224,8 +224,8 @@ export async function acceptContract(req: AuthRequest, res: Response) {
   if (train.status !== "IDLE" || train.lineId) {
     return res.status(409).json({ error: "Ce train n'est pas disponible (déjà en service)" });
   }
-  if (train.model === "COUCHETTES") {
-    return res.status(409).json({ error: "Une rame couchettes transporte des voyageurs, pas du fret" });
+  if (train.model === "COUCHETTES" || train.model === "LUXE") {
+    return res.status(409).json({ error: `Une rame ${train.model === "LUXE" ? "de grand luxe" : "couchettes"} transporte des voyageurs, pas du fret` });
   }
   if (train.wear >= 100) {
     return res.status(409).json({ error: "Ce train doit être réparé avant de pouvoir circuler" });

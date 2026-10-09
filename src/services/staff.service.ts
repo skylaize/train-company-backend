@@ -63,6 +63,21 @@ export const ROLES: Record<string, RoleDef> = {
     unique: false,
     effect: (l) => `Réduit de ${Math.round(chefReduction(l) * 100)} % le coût des réparations de ${chefCoverage(l)} rames`,
   },
+  // 2.0 : équipages, affectés à une rame (voir crew.service)
+  CONTROLEUR: {
+    label: "Contrôleur",
+    baseSalary: 2,
+    minGradeId: 0,
+    unique: false,
+    effect: (l) => `À bord d'une rame : +${4 + (l - 1)} % de recette, et de la réputation pour la compagnie`,
+  },
+  CONDUCTEUR: {
+    label: "Conducteur",
+    baseSalary: 3,
+    minGradeId: 1,
+    unique: false,
+    effect: (l) => `À bord d'une rame : retards −40 %, incidents et casse ÷2, usure −${5 + (l - 1)} %`,
+  },
   DIRECTEUR_COMMERCIAL: {
     label: "Directeur commercial",
     baseSalary: 6,

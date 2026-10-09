@@ -34,7 +34,8 @@ export async function getMyClients(req: AuthRequest, res: Response) {
     prisma.clientRelation.findMany({ where: { companyId: company.id } }),
     prisma.mission.findMany({
       where: { companyId: company.id, status: { in: ["PROPOSEE", "ACCEPTEE", "ECHOUEE"] } },
-      orderBy: { createdAt: "desc" },
+      // 2.0 : du plus ancien au plus récent, l'ordre dans lequel les livraisons sont comptées
+      orderBy: { createdAt: "asc" },
     }),
   ]);
 
@@ -46,6 +47,11 @@ export async function getMyClients(req: AuthRequest, res: Response) {
 
   const repByClient = new Map<string, number>((relations as Rel[]).map((r) => [r.clientId, r.reputation]));
   const list = missions as Mis[];
+  /* 2.0 : une livraison ne compte que pour un seul ordre, le plus ancien accepté
+     pour cette marchandise. Les autres attendent leur tour : on le dit. */
+  const firstByCargo = new Map<string, Mis>();
+  for (const m of list) if (m.status === "ACCEPTEE" && !firstByCargo.has(m.cargoType)) firstByCargo.set(m.cargoType, m);
+  const refOf = (m: Mis) => `${m.clientId.slice(0, 2)}-${m.id.slice(0, 4).toUpperCase()}`;
 
   const payload = CLIENTS.map((client) => {
     const locked = client.minGradeId > gradeId;
@@ -58,7 +64,7 @@ export async function getMyClients(req: AuthRequest, res: Response) {
        pourquoi sa réputation a bougé plutôt que de le découvrir sans
        explication. */
     const open = list.filter((m) => m.clientId === client.id && m.status !== "ECHOUEE");
-    const current = open.length > 0 ? open : list.filter((m) => m.clientId === client.id).slice(0, 1);
+    const current = open.length > 0 ? open : list.filter((m) => m.clientId === client.id).slice(-1);
 
     return {
       id: client.id,
@@ -91,7 +97,9 @@ export async function getMyClients(req: AuthRequest, res: Response) {
             offerUntil: m.offerUntil,
             dueAt: m.dueAt,
             // référence lisible, dans le vocabulaire du bordereau
-            ref: `${client.id.slice(0, 2)}-${m.id.slice(0, 4).toUpperCase()}`,
+            ref: refOf(m),
+            // 2.0 : accepté mais pas encore servi, une autre commande passe avant
+            waitsFor: m.status === "ACCEPTEE" && firstByCargo.get(m.cargoType) && firstByCargo.get(m.cargoType)!.id !== m.id ? refOf(firstByCargo.get(m.cargoType)!) : null,
           })),
     };
   });

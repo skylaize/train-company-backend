@@ -1,4 +1,5 @@
 import { prisma } from "../prisma";
+import { controllerReputation } from "./crew.service";
 
 // Réputation = pourcentage de trajets voyageurs réussis sans incident (retard/panne),
 // sur l'ensemble des trajets + incidents enregistrés. 100 par défaut si aucun historique.
@@ -13,5 +14,7 @@ export async function computeReputation(companyId: string): Promise<number> {
   const base = total === 0 ? 100 : Math.round((goodTrips / total) * 100);
   // 1.6 : les décisions du directeur font gagner ou perdre quelques points
   const adjust = (company as { reputationAdjust?: number } | null)?.reputationAdjust ?? 0;
-  return Math.max(0, Math.min(100, base + adjust));
+  // 2.0 : les contrôleurs à bord soignent l'accueil
+  const crew = await controllerReputation(companyId).catch(() => 0);
+  return Math.max(0, Math.min(100, base + adjust + crew));
 }

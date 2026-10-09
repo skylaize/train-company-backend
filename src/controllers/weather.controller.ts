@@ -1,23 +1,19 @@
 import { Response } from "express";
 import { AuthRequest } from "../middleware/auth.middleware";
-import { prisma } from "../prisma";
+import { weatherView, severeWeather, WEATHER_EFFECTS } from "../services/realweather.service";
 
-export const WEATHER_LABELS: Record<string, string> = {
-  BROUILLARD: "Brouillard sur le réseau — trains ralentis",
-  CANICULE: "Canicule — usure du matériel accélérée",
-  VERGLAS: "Verglas — risque de retard accru",
-  NEIGE: "Neige sur le réseau — trains ralentis, retards plus fréquents",
-};
+/* 2.0 : la vraie météo des gares (MET Norway). */
 
+export async function getStationWeather(_req: AuthRequest, res: Response) {
+  res.json(await weatherView());
+}
+
+/* Gardé pour les clients d'avant la 2.0 : la météo la plus marquante du réseau. */
 export async function getCurrentWeather(_req: AuthRequest, res: Response) {
-  const active = await prisma.weatherEvent.findFirst({
-    where: { endsAt: { gt: new Date() } },
-    orderBy: { startedAt: "desc" },
-  });
-
-  if (!active) {
-    return res.json({ type: "CLAIR", label: null, endsAt: null });
-  }
-
-  return res.json({ type: active.type, label: WEATHER_LABELS[active.type], endsAt: active.endsAt });
+  const severe = await severeWeather();
+  const order = ["ORAGE", "VERGLAS", "NEIGE", "BROUILLARD", "CANICULE"] as const;
+  const kind = order.find((k) => severe.has(k));
+  if (!kind) return res.json({ type: "CLAIR", label: null, endsAt: null });
+  const where = severe.get(kind)!.slice(0, 3).join(", ");
+  return res.json({ type: kind, label: `${WEATHER_EFFECTS[kind].label} à ${where}`, endsAt: null });
 }

@@ -35,7 +35,7 @@ export function perTrainWaiting(perDeparture: number, n: number) {
   return (perDeparture * Math.pow(k, FREQUENCY_EXP)) / k;
 }
 
-export const MODEL_SEATS: Record<string, number> = { STANDARD: 400, EXPRESS: 400, FRET_LOURD: 200, COUCHETTES: 250 };
+export const MODEL_SEATS: Record<string, number> = { STANDARD: 400, EXPRESS: 400, FRET_LOURD: 200, COUCHETTES: 250, VAPEUR: 300, LUXE: 120, CREMAILLERE: 220 }; // 2.0 : rames d'extension (dlc.service)
 
 export const CARS: Record<string, { label: string; seats: number; first: boolean; price: number; unique?: boolean }> = {
   SECONDE: { label: "Voiture de 2de classe", seats: 100, first: false, price: 150 },

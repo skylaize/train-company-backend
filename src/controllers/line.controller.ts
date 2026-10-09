@@ -5,6 +5,9 @@ import { Response } from "express";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
 import { isKnownStation } from "../services/geography.service";
+import { stationLocked } from "../services/world.service";
+import { stationNeedsDlc } from "../services/dlc.service";
+import { seasonEvent } from "../services/saison.service";
 import { isInternational } from "../services/international.service";
 import { cleanStops, routeDuration } from "../services/route.service";
 import { clampPrice } from "../services/ridership.service";
@@ -47,6 +50,12 @@ export async function createLine(req: AuthRequest, res: Response) {
   const cleaned = cleanStops(req.body.stops, departureStation, arrivalStation);
   if ("error" in cleaned) return res.status(400).json({ error: cleaned.error });
   const route = [departureStation, ...cleaned.stops, arrivalStation];
+  // 2.0 : Turin et Zurich n'ouvrent qu'avec le tunnel du Mont-Blanc
+  for (const st of route) if (await stationLocked(st)) return res.status(409).json({ error: `${st} ouvrira avec le tunnel du Mont-Blanc` });
+  for (const st of route) {
+    const dlc = await stationNeedsDlc(company.id, st);
+    if (dlc) return res.status(403).json({ error: `${st} fait partie de l'extension « ${dlc} »` });
+  }
 
   const noLicence = licenceError(company as { intlLicenceAt?: Date | null }, route);
   if (noLicence) return res.status(403).json({ error: noLicence });
@@ -67,6 +76,7 @@ export async function createLine(req: AuthRequest, res: Response) {
       companyId: company.id,
     },
   });
+  seasonEvent(company.id, "NEW_LINE");
 
   return res.status(201).json(line);
 }
@@ -124,6 +134,11 @@ export async function updateLine(req: AuthRequest, res: Response) {
   const cleaned = cleanStops(req.body.stops !== undefined ? req.body.stops : currentStops, nextDeparture, nextArrival);
   if ("error" in cleaned) return res.status(400).json({ error: cleaned.error });
   const route = [nextDeparture, ...cleaned.stops, nextArrival];
+  for (const st of route) if (await stationLocked(st)) return res.status(409).json({ error: `${st} ouvrira avec le tunnel du Mont-Blanc` });
+  for (const st of route) {
+    const dlc = await stationNeedsDlc(company.id, st);
+    if (dlc) return res.status(403).json({ error: `${st} fait partie de l'extension « ${dlc} »` });
+  }
   const before = [line.departureStation, ...((line as { stops?: string[] }).stops ?? []), line.arrivalStation];
   const same = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
   const routeChanged = !same(route, before) && !same(route, [...before].reverse());

@@ -6,9 +6,11 @@ import { stationSize, STATION_SIZE } from "../services/station.service";
 import { computeCareerStatus, RANK_DEFINITIONS, LEGEND_RANK } from "../services/career.service";
 import { PEAK_HOURS, OFF_PEAK_HOURS } from "../services/peak.service";
 import { parisHour } from "../services/time.service";
+import { MOUNTAIN_STATIONS } from "../services/dlc.service";
+import { isBuilder } from "../services/world.service";
 import { SEASONAL_EVENTS, latestEdition } from "../services/season.service";
 import { stationCounts, withTrainCount } from "../services/hub.service";
-import { INTERNATIONAL_STATIONS } from "../services/international.service";
+import { INTERNATIONAL_STATIONS, FIRST_INTERNATIONAL } from "../services/international.service";
 
 export async function listMyAchievements(req: AuthRequest, res: Response) {
   const company = await prisma.company.findUnique({
@@ -199,6 +201,29 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     number, number, number, number, number
   ];
   const longestRoute = Math.max(0, ...lines17.map((l) => (l.stops ?? []).length));
+  // 2.0 : saisons, alliances, Grand Chantier
+  const [seasonsDone, promoted, allied, builder] = (await Promise.all([
+    prisma.seasonEntry.count({ where: { companyId: company.id, finalRank: { not: null }, points: { gt: 0 } } }),
+    prisma.seasonEntry.count({ where: { companyId: company.id, outcome: "MONTEE" } }),
+    prisma.allianceMember.count({ where: { companyId: company.id } }),
+    isBuilder(company.id),
+  ])) as [number, number, number, boolean];
+  const division = (company as { division?: number }).division ?? 0;
+  // 2.0 : l'atelier, les équipages, les extensions
+  const [planned, crewRows, dlcTrains, mountainLines, partsOrdered, revisions] = (await Promise.all([
+    prisma.train.count({ where: { companyId: company.id, serviceAt: { not: null } } }),
+    prisma.staff.findMany({ where: { companyId: company.id, trainId: { not: null } }, select: { trainId: true, role: true } }),
+    prisma.train.count({ where: { companyId: company.id, model: { in: ["VAPEUR", "LUXE", "CREMAILLERE"] } } }),
+    prisma.line.count({ where: { companyId: company.id, OR: MOUNTAIN_STATIONS.flatMap((st) => [{ departureStation: st }, { arrivalStation: st }, { stops: { has: st } }]) } }),
+    prisma.transaction.count({ where: { companyId: company.id, type: "REPARATION", description: { contains: "ommand" } } }),
+    prisma.transaction.count({ where: { companyId: company.id, type: "REPARATION", description: { startsWith: "Révision" } } }),
+  ])) as [number, { trainId: string; role: string }[], number, number, number, number];
+  // 2.0 : les épaves
+  const wrecks = (await prisma.wreck.findMany({ where: { companyId: company.id }, select: { rarity: true, trainId: true } })) as { rarity: string; trainId: string | null }[];
+  const restoredWrecks = wrecks.filter((w) => w.trainId);
+  const fullCrew = new Set(crewRows.filter((r) => r.role === "CONTROLEUR").map((r) => r.trainId));
+  const hasFullCrew = crewRows.some((r) => r.role === "CONDUCTEUR" && fullCrew.has(r.trainId));
+  const stock = Object.values((company as { partsStock?: Record<string, number> }).partsStock ?? {}).reduce((a, b) => a + (Number(b) || 0), 0);
   /* 1.7 : heures de pointe. Le remplissage heure par heure des deux derniers
      jours dit si une ligne a fait le plein à la pointe, ou rempli ses rames en
      plein creux de l'après-midi. */
@@ -711,7 +736,7 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
       id: "tour-d-europe",
       name: "Tour d'Europe",
       description: "Desservir les six gares étrangères",
-      liveMet: Object.keys(INTERNATIONAL_STATIONS).every((st) =>
+      liveMet: FIRST_INTERNATIONAL.every((st) =>
         (linesForStations as { departureStation: string; arrivalStation: string }[]).some((l) => l.departureStation === st || l.arrivalStation === st)
       ),
     },
@@ -772,6 +797,24 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     { id: "heures-creuses", name: "Heures creuses", description: "Remplir ses rames à 90 % entre 14 h et 16 h", liveMet: offPeakFull },
     { id: "batisseur", name: "Bâtisseur", description: "Atteindre le grade de Bâtisseur de gares", liveMet: gradeId >= LEGEND_RANK + 1 },
     { id: "empereur-du-rail", name: "Empereur du rail", description: "Atteindre le dernier grade de la carrière", liveMet: gradeId >= RANK_DEFINITIONS.length - 1 },
+    // ---- 2.0 : saisons, alliances, Grand Chantier ----
+    { id: "premiere-saison", name: "Première saison", description: "Terminer une saison classée", liveMet: seasonsDone >= 1 },
+    { id: "montee", name: "Montée", description: "Monter de division en fin de saison", liveMet: promoted >= 1 },
+    { id: "platine", name: "Platine", description: "Atteindre la division Platine", liveMet: division >= 3 },
+    { id: "allie", name: "Allié", description: "Rejoindre ou fonder une alliance", liveMet: allied >= 1 },
+    { id: "batisseur-du-tunnel", name: "Bâtisseur du tunnel", description: "Faire avancer le tunnel du Mont-Blanc de 300 trajets", liveMet: builder },
+    // ---- 2.0 : l'atelier, les équipages, les extensions ----
+    { id: "chef-atelier", name: "Chef d'atelier", description: "Programmer la révision de 5 rames", liveMet: planned >= 5 },
+    { id: "magasinier", name: "Magasinier", description: "Avoir 6 pièces détachées en stock", liveMet: stock >= 6 },
+    { id: "pieces-detachees", name: "Pièces détachées", description: "Commander une pièce pour réparer une rame cassée", liveMet: partsOrdered >= 1 },
+    { id: "rien-ne-casse", name: "Rien ne casse", description: "Réviser vos rames 25 fois avant la panne", liveMet: revisions >= 25 },
+    { id: "equipage-complet", name: "Équipage complet", description: "Faire rouler une rame avec un contrôleur et un conducteur à bord", liveMet: hasFullCrew },
+    { id: "legende-vivante", name: "Légende vivante", description: "Faire entrer une rame d'extension dans votre parc", liveMet: dlcTrains >= 1 },
+    { id: "premier-sommet", name: "Premier sommet", description: "Ouvrir une ligne vers une gare de montagne", liveMet: mountainLines >= 1 },
+    { id: "ferrailleur", name: "Ferrailleur", description: "Racheter une épave avant les autres", liveMet: wrecks.length >= 1 },
+    { id: "restaurateur", name: "Restaurateur", description: "Remettre une épave en service", liveMet: restoredWrecks.length >= 1 },
+    { id: "conservateur", name: "Conservateur", description: "Faire rouler trois rames de collection restaurées", liveMet: restoredWrecks.length >= 3 },
+    { id: "piece-de-musee", name: "Pièce de musée", description: "Restaurer une épave légendaire", liveMet: restoredWrecks.some((w) => w.rarity === "LEGENDAIRE") },
   ];
 
   /* 1.6 : « Premiers pas » récompense la liste de départ au complet. Chaque étape

@@ -48,6 +48,7 @@ model Company {
   balance      Int      @default(500) // trésorerie, en pièces
   maxTrains    Int      @default(2) // capacité du dépôt, extensible contre paiement
   isPremium    Boolean  @default(false) // débloque les modèles de trains exclusifs
+  premiumReveal String? // 2.0 : animation Premium à montrer ("" = acheté soi-même, sinon nom de qui l'offre)
   tutorialSeen Boolean  @default(false) // mémorisé côté compte, pas par navigateur
   theme        String   @default("sombre") // "sombre" | "papier", suit le joueur d'un appareil à l'autre
   lastSeenVersion String? // dernier bulletin de nouveautés lu, mémorisé sur le compte et non par navigateur
@@ -59,8 +60,10 @@ model Company {
   title        String?  // titre affiché au classement : gagné (palier 5) ou choisi parmi ceux de la boutique
   emblem       String?  // emblème porté devant le nom de la compagnie, choisi parmi ceux débloqués
   plate        String?  // 1.7.1 : plaque d'honneur portée au classement (laiton, email, or)
+  division     Int      @default(0) // 2.0 : division de saison (0 Bronze, 1 Argent, 2 Or, 3 Platine)
   cabSkin      String?  // matériel de collection affiché dans la vue cabine (1.4), choisi parmi ceux achetés
   intlLicenceAt DateTime? // licence internationale (1.6) : date d'achat, null tant qu'elle n'est pas achetée
+  partsStock   Json     @default("{}") // 2.0 : pièces détachées en stock au magasin { FREINS: 2, … }
   reputationAdjust Int  @default(0) // décisions (1.6) : points gagnés ou perdus, ajoutés à la réputation calculée
   nextDecisionAt DateTime? // décisions (1.6) : pas de nouvelle décision avant cette heure
   // Bilan de retour (Premium) : dernière activité connue, et fenêtre d'absence à résumer
@@ -109,6 +112,7 @@ model Company {
   sharePrice   Float    @default(0) // cours de référence, recalculé toutes les heures
   lastWeeklyReport String? // semaine (AAAA-MM-JJ du lundi, heure de Paris) du dernier rapport hebdo notifié
   lastDividendOn String?  // jour (AAAA-MM-JJ, heure de Paris) du dernier versement de dividendes
+  wrecks       Wreck[]
 }
 
 // Un objet cosmétique acheté. Une ligne par objet et par compagnie : on ne
@@ -120,6 +124,8 @@ model ShopPurchase {
   stripeSessionId String   @unique
   amountCents     Int
   purchasedAt     DateTime @default(now())
+  giftFrom        String? // 2.0 : nom de la compagnie qui l'a offert
+  revealedAt      DateTime? // 2.0 : l'animation de déballage a été vue
 
   company         Company  @relation(fields: [companyId], references: [id])
   companyId       String
@@ -358,6 +364,45 @@ model Train {
   incidents    Incident[]
 
   purchasedAt  DateTime    @default(now())
+
+  // 2.0 — l'atelier : état par organe, casse, pièces, révision programmée
+  organs        Json?      // poids d'usure par organe { FREINS, BOGIES, MOTEUR, CAISSE } ; l'organe le plus chargé casse en premier
+  brokenPart    String?    // organe cassé : la réparation demande la pièce
+  partsEta      DateTime?  // pièce commandée, livrée à cette heure
+  workshopUntil DateTime?  // en révision à l'atelier jusqu'à cette heure
+  serviceAt     Int?       // révision automatique quand l'usure atteint ce seuil (40, 60, 80)
+
+  // 2.0 — rame de collection, restaurée depuis une épave (numéro, histoire, livrée d'époque, prestige)
+  heritage      Json?
+}
+
+// 2.0 : une épave près d'une gare. Libre (companyId nul) jusqu'à ce qu'une
+// compagnie la rachète ; restaurée organe par organe ; trainId une fois remise en service.
+model Wreck {
+  id           String    @id @default(uuid())
+  kind         String
+  rarity       String
+  station      String
+  serial       String
+  year         Int
+  retiredYear  Int
+  history      String
+  damage       Json      // dégâts par organe, en %
+  restored     String[]  @default([])
+  working      String?   // organe en cours de restauration
+  workUntil    DateTime?
+  price        Int
+  spent        Int       @default(0)
+  discoveredAt DateTime  @default(now())
+  expiresAt    DateTime
+  company      Company?  @relation(fields: [companyId], references: [id])
+  companyId    String?
+  claimedAt    DateTime?
+  trainId      String?
+  completedAt  DateTime?
+
+  @@index([companyId])
+  @@index([expiresAt])
 }
 
 enum ContractStatus {
@@ -442,6 +487,8 @@ model Staff {
   raiseRequested Boolean  @default(false) // l'employé a atteint le niveau suivant et attend une réponse
   refusedAtXp    Int      @default(0)    // expérience au dernier refus, pour ne pas redemander aussitôt
   salaryPerTick  Int
+  unpaidTicks    Int      @default(0)
+  trainId        String?  // 2.0 : contrôleur ou conducteur affecté à une rame    // 1.7.2 : tours sans salaire ; l'employé part au bout d'une heure, plus au premier
   hiredAt        DateTime @default(now())
 
   company        Company  @relation(fields: [companyId], references: [id])
@@ -451,6 +498,18 @@ model Staff {
   @@index([companyId, role])
 }
 
+// 2.0 : la vraie météo de chaque gare (MET Norway), relevée toutes les 20 minutes
+model StationWeather {
+  station   String   @id
+  kind      String   // CLAIR | NUAGEUX | PLUIE | ORAGE | NEIGE | VERGLAS | BROUILLARD | CANICULE
+  symbol    String
+  temp      Float
+  wind      Float
+  isDay     Boolean  @default(true)
+  updatedAt DateTime
+}
+
+// 1.4 à 1.7 : épisodes météo inventés, sur tout le réseau. Plus créés depuis la 2.0.
 model WeatherEvent {
   id        String   @id @default(uuid())
   type      String   // BROUILLARD | CANICULE | VERGLAS | NEIGE (hiver seulement)
@@ -674,4 +733,152 @@ model LineLoadHour {
 
   @@unique([lineId, hour])
   @@index([companyId, hour])
+}
+
+
+// ============================================================
+// 2.0 — Saisons
+// ============================================================
+
+// Une saison de quatre semaines. Le classement de saison repart à zéro ;
+// la compagnie, elle, garde tout.
+model Season {
+  id        String   @id @default(uuid())
+  number    Int      @unique
+  name      String
+  startsAt  DateTime
+  endsAt    DateTime
+  endedAt   DateTime?
+  createdAt DateTime @default(now())
+}
+
+// La place d'une compagnie dans une saison : sa division, son groupe de
+// douze, ses points.
+model SeasonEntry {
+  id           String   @id @default(uuid())
+  seasonId     String
+  companyId    String
+  division     Int      // 0 Bronze, 1 Argent, 2 Or, 3 Platine
+  groupNo      Int
+  points       Int      @default(0)
+  rankYesterday Int?    // pour la flèche d'évolution sur 24 h
+  finalRank    Int?
+  outcome      String?  // MONTEE, MAINTIEN, DESCENTE
+  rewarded     Boolean  @default(false)
+  joinedAt     DateTime @default(now())
+
+  @@unique([seasonId, companyId])
+  @@index([seasonId, division, groupNo])
+}
+
+// La progression d'une compagnie sur un objectif de la semaine.
+model SeasonObjectiveProgress {
+  id        String   @id @default(uuid())
+  seasonId  String
+  week      Int
+  kind      String
+  companyId String
+  progress  Int      @default(0)
+  doneAt    DateTime?
+
+  @@unique([seasonId, week, kind, companyId])
+}
+
+// ============================================================
+// 2.0 — Alliances
+// ============================================================
+
+model Alliance {
+  id         String   @id @default(uuid())
+  name       String   @unique
+  color      String   @default("#f59e0b")
+  discordUrl String?
+  founderId  String
+  createdAt  DateTime @default(now())
+}
+
+model AllianceMember {
+  id         String   @id @default(uuid())
+  allianceId String
+  companyId  String   @unique
+  joinedAt   DateTime @default(now())
+
+  @@index([allianceId])
+}
+
+model AllianceInvite {
+  id         String   @id @default(uuid())
+  allianceId String
+  companyId  String
+  createdAt  DateTime @default(now())
+
+  @@unique([allianceId, companyId])
+}
+
+// Le tableau d'affichage : messages courts, gardés sept jours.
+model AllianceMessage {
+  id         String   @id @default(uuid())
+  allianceId String
+  companyId  String
+  text       String
+  createdAt  DateTime @default(now())
+
+  @@index([allianceId, createdAt])
+}
+
+// ============================================================
+// 2.0 — Le Grand Chantier
+// ============================================================
+
+// Un objectif commun à tout le serveur : chaque trajet le fait avancer.
+model WorldProject {
+  id          String    @id
+  name        String
+  target      Int
+  progress    Int       @default(0)
+  startedAt   DateTime  @default(now())
+  completedAt DateTime?
+}
+
+model WorldContribution {
+  id        String @id @default(uuid())
+  projectId String
+  companyId String
+  amount    Int    @default(0)
+
+  @@unique([projectId, companyId])
+}
+
+// 1.7.2 : un seul serveur fait tourner la simulation. Pendant un déploiement,
+// l'ancien et le nouveau conteneur cohabitent quelques instants ; sans ce bail,
+// les deux jouaient chaque tour (double paie, double entretien).
+model SimLease {
+  id     Int      @id
+  holder String
+  until  DateTime
+}
+
+// 2.0 : les suites d'une décision. Un choix peut avoir une conséquence
+// quelques heures plus tard : une nouvelle décision, ou un effet direct.
+model DecisionFollowUp {
+  id        String   @id @default(uuid())
+  companyId String
+  kind      String   // clé d'une suite (voir decision.service)
+  data      Json?
+  dueAt     DateTime
+  done      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([done, dueAt])
+}
+
+// 2.0 : pièces du parcours gratuit du Pass de saison, déjà réclamées
+model SeasonPassClaim {
+  id        String   @id @default(uuid())
+  seasonId  String
+  companyId String
+  tier      Int
+  createdAt DateTime @default(now())
+
+  @@unique([seasonId, companyId, tier])
 }

@@ -62,7 +62,22 @@ export function repRewardFor(target: number) {
 /* Un abonné reçoit deux ordres par chargeur au lieu d'un. C'est du choix, pas
    du rendement : la prime et la réputation d'un ordre sont identiques pour
    tout le monde, l'abonné a seulement plus d'options sur la table. */
+/* 2.0 : deux pages ouvertes en même temps (ou deux appels rapprochés)
+   pouvaient créer deux fois le même ordre. Un seul rafraîchissement à la fois
+   par compagnie, et une vérification après coup. */
+const refreshing = new Set<string>();
+
 export async function refreshMissionsFor(companyId: string, gradeId: number, isPremium = false) {
+  if (refreshing.has(companyId)) return;
+  refreshing.add(companyId);
+  try {
+    await refreshMissionsInner(companyId, gradeId, isPremium);
+  } finally {
+    refreshing.delete(companyId);
+  }
+}
+
+async function refreshMissionsInner(companyId: string, gradeId: number, isPremium: boolean) {
   const ordersPerClient = isPremium ? 2 : 1;
   const [relations, missions] = await Promise.all([
     prisma.clientRelation.findMany({ where: { companyId } }),
@@ -75,8 +90,10 @@ export async function refreshMissionsFor(companyId: string, gradeId: number, isP
     (relations as Array<{ clientId: string; reputation: number }>).map((r) => [r.clientId, r.reputation])
   );
   const openByClient = new Map<string, number>();
-  (missions as Array<{ clientId: string }>).forEach((m) => {
+  const openCargo = new Map<string, Set<string>>();
+  (missions as Array<{ clientId: string; cargoType: string }>).forEach((m) => {
     openByClient.set(m.clientId, (openByClient.get(m.clientId) ?? 0) + 1);
+    openCargo.set(m.clientId, new Set([...(openCargo.get(m.clientId) ?? []), m.cargoType]));
   });
 
   const now = Date.now();
@@ -103,10 +120,14 @@ export async function refreshMissionsFor(companyId: string, gradeId: number, isP
 
     const rep = repByClient.get(client.id) ?? 0;
     const level = levelFromReputation(rep).level;
-    const cargoType = pick(client.cargoTypes);
+    /* 2.0 : le second ordre d'un abonné porte sur une autre marchandise :
+       deux ordres identiques côte à côte passaient pour un doublon */
+    const taken = openCargo.get(client.id) ?? new Set<string>();
+    const fresh = client.cargoTypes.filter((c) => !taken.has(c));
+    const cargoType = pick(fresh.length ? fresh : client.cargoTypes);
     const target = targetFor(gradeId, level);
 
-    await prisma.mission.create({
+    const created = await prisma.mission.create({
       data: {
         companyId,
         clientId: client.id,
@@ -118,7 +139,14 @@ export async function refreshMissionsFor(companyId: string, gradeId: number, isP
         offerUntil: new Date(now + OFFER_WINDOW_H * 3600_000),
       },
     });
+    // filet de sécurité : si un autre serveur a créé le sien entre-temps, on retire celui-ci
+    const openNow = await prisma.mission.count({ where: { companyId, clientId: client.id, status: { in: ["PROPOSEE", "ACCEPTEE"] } } });
+    if (openNow > ordersPerClient) {
+      await prisma.mission.delete({ where: { id: created.id } }).catch(() => undefined);
+      continue;
+    }
     openByClient.set(client.id, (openByClient.get(client.id) ?? 0) + 1);
+    openCargo.set(client.id, new Set([...taken, cargoType]));
   }
 }
 

@@ -1,3 +1,5 @@
+import { tunnelOpen, TUNNEL_STATIONS } from "../services/world.service";
+import { MOUNTAIN_STATIONS, ownedDlcs } from "../services/dlc.service";
 import { lineRidership } from "../services/pricing.service";
 import { Request, Response } from "express";
 import { prisma } from "../prisma";
@@ -79,10 +81,15 @@ export async function getNetworkMap(req: AuthRequest, res: Response) {
     (myLines as { departureStation: string; arrivalStation: string; stops: string[]; _count: { trains: number } }[]).map((l) => ({ ...withTrainCount(l), companyId: company.id }))
   ).get(company.id);
 
-  const stations = STATIONS.map((name) => ({
+  // 2.0 : Turin et Zurich restent cachées tant que le tunnel n'est pas ouvert
+  const tunnel = await tunnelOpen();
+  const dlcs = await ownedDlcs(company.id);
+  const stations = STATIONS.filter((name) => tunnel || !TUNNEL_STATIONS.includes(name)).map((name) => ({
     name,
     size: stationSize(name),
     sizeLabel: SIZE_LABEL[stationSize(name)],
+    // 2.0 : gare d'extension, et si la compagnie la possède
+    dlc: MOUNTAIN_STATIONS.includes(name) ? { id: "dlc-montagne", name: "Montagne", owned: dlcs.has("dlc-montagne") } : null,
     demand: Math.round(stationDemand(name, events) * 100) / 100,
     events: events
       .filter((e) => e.station === name)
@@ -155,7 +162,7 @@ export async function getNetworkMap(req: AuthRequest, res: Response) {
     season: seasonView(),
     // 1.6 : gares à l'étranger et licence, service de nuit
     international: {
-      stations: Object.entries(INTERNATIONAL_STATIONS).map(([name, v]) => ({ name, ...v })),
+      stations: Object.entries(INTERNATIONAL_STATIONS).filter(([name]) => tunnel || !TUNNEL_STATIONS.includes(name)).map(([name, v]) => ({ name, ...v })),
       licence: await licenceView(company as { intlLicenceAt: Date | null; isPremium: boolean; balance: number }, gradeId),
       revenueBonus: INTL_REVENUE_BONUS,
       tollRate: TOLL_RATE,
@@ -168,6 +175,8 @@ export async function getNetworkMap(req: AuthRequest, res: Response) {
     })),
     // 1.7 : heures de pointe
     peak: peakInfo(),
+    // 2.0 : le Grand Chantier
+    tunnel: { open: tunnel, stations: TUNNEL_STATIONS },
     night: { active: isNightService(), from: NIGHT_FROM, to: NIGHT_TO, multiplier: NIGHT_MULTIPLIER, dayMultiplier: DAY_COUCHETTES_MULTIPLIER, minDuration: NIGHT_MIN_DURATION },
   });
 }

@@ -24,7 +24,13 @@ export const INTERNATIONAL_STATIONS: Record<string, { country: string; code: str
   "Genève": { country: "Suisse", code: "CH" },
   Milan: { country: "Italie", code: "IT" },
   Barcelone: { country: "Espagne", code: "ES" },
+  // 2.0 : ouvertes par le tunnel du Mont-Blanc
+  Turin: { country: "Italie", code: "IT" },
+  Zurich: { country: "Suisse", code: "CH" },
 };
+
+// les six gares de la 1.6, pour les succès et grades qui les comptent
+export const FIRST_INTERNATIONAL = ["Londres", "Bruxelles", "Francfort", "Genève", "Milan", "Barcelone"];
 
 export const LICENCE_COST = 6000;
 export const LICENCE_MIN_GRADE = 3; // Baron du rail

@@ -31,6 +31,7 @@ import { tenderRouter } from "./routes/tender.routes";
 import { decisionRouter } from "./routes/decision.routes";
 import { infrastructureRouter } from "./routes/infrastructure.routes";
 import { financeRouter } from "./routes/finance.routes";
+import { v2Router } from "./routes/v2.routes";
 import { handleStripeWebhook } from "./controllers/billing.controller";
 import { startSimulationJob } from "./jobs/simulation.job";
 
@@ -74,6 +75,7 @@ app.use("/api", shopRouter);
 app.use("/api", reportRouter);
 app.use("/api", infrastructureRouter);
 app.use("/api", financeRouter);
+app.use("/api", v2Router);
 app.use("/api", tenderRouter);
 app.use("/api", decisionRouter);
 app.use("/api", incidentRouter);

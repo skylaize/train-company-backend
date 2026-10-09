@@ -11,6 +11,10 @@ const TRAIN_VALUE: Record<string, number> = {
   EXPRESS: 450,
   FRET_LOURD: 450,
   COUCHETTES: 900,
+  // 2.0 : extensions
+  VAPEUR: 600,
+  LUXE: 1600,
+  CREMAILLERE: 500,
 };
 
 /* Une rame usée à 100 % ne vaut plus que la moitié de son prix. */

@@ -2,6 +2,8 @@ import { Response } from "express";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
 import { buildLeaderRows } from "../services/leaderboard.service";
+import { RANK_DEFINITIONS } from "../services/career.service";
+import { CREW_ROLES } from "../services/crew.service";
 import {
   ROLES,
   salaryFor,
@@ -70,6 +72,9 @@ export async function getStaffOverview(req: AuthRequest, res: Response) {
     }),
   ]);
   const rows = staff as StaffRow[];
+  const trainNames = new Map(
+    ((await prisma.train.findMany({ where: { companyId: company.id }, select: { id: true, name: true } })) as { id: string; name: string }[]).map((t) => [t.id, t.name])
+  );
   const effects = effectsFor(rows, trainCount);
   const allocation = coverageAllocation(rows, trainCount);
   const revenuePerHour = ((revenue24h as { _sum: { amount: number | null } })._sum.amount ?? 0) / 24;
@@ -97,6 +102,10 @@ export async function getStaffOverview(req: AuthRequest, res: Response) {
       covered: allocation.get(s.id) ?? null,
       savingsPerHour: Math.round(estimatedSavingsPerHour(s, allocation.get(s.id) ?? 0, effects, revenuePerHour)),
       hiredAt: s.hiredAt,
+      // 2.0 : la rame où l'équipier est affecté
+      crew: (CREW_ROLES as readonly string[]).includes(s.role),
+      trainId: (s as StaffRow & { trainId?: string | null }).trainId ?? null,
+      trainName: trainNames.get((s as StaffRow & { trainId?: string | null }).trainId ?? "") ?? null,
     };
   });
 
@@ -149,7 +158,7 @@ export async function hireStaff(req: AuthRequest, res: Response) {
     const rows = await buildLeaderRows();
     const gradeId = rows.find((r) => r.id === company.id)?.gradeId ?? 0;
     if (gradeId < def.minGradeId) {
-      return res.status(403).json({ error: "Ce poste demande le grade « Chef de réseau »" });
+      return res.status(403).json({ error: `Ce poste demande le grade « ${RANK_DEFINITIONS[def.minGradeId]?.name ?? "supérieur"} »` });
     }
   }
 
@@ -234,4 +243,29 @@ export async function answerRaise(req: AuthRequest, res: Response) {
   });
 
   return res.json({ ok: true, level: updated.level });
+}
+
+/* 2.0 : affecter un contrôleur ou un conducteur à une rame (ou le retirer,
+   trainId = null). Une rame embarque un contrôleur et un conducteur au plus :
+   affecter un second équipier du même poste renvoie le premier au dépôt. */
+export async function assignCrew(req: AuthRequest, res: Response) {
+  const { staffId } = req.body ?? {};
+  const trainId = req.body?.trainId ? String(req.body.trainId) : null;
+  const company = await getOwnedCompanyOrFail(req.userId as string);
+  if (!company) return res.status(404).json({ error: "Créez d'abord votre compagnie" });
+  const member = await prisma.staff.findFirst({ where: { id: String(staffId ?? ""), companyId: company.id } });
+  if (!member) return res.status(404).json({ error: "Employé introuvable" });
+  if (!(CREW_ROLES as readonly string[]).includes(member.role)) return res.status(409).json({ error: "Seuls les contrôleurs et les conducteurs montent à bord" });
+  if (trainId) {
+    const train = await prisma.train.findFirst({ where: { id: trainId, companyId: company.id }, select: { id: true, model: true } });
+    if (!train) return res.status(404).json({ error: "Train introuvable" });
+    if (member.role === "CONTROLEUR" && train.model === "FRET_LOURD") return res.status(409).json({ error: "Pas de voyageurs à contrôler dans un train de fret" });
+    await prisma.$transaction([
+      prisma.staff.updateMany({ where: { companyId: company.id, role: member.role, trainId, id: { not: member.id } }, data: { trainId: null } }),
+      prisma.staff.update({ where: { id: member.id }, data: { trainId } }),
+    ]);
+  } else {
+    await prisma.staff.update({ where: { id: member.id }, data: { trainId: null } });
+  }
+  return res.json({ ok: true, trainId });
 }

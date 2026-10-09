@@ -32,6 +32,10 @@ export const STATION_SIZE: Record<string, number> = {
   Chartres: 1, Troyes: 1, "La Rochelle": 1,
   // 1.6 : l'étranger
   Londres: 5, Bruxelles: 4, Francfort: 4, Milan: 4, Barcelone: 4, "Genève": 3,
+  // 2.0 : le tunnel du Mont-Blanc
+  Turin: 4, Zurich: 4,
+  // 2.0 : extension Montagne
+  Chamonix: 2, "Bourg-Saint-Maurice": 2, "Briançon": 2, "Font-Romeu": 1,
 };
 
 export const SIZE_LABEL: Record<number, string> = {

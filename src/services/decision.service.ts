@@ -5,6 +5,8 @@ import { stationSize } from "./station.service";
 import { INTERNATIONAL_STATIONS } from "./international.service";
 import { repairCostPerPoint, staffEffectsFor } from "./staff.service";
 import { computeReputation } from "./reputation.service";
+import { organBias, breakdownData, serviceMinutes, SERVICE_DISCOUNT, freshBias, PARTS } from "./workshop.service";
+import { salaryFor, randomStaffName } from "./staff.service";
 
 /* ============================================================
    Décisions du directeur (1.6).
@@ -43,6 +45,14 @@ export function scaled(base: number, runningTrains: number) {
   return Math.max(10, Math.round((base * s) / 10) * 10);
 }
 
+/* 2.0 : les montants suivent aussi les RECETTES. Avec la seule taille de la
+   flotte, une compagnie riche réglait tout sans y penser : 300 pi. ne
+   pèsent rien quand on en gagne 5 000 par heure. Un coût vaut désormais au
+   moins quelques heures de recettes, et une prime autant. */
+export function priced(base: number, runningTrains: number, revenuePerHour: number, hours: number) {
+  return Math.max(scaled(base, runningTrains), Math.round((revenuePerHour * hours) / 10) * 10);
+}
+
 const fmt = (n: number) => n.toLocaleString("fr-FR").replace(/ | /g, " ");
 
 interface Ctx {
@@ -52,6 +62,9 @@ interface Ctx {
   reputation: number;
   rivalPairs: { a: string; b: string; rival: string }[];
   now: Date;
+  revenuePerHour: number; // 2.0 : recettes des dernières 24 h, par heure
+  staff: { id: string; role: string; level: number; name: string }[];
+  gradeId: number;
   pick: <T>(xs: T[]) => T;
 }
 
@@ -85,7 +98,7 @@ const MAKERS: Record<string, Maker> = {
       data: { trainId: t.id },
       choices: [
         { id: "reparer", label: "La remettre à neuf maintenant", effects: [{ text: "Coût d'une réparation complète", tone: "cout" }, { text: "Usure remise à 0", tone: "gain" }] },
-        { id: "rouler", label: "La laisser rouler", effects: [{ text: "Gratuit", tone: "gain" }, { text: "1 chance sur 3 de panne immédiate", tone: "risque" }] },
+        { id: "rouler", label: "La laisser rouler", effects: [{ text: "Gratuit", tone: "gain" }, { text: "1 chance sur 3 de panne immédiate", tone: "risque" }, { text: "Sinon, le bogie peut céder dans les heures qui viennent", tone: "risque" }] },
       ],
       defaultChoiceId: "rouler",
     };
@@ -96,7 +109,7 @@ const MAKERS: Record<string, Maker> = {
     if (stations.length === 0) return null;
     const g = c.pick(stations);
     const n = running(c).length;
-    const gain = scaled(150, n);
+    const gain = priced(150, n, c.revenuePerHour, 1);
     const idle = c.trains.some((t) => !t.lineId && t.status === "IDLE" && t.model !== "COUCHETTES");
     return {
       kind: "FESTIVAL",
@@ -118,8 +131,8 @@ const MAKERS: Record<string, Maker> = {
     if (stations.length === 0) return null;
     const g = c.pick(stations);
     const n = running(c).length;
-    const prime = scaled(100, n);
-    const interim = scaled(40, n);
+    const prime = priced(100, n, c.revenuePerHour, 1.5);
+    const interim = priced(40, n, c.revenuePerHour, 0.6);
     return {
       kind: "GREVE",
       title: `Préavis de grève à ${g}`,
@@ -140,7 +153,7 @@ const MAKERS: Record<string, Maker> = {
     const candidates = STATIONS.filter((s) => !served.has(s) && !(s in INTERNATIONAL_STATIONS) && stationSize(s) >= 3);
     if (candidates.length === 0 || c.lines.length === 0) return null;
     const g = c.pick(candidates);
-    const reward = scaled(250, running(c).length);
+    const reward = priced(250, running(c).length, c.revenuePerHour, 2);
     return {
       kind: "MAIRE",
       title: `Le maire de ${g} vous écrit`,
@@ -171,15 +184,16 @@ const MAKERS: Record<string, Maker> = {
   RIVAL: (c) => {
     if (c.rivalPairs.length === 0) return null;
     const p = c.pick(c.rivalPairs);
+    const service = priced(60, running(c).length, c.revenuePerHour, 0.6);
     return {
       kind: "RIVAL",
       title: `Guerre des prix sur ${p.a} – ${p.b}`,
       body: `Une compagnie concurrente affiche des billets à moitié prix sur ${p.a} – ${p.b}, la liaison que vous partagez avec elle. Vos voyageurs hésitent. Suivre, c'est gagner moins par trajet ; ne rien faire, c'est les laisser partir.`,
       place: `${p.a} – ${p.b}`,
-      data: { a: p.a, b: p.b, rival: p.rival },
+      data: { a: p.a, b: p.b, rival: p.rival, cost: service },
       choices: [
         { id: "suivre", label: "Suivre la baisse", effects: [{ text: "Recettes −15 % sur la liaison pendant 3 h", tone: "cout" }, { text: "+3 réputation", tone: "gain" }] },
-        { id: "qualite", label: "Miser sur le service", effects: [{ text: `−${fmt(scaled(60, running(c).length))} pi.`, tone: "cout" }, { text: "Recettes normales", tone: "gain" }] },
+        { id: "qualite", label: "Miser sur le service", effects: [{ text: `−${fmt(service)} pi.`, tone: "cout" }, { text: "Recettes normales", tone: "gain" }] },
         { id: "ignorer", label: "Ignorer", effects: [{ text: "Recettes −30 % sur la liaison pendant 3 h", tone: "risque" }] },
       ],
       defaultChoiceId: "ignorer",
@@ -189,7 +203,7 @@ const MAKERS: Record<string, Maker> = {
   METEO: (c) => {
     const month = c.now.getUTCMonth() + 1;
     const summer = month >= 5 && month <= 9;
-    const cost = scaled(80, running(c).length);
+    const cost = priced(80, running(c).length, c.revenuePerHour, 1);
     return summer
       ? {
           kind: "METEO",
@@ -221,7 +235,7 @@ const MAKERS: Record<string, Maker> = {
     const r = running(c);
     if (r.length === 0) return null;
     const t = c.pick(r);
-    const cost = scaled(50, r.length);
+    const cost = priced(50, r.length, c.revenuePerHour, 0.5);
     return {
       kind: "VIP",
       title: `Une ministre voyage sur ${t.line!.departureStation} → ${t.line!.arrivalStation}`,
@@ -257,7 +271,7 @@ const MAKERS: Record<string, Maker> = {
     const stations = myStations(c);
     if (stations.length === 0) return null;
     const g = c.pick(stations);
-    const cost = scaled(90, running(c).length);
+    const cost = priced(90, running(c).length, c.revenuePerHour, 1);
     return {
       kind: "TOURISME",
       title: `L'office du tourisme de ${g} propose une campagne`,
@@ -276,7 +290,7 @@ const MAKERS: Record<string, Maker> = {
     const stations = myStations(c);
     if (stations.length === 0) return null;
     const g = c.pick(stations);
-    const cost = scaled(50, running(c).length);
+    const cost = priced(50, running(c).length, c.revenuePerHour, 0.6);
     return {
       kind: "TRAVAUX",
       title: `Travaux sur les voies autour de ${g}`,
@@ -291,6 +305,90 @@ const MAKERS: Record<string, Maker> = {
     };
   },
 };
+
+/* ---------- 2.0 : des enjeux qui ne se règlent pas qu'en pièces ---------- */
+
+Object.assign(MAKERS, {
+  SYNDICAT: (c: Ctx): Draft | null => {
+    if (c.staff.length < 2) return null;
+    const prime = priced(120, running(c).length, c.revenuePerHour, 2);
+    return {
+      kind: "SYNDICAT",
+      title: "Vos équipes demandent une hausse de salaire",
+      body: `Les ${c.staff.length} employés de la compagnie ont signé une lettre commune : le réseau grandit, les cadences aussi, et ils veulent 10 % de plus. Le délégué attend votre réponse.`,
+      place: null,
+      data: { prime },
+      choices: [
+        { id: "accorder", label: "Accorder 10 % à tout le monde", effects: [{ text: "Salaires +10 % jusqu'à la prochaine augmentation", tone: "cout" }, { text: "+2 réputation", tone: "gain" }] },
+        { id: "prime", label: "Verser une prime unique", effects: [{ text: `−${fmt(prime)} pi.`, tone: "cout" }, { text: "La question reviendra peut-être", tone: "risque" }] },
+        { id: "refuser", label: "Refuser", effects: [{ text: "Gratuit aujourd'hui", tone: "gain" }, { text: "Une grève est possible dans les heures qui viennent", tone: "risque" }] },
+      ],
+      defaultChoiceId: "refuser",
+    };
+  },
+
+  INSPECTION: (c: Ctx): Draft | null => {
+    const fleet = c.trains.filter((t) => t.status !== "MAINTENANCE");
+    if (fleet.length < 2) return null;
+    const worn = fleet.filter((t) => t.wear >= 50);
+    return {
+      kind: "INSPECTION",
+      title: "L'inspection de sécurité passe dans trois heures",
+      body: `L'Établissement public de sécurité ferroviaire annonce un contrôle de votre parc. ${worn.length ? `${worn.length} rame${worn.length > 1 ? "s sont" : " est"} usée${worn.length > 1 ? "s" : ""} à plus de 50 % : l'inspecteur les regardera de près.` : "Votre parc est en bon état, mais l'inspecteur ne prévient pas deux fois."}`,
+      place: null,
+      data: { worn: worn.map((t) => t.id) },
+      choices: [
+        { id: "reviser", label: "Réviser les rames usées avant son passage", effects: [{ text: worn.length ? `${worn.length} rame${worn.length > 1 ? "s" : ""} à l'atelier quelques minutes` : "Rien à réviser", tone: "cout" }, { text: "Révision au tarif atelier", tone: "cout" }, { text: "Inspection sans reproche", tone: "gain" }] },
+        { id: "laisser", label: "Laisser l'inspecteur venir", effects: [{ text: "Rien à payer maintenant", tone: "gain" }, { text: "Amende et rame immobilisée si le parc est usé", tone: "risque" }] },
+      ],
+      defaultChoiceId: "laisser",
+    };
+  },
+
+  RAPPEL: (c: Ctx): Draft | null => {
+    const byModel = new Map<string, Ctx["trains"]>();
+    for (const t of c.trains) byModel.set(t.model, [...(byModel.get(t.model) ?? []), t]);
+    const series = [...byModel.entries()].filter(([, ts]) => ts.length >= 2);
+    if (series.length === 0) return null;
+    const [model, ts] = c.pick(series);
+    const label = MODEL_LABEL[model] ?? model;
+    return {
+      kind: "RAPPEL",
+      title: `Le constructeur rappelle la série ${label}`,
+      body: `Un défaut de fabrication a été trouvé sur le moteur de certaines rames ${label}. Le constructeur propose de les contrôler gratuitement, mais chaque rame passe un moment à l'atelier. Vous en avez ${ts.length}.`,
+      place: null,
+      data: { model, trains: ts.map((t) => t.id) },
+      choices: [
+        { id: "rappel", label: "Envoyer toute la série à l'atelier", effects: [{ text: `${ts.length} rames immobilisées 8 minutes`, tone: "cout" }, { text: "Contrôle et révision offerts", tone: "gain" }, { text: "+2 réputation", tone: "gain" }] },
+        { id: "ignorer", label: "Continuer à rouler", effects: [{ text: "Aucune immobilisation", tone: "gain" }, { text: "Une rame de la série risque de casser son moteur", tone: "risque" }] },
+      ],
+      defaultChoiceId: "ignorer",
+    };
+  },
+
+  RECRUTEMENT: (c: Ctx): Draft | null => {
+    if (c.gradeId < 1) return null;
+    const role = c.pick(["CONDUCTEUR", "CONTROLEUR"]);
+    const level = 3;
+    const label = role === "CONDUCTEUR" ? "conducteur" : "contrôleur";
+    const perHour = salaryFor(role, level) * 120;
+    const name = randomStaffName();
+    return {
+      kind: "RECRUTEMENT",
+      title: `${name}, ${label} chevronné, cherche une place`,
+      body: `${name} a quinze ans de métier dans une compagnie régionale qui ferme. Il arrive au niveau 3, sans passer par les débuts, mais il ne viendra pas pour le salaire d'un débutant.`,
+      place: null,
+      data: { role, level, name },
+      choices: [
+        { id: "embaucher", label: `L'embaucher (${fmt(perHour)} pi./h)`, effects: [{ text: `${label[0].toUpperCase()}${label.slice(1)} de niveau 3, à affecter à une rame`, tone: "gain" }, { text: `Salaire de niveau 3`, tone: "cout" }] },
+        { id: "decliner", label: "Décliner", effects: [{ text: "Rien ne bouge", tone: "neutre" }] },
+      ],
+      defaultChoiceId: "decliner",
+    };
+  },
+});
+
+const MODEL_LABEL: Record<string, string> = { STANDARD: "Standard", EXPRESS: "Express", FRET_LOURD: "Fret lourd", COUCHETTES: "Couchettes", VAPEUR: "Vapeur", LUXE: "Grand luxe", CREMAILLERE: "Crémaillère" };
 
 export const KINDS = Object.keys(MAKERS);
 
@@ -334,7 +432,9 @@ const H = 3600_000;
 
 /* Applique le choix et renvoie ce qui s'est passé, en une phrase. Les
    effets durables sont écrits sur la décision elle-même (effectKey…). */
-export async function applyChoice(d: DecisionRow, choiceId: string, random = Math.random): Promise<Resolution & { effect?: { key: string; mult: number; hours: number }; goal?: { station: string; reward: number } }> {
+export type Follow = { kind: string; hours: number; data?: Record<string, unknown> };
+
+export async function applyChoice(d: DecisionRow, choiceId: string, random = Math.random): Promise<Resolution & { effect?: { key: string; mult: number; hours: number }; goal?: { station: string; reward: number }; follow?: Follow }> {
   const data = (d.data ?? {}) as Record<string, any>;
   const cid = d.companyId;
   const key = `${d.kind}:${choiceId}`;
@@ -342,22 +442,38 @@ export async function applyChoice(d: DecisionRow, choiceId: string, random = Mat
     case "FISSURE:reparer": {
       const train = await prisma.train.findUnique({ where: { id: data.trainId } });
       if (!train) return { outcome: "La rame n'est plus dans votre parc : rien à réparer.", tone: "neutre" };
+      // 2.0 : déjà à l'atelier (révision ou pièce en commande) : la fissure y sera traitée
+      if (train.workshopUntil || train.partsEta) return { outcome: `La ${train.name} est déjà à l'atelier : la fissure y sera reprise sans frais.`, tone: "gain" };
       const cost = Math.max(20, Math.round(train.wear * repairCostPerPoint(await staffEffectsFor(cid))));
       await charge(cid, cost, "REPARATION", `Remise à neuf préventive : ${train.name}`);
-      await prisma.train.update({ where: { id: train.id }, data: { wear: 0 } });
+      await prisma.train.update({
+        where: { id: train.id },
+        // si la rame a lâché entre-temps, elle sort aussi de la panne (1.7.2)
+        data:
+          train.status === "MAINTENANCE"
+            ? train.lineId
+              ? { wear: 0, brokenPart: null, status: "EN_ROUTE", progress: 0, departedAt: new Date() }
+              : { wear: 0, brokenPart: null, status: "IDLE", progress: 0, departedAt: null }
+            : { wear: 0 },
+      });
       return { outcome: `La ${train.name} passe à l'atelier et repart à neuf, pour ${fmt(cost)} pi. Le mécanicien est rassuré.`, tone: "gain" };
     }
     case "FISSURE:rouler": {
       const train = await prisma.train.findUnique({ where: { id: data.trainId } });
       if (!train) return { outcome: "La rame n'est plus dans votre parc.", tone: "neutre" };
+      if (train.status === "MAINTENANCE") return { outcome: `La ${train.name} est à l'atelier : la fissure y sera reprise.`, tone: "neutre" };
       if (random() < 1 / 3) {
         await prisma.$transaction([
-          prisma.train.update({ where: { id: train.id }, data: { wear: 100, status: "MAINTENANCE" } }),
+          prisma.train.update({ where: { id: train.id }, data: breakdownData(train, "BOGIES") }),
           prisma.incident.create({ data: { trainId: train.id, message: `${train.name} : le bogie fissuré a cédé, la rame est en panne` } }),
         ]);
         return { outcome: `Le bogie a cédé en pleine voie. La ${train.name} est en panne et attend une réparation.`, tone: "risque" };
       }
-      return { outcome: `La ${train.name} a tenu. Cette fois. Le mécanicien surveille la fissure.`, tone: "neutre" };
+      // 2.0 : la fissure ne disparaît pas — le bogie devient l'organe fragile, et il peut céder plus tard
+      const bias = organBias(train);
+      bias.BOGIES = Math.min(2, Math.max(...Object.values(bias)) + 0.2);
+      await prisma.train.update({ where: { id: train.id }, data: { organs: bias as any } });
+      return { outcome: `La ${train.name} a tenu. Cette fois. Le mécanicien surveille la fissure.`, tone: "neutre", follow: random() < 0.5 ? { kind: "FISSURE_CEDE", hours: 2 + random() * 4, data: { trainId: train.id } } : undefined };
     }
     case "FESTIVAL:special": {
       const gain = Number(data.gain) || 150;
@@ -404,7 +520,7 @@ export async function applyChoice(d: DecisionRow, choiceId: string, random = Mat
       return { outcome: `Vous suivez la baisse. Les voyageurs restent, et apprécient : +3 réputation, mais chaque trajet sur ${data.a} – ${data.b} rapporte moins pendant trois heures.`, tone: "cout", effect: { key: `${data.a}|${data.b}`, mult: 0.85, hours: 3 } };
     case "RIVAL:qualite": {
       const n = await prisma.train.count({ where: { companyId: cid, lineId: { not: null } } });
-      await charge(cid, scaled(60, n), "EVENEMENT", `Service à bord renforcé sur ${data.a} – ${data.b}`);
+      await charge(cid, Number(data.cost) || scaled(60, n), "EVENEMENT", `Service à bord renforcé sur ${data.a} – ${data.b}`);
       return { outcome: "Café offert, voitures impeccables : vos voyageurs ne vont pas voir ailleurs.", tone: "gain" };
     }
     case "RIVAL:ignorer":
@@ -445,8 +561,202 @@ export async function applyChoice(d: DecisionRow, choiceId: string, random = Mat
       return { outcome: "Vos trains contournent le chantier. Quelques minutes de plus, aucun voyageur perdu.", tone: "gain" };
     case "TRAVAUX:subir":
       return { outcome: `Vos trains roulent au pas autour de ${data.station} : recettes −30 % pendant deux heures.`, tone: "risque", effect: { key: data.station, mult: 0.7, hours: 2 } };
+    // ---- 2.0 ----
+    case "SYNDICAT:accorder": {
+      const staff = await prisma.staff.findMany({ where: { companyId: cid }, select: { id: true, salaryPerTick: true } });
+      for (const m of staff as { id: string; salaryPerTick: number }[]) {
+        await prisma.staff.update({ where: { id: m.id }, data: { salaryPerTick: Math.max(m.salaryPerTick + 1, Math.round(m.salaryPerTick * 1.1)) } });
+      }
+      await addReputation(cid, 2);
+      return { outcome: "Accord signé dans la bonne humeur. La masse salariale grimpe, mais vos équipes en parlent autour d'elles : +2 réputation.", tone: "cout" };
+    }
+    case "SYNDICAT:prime":
+      await charge(cid, Number(data.prime) || 120, "PERSONNEL", "Prime exceptionnelle au personnel");
+      return { outcome: "La prime calme les esprits. Pour cette fois.", tone: "cout", follow: random() < 0.3 ? { kind: "SYNDICAT_RETOUR", hours: 24 + random() * 24 } : undefined };
+    case "SYNDICAT:refuser":
+      return {
+        outcome: "Le délégué repart sans un mot. Dans les dépôts, on parle de grève.",
+        tone: "risque",
+        follow: random() < 0.6 ? { kind: "GREVE_PERSONNEL", hours: 2 + random() * 3 } : undefined,
+      };
+    case "GREVE_PERSONNEL:ceder": {
+      await charge(cid, Number(data.cost) || 200, "PERSONNEL", "Fin de grève : rappel de salaires");
+      return { outcome: "La grève s'arrête. Vos trains repartent, l'ardoise est réglée.", tone: "cout" };
+    }
+    case "GREVE_PERSONNEL:tenir":
+      await addReputation(cid, -3);
+      return { outcome: "La grève dure trois heures : toutes vos recettes baissent de 40 % et les voyageurs s'en souviennent (−3 réputation).", tone: "risque", effect: { key: "*", mult: 0.6, hours: 3 } };
+    case "INSPECTION:reviser": {
+      const ids = (Array.isArray(data.worn) ? data.worn : []) as string[];
+      const trains = await prisma.train.findMany({ where: { id: { in: ids }, companyId: cid, status: { not: "MAINTENANCE" } } });
+      let total = 0;
+      for (const t of trains as { id: string; name: string; wear: number; lineId: string | null; status: string }[]) {
+        if (t.status === "EN_ROUTE" && !t.lineId) continue; // en livraison de fret
+        const cost = Math.ceil(t.wear * 2 * SERVICE_DISCOUNT);
+        total += cost;
+        await prisma.train.update({
+          where: { id: t.id },
+          data: { wear: 0, status: "MAINTENANCE", workshopUntil: new Date(Date.now() + serviceMinutes(t.wear) * 60_000), progress: 0, departedAt: null, organs: freshBias() as any },
+        });
+      }
+      if (total > 0) await charge(cid, total, "REPARATION", "Révisions avant l'inspection de sécurité");
+      return { outcome: trains.length ? `${trains.length} rame${trains.length > 1 ? "s passent" : " passe"} à l'atelier pour ${fmt(total)} pi. L'inspecteur trouvera un parc impeccable.` : "Rien à réviser : l'inspecteur trouvera un parc impeccable.", tone: "gain", follow: { kind: "INSPECTION_PASSE", hours: 3, data: { prepared: true } } };
+    }
+    case "INSPECTION:laisser":
+      return { outcome: "L'inspecteur arrive dans trois heures. Croisons les doigts.", tone: "risque", follow: { kind: "INSPECTION_PASSE", hours: 3, data: { prepared: false } } };
+    case "RAPPEL:rappel": {
+      const ids = (Array.isArray(data.trains) ? data.trains : []) as string[];
+      const trains = await prisma.train.findMany({ where: { id: { in: ids }, companyId: cid, status: { not: "MAINTENANCE" } } });
+      let n = 0;
+      for (const t of trains as { id: string; lineId: string | null; status: string }[]) {
+        if (t.status === "EN_ROUTE" && !t.lineId) continue;
+        n++;
+        await prisma.train.update({ where: { id: t.id }, data: { wear: 0, status: "MAINTENANCE", workshopUntil: new Date(Date.now() + 8 * 60_000), progress: 0, departedAt: null, organs: freshBias() as any } });
+      }
+      await addReputation(cid, 2);
+      return { outcome: `${n} rame${n > 1 ? "s partent" : " part"} au contrôle. Elles reviendront révisées dans huit minutes, et la presse salue votre prudence (+2 réputation).`, tone: "gain" };
+    }
+    case "RAPPEL:ignorer":
+      return { outcome: "La série continue de rouler. Le constructeur a pris note de votre refus.", tone: "risque", follow: random() < 0.6 ? { kind: "RAPPEL_CASSE", hours: 1 + random() * 5, data: { trains: data.trains } } : undefined };
+    case "RECRUTEMENT:embaucher": {
+      const role = String(data.role) === "CONTROLEUR" ? "CONTROLEUR" : "CONDUCTEUR";
+      const level = Number(data.level) || 3;
+      await prisma.staff.create({ data: { companyId: cid, role, name: String(data.name || randomStaffName()), level, xp: [0, 720, 2880, 8640, 20160][level - 1] ?? 0, salaryPerTick: salaryFor(role, level) } });
+      return { outcome: `${data.name} rejoint la compagnie. Affectez-le à une rame depuis la page Personnel.`, tone: "gain" };
+    }
+    case "RECRUTEMENT:decliner":
+      return { outcome: `${data.name} ira proposer ses services à la concurrence.`, tone: "neutre" };
   }
   return { outcome: "C'est noté. Le réseau suit son cours.", tone: "neutre" };
+}
+
+/* ---------- 2.0 : les suites ----------
+
+   Une suite est soit une nouvelle décision (la grève après le refus), soit
+   une conséquence directe (le bogie fissuré qui cède). Elle arrive quelques
+   heures plus tard, quand le joueur a peut-être oublié son choix : c'est ce
+   qui donne du poids à la réponse « gratuite ». */
+
+const FOLLOW_DECISIONS: Record<string, (c: { companyId: string; revenuePerHour: number; running: number }, data: Record<string, any>) => Draft | null> = {
+  GREVE_PERSONNEL: (c) => {
+    const cost = priced(200, c.running, c.revenuePerHour, 3);
+    return {
+      kind: "GREVE_PERSONNEL",
+      title: "Grève du personnel",
+      body: "Faute d'accord, vos équipes ont cessé le travail ce matin. Les rames sortent au compte-gouttes et les quais se remplissent.",
+      place: null,
+      data: { cost },
+      choices: [
+        { id: "ceder", label: "Céder et payer le rappel", effects: [{ text: `−${fmt(cost)} pi.`, tone: "cout" }, { text: "Retour à la normale immédiat", tone: "gain" }] },
+        { id: "tenir", label: "Tenir bon", effects: [{ text: "Toutes les recettes −40 % pendant 3 h", tone: "risque" }, { text: "−3 réputation", tone: "risque" }] },
+      ],
+      defaultChoiceId: "tenir",
+    };
+  },
+  SYNDICAT_RETOUR: (c) => {
+    const prime = priced(120, c.running, c.revenuePerHour, 2);
+    return {
+      kind: "SYNDICAT",
+      title: "Le délégué revient à la charge",
+      body: "La prime est dépensée, la question des salaires reste entière. Vos équipes attendent une vraie réponse.",
+      place: null,
+      data: { prime },
+      choices: [
+        { id: "accorder", label: "Accorder 10 % à tout le monde", effects: [{ text: "Salaires +10 % jusqu'à la prochaine augmentation", tone: "cout" }, { text: "+2 réputation", tone: "gain" }] },
+        { id: "prime", label: "Une nouvelle prime", effects: [{ text: `−${fmt(prime)} pi.`, tone: "cout" }] },
+        { id: "refuser", label: "Refuser", effects: [{ text: "Une grève est possible", tone: "risque" }] },
+      ],
+      defaultChoiceId: "refuser",
+    };
+  },
+};
+
+const FOLLOW_EFFECTS: Record<string, (companyId: string, data: Record<string, any>, ctx: { revenuePerHour: number; running: number }) => Promise<{ title: string; body: string } | null>> = {
+  FISSURE_CEDE: async (companyId, data) => {
+    const t = await prisma.train.findFirst({ where: { id: String(data.trainId), companyId } });
+    if (!t || t.status === "MAINTENANCE" || t.wear < 15) return null; // révisée entre-temps : la fissure est partie avec
+    await prisma.train.update({ where: { id: t.id }, data: breakdownData(t, "BOGIES") });
+    await prisma.incident.create({ data: { trainId: t.id, message: `${t.name} : le bogie fissuré a fini par céder. Il faut ${PARTS.BOGIES.need}` } });
+    return { title: `Le bogie de la ${t.name} a cédé`, body: "La fissure que le mécanicien surveillait a lâché. La rame est en panne et attend sa pièce." };
+  },
+  RAPPEL_CASSE: async (companyId, data) => {
+    const ids = (Array.isArray(data.trains) ? data.trains : []) as string[];
+    const pool = (await prisma.train.findMany({ where: { id: { in: ids }, companyId, status: "EN_ROUTE", lineId: { not: null } } })) as any[];
+    if (pool.length === 0) return null;
+    const t = pool[Math.floor(Math.random() * pool.length)];
+    await prisma.train.update({ where: { id: t.id }, data: breakdownData(t, "MOTEUR") });
+    await prisma.incident.create({ data: { trainId: t.id, message: `${t.name} : le défaut signalé par le constructeur a grillé le moteur` } });
+    await addReputation(companyId, -2);
+    return { title: `Moteur grillé sur la ${t.name}`, body: "Le défaut du rappel s'est déclaré en ligne. La rame attend un moteur neuf, et la presse s'en est mêlée (−2 réputation)." };
+  },
+  INSPECTION_PASSE: async (companyId, data, ctx) => {
+    if (data.prepared) {
+      const worn = await prisma.train.count({ where: { companyId, wear: { gte: 60 } } });
+      if (worn === 0) {
+        await addReputation(companyId, 3);
+        return { title: "Inspection : rien à signaler", body: "L'inspecteur a trouvé un parc impeccable. Le rapport est public : +3 réputation." };
+      }
+    }
+    const worn = (await prisma.train.findMany({ where: { companyId, wear: { gte: 60 }, status: "EN_ROUTE", lineId: { not: null } }, orderBy: { wear: "desc" } })) as any[];
+    if (worn.length === 0) {
+      await addReputation(companyId, 2);
+      return { title: "Inspection : rien à signaler", body: "Votre parc a passé le contrôle sans reproche : +2 réputation." };
+    }
+    const fine = Math.max(100, Math.round((ctx.revenuePerHour * 0.5 * worn.length) / 10) * 10);
+    await charge(companyId, fine, "EVENEMENT", `Amende de l'inspection de sécurité (${worn.length} rame${worn.length > 1 ? "s" : ""} trop usée${worn.length > 1 ? "s" : ""})`);
+    const t = worn[0];
+    await prisma.train.update({ where: { id: t.id }, data: breakdownData(t) });
+    await prisma.incident.create({ data: { trainId: t.id, message: `${t.name} immobilisée par l'inspection de sécurité` } });
+    await addReputation(companyId, -2);
+    return { title: "Inspection : amende et rame immobilisée", body: `${worn.length} rame${worn.length > 1 ? "s" : ""} trop usée${worn.length > 1 ? "s" : ""} : ${fmt(fine)} pi. d'amende, et la ${t.name} est retirée du service jusqu'à réparation (−2 réputation).` };
+  },
+};
+
+export async function revenuePerHourOf(companyId: string) {
+  const agg = (await prisma.transaction.aggregate({
+    where: { companyId, type: { in: ["REVENU_LIGNE", "FRET"] }, amount: { gt: 0 }, createdAt: { gte: new Date(Date.now() - 24 * H) } },
+    _sum: { amount: true },
+  })) as { _sum: { amount: number | null } };
+  return Math.round((agg._sum.amount ?? 0) / 24);
+}
+
+async function runFollowUps(push: Push, now: Date) {
+  const due = (await prisma.decisionFollowUp.findMany({ where: { done: false, dueAt: { lte: now } }, take: 100 })) as { id: string; companyId: string; kind: string; data: any }[];
+  for (const f of due) {
+    const claimed = await prisma.decisionFollowUp.updateMany({ where: { id: f.id, done: false }, data: { done: true } });
+    if (claimed.count === 0) continue;
+    try {
+      const [revenuePerHour, running] = await Promise.all([revenuePerHourOf(f.companyId), prisma.train.count({ where: { companyId: f.companyId, lineId: { not: null } } })]);
+      const ctx = { companyId: f.companyId, revenuePerHour, running };
+      const maker = FOLLOW_DECISIONS[f.kind];
+      if (maker) {
+        const open = await prisma.decision.count({ where: { companyId: f.companyId, status: "OUVERTE" } });
+        if (open > 0) {
+          // une décision attend déjà : la suite patiente une demi-heure
+          await prisma.decisionFollowUp.update({ where: { id: f.id }, data: { done: false, dueAt: new Date(now.getTime() + 30 * 60_000) } });
+          continue;
+        }
+        const draft = maker(ctx, (f.data ?? {}) as Record<string, any>);
+        if (!draft) continue;
+        await prisma.decision.create({
+          data: {
+            companyId: f.companyId, kind: draft.kind, title: draft.title, body: draft.body, place: draft.place ?? null,
+            data: (draft.data ?? {}) as any, choices: draft.choices as any, defaultChoiceId: draft.defaultChoiceId,
+            expiresAt: new Date(now.getTime() + DECISION_TTL_MS),
+          },
+        });
+        await push(f.companyId, draft.title, "Une suite à votre dernière décision vous attend.").catch(() => undefined);
+        continue;
+      }
+      const effect = FOLLOW_EFFECTS[f.kind];
+      if (effect) {
+        const r = await effect(f.companyId, (f.data ?? {}) as Record<string, any>, ctx);
+        if (r) await push(f.companyId, r.title, r.body).catch(() => undefined);
+      }
+    } catch (err) {
+      console.error("[décisions] suite :", (err as Error).message);
+    }
+  }
 }
 
 /* Trancher : verrouille la décision (un seul choix, même avec deux onglets
@@ -474,6 +784,9 @@ export async function resolveDecision(decisionId: string, companyId: string, cho
       ...(r.goal ? { goalStation: r.goal.station, goalReward: r.goal.reward, goalDeadline: new Date(now + 24 * H) } : {}),
     },
   });
+  if (r.follow) {
+    await prisma.decisionFollowUp.create({ data: { companyId, kind: r.follow.kind, data: (r.follow.data ?? {}) as any, dueAt: new Date(now + r.follow.hours * H) } });
+  }
   return { ok: true, outcome: r.outcome, tone: r.tone } as const;
 }
 
@@ -517,7 +830,7 @@ export function decisionMultiplier(effects: { key: string; mult: number }[] | un
     if (e.key.includes("|")) {
       const [a, b] = e.key.split("|");
       if ((a === dep && b === arr) || (a === arr && b === dep)) m *= e.mult;
-    } else if (e.key === dep || e.key === arr) {
+    } else if (e.key === "*" || e.key === dep || e.key === arr) {
       m *= e.mult;
     }
   }
@@ -529,6 +842,10 @@ export function decisionMultiplier(effects: { key: string; mult: number }[] | un
 type Push = (companyId: string, title: string, body: string) => Promise<void>;
 
 export async function runDecisions(push: Push, now = new Date(), random = Math.random) {
+  // 2.0 : les suites arrivent à toute heure du jour, mais pas la nuit pour les décisions
+  const hh = parisHour(now);
+  if (!(hh >= QUIET_FROM || hh < QUIET_TO)) await runFollowUps(push, now).catch((err) => console.error("[décisions] suites :", (err as Error).message));
+
   // 1. échéances : la réponse par défaut s'applique
   const expired = (await prisma.decision.findMany({
     where: { status: "OUVERTE", expiresAt: { lte: now } },
@@ -600,12 +917,15 @@ export async function runDecisions(push: Push, now = new Date(), random = Math.r
 /* Choisit une situation qui a du sens pour cette compagnie, en évitant de
    reposer la même que les deux dernières fois. */
 export async function draftFor(company: { id: string; balance: number; maxTrains: number }, now = new Date(), random = Math.random): Promise<Draft | null> {
-  const [trains, lines, recent, reputation, shared] = await Promise.all([
+  const [trains, lines, recent, reputation, shared, revenuePerHour, staff, gradeId] = await Promise.all([
     prisma.train.findMany({ where: { companyId: company.id }, include: { line: true } }),
     prisma.line.findMany({ where: { companyId: company.id }, select: { id: true, departureStation: true, arrivalStation: true } }),
     prisma.decision.findMany({ where: { companyId: company.id }, orderBy: { createdAt: "desc" }, take: 2, select: { kind: true } }),
     computeReputation(company.id),
     rivalPairsFor(company.id),
+    revenuePerHourOf(company.id),
+    prisma.staff.findMany({ where: { companyId: company.id }, select: { id: true, role: true, level: true, name: true } }),
+    gradeOf(company.id),
   ]);
   const ctx: Ctx = {
     company,
@@ -614,6 +934,9 @@ export async function draftFor(company: { id: string; balance: number; maxTrains
     reputation,
     rivalPairs: shared,
     now,
+    revenuePerHour,
+    staff: staff as Ctx["staff"],
+    gradeId,
     pick: <T,>(xs: T[]) => xs[Math.floor(random() * xs.length)],
   };
   const avoid = new Set((recent as { kind: string }[]).map((r) => r.kind));
@@ -676,4 +999,15 @@ export async function listForCompany(companyId: string) {
       goalDone: d.goalDone,
     }))
   );
+}
+
+// grades de toutes les compagnies, relus au plus toutes les cinq minutes (le classement est coûteux)
+let gradeCache: { at: number; map: Map<string, number> } | null = null;
+async function gradeOf(companyId: string) {
+  if (!gradeCache || Date.now() - gradeCache.at > 5 * 60_000) {
+    const { buildLeaderRows } = await import("./leaderboard.service");
+    const rows = (await buildLeaderRows().catch(() => [])) as { id: string; gradeId: number }[];
+    gradeCache = { at: Date.now(), map: new Map(rows.map((r) => [r.id, r.gradeId])) };
+  }
+  return gradeCache.map.get(companyId) ?? 0;
 }

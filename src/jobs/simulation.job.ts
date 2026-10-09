@@ -22,10 +22,22 @@ import { runTenders } from "../services/tender.service";
 import { runDecisions, activeDecisionEffects, decisionMultiplier } from "../services/decision.service";
 import { isInternational, INTL_REVENUE_BONUS, TOLL_RATE } from "../services/international.service";
 import { isNightService, NIGHT_MULTIPLIER, DAY_COUCHETTES_MULTIPLIER } from "../services/time.service";
-import { peakFactor } from "../services/peak.service";
+import { peakFactor, PEAK_HOURS } from "../services/peak.service";
+import { allianceMap, alliesOf, allyMultiplier } from "../services/alliance.service";
+import { contribute, flushWorld, TUNNEL_NAME, TUNNEL_STATIONS } from "../services/world.service";
+import { addSeasonPoints, seasonEvent, flushSeason, runSeasons, notifySeasonEnd, POINTS } from "../services/saison.service";
 import { parisHour } from "../services/time.service";
 let lastPricingHour = -1;
 import { checkPriceAlerts, runStandingOrders } from "../controllers/market.controller";
+import { DLC_MODELS, MOUNTAIN_STATIONS, MOUNTAIN_WEAR, mountainDemand, isWeekend } from "../services/dlc.service";
+import { runWrecks, heritageOf, HERITAGE_WEAR } from "../services/wreck.service";
+import { reconcilePayments } from "../controllers/billing.controller";
+import { refreshWeather, weatherMap, routeWeather, StationWeather } from "../services/realweather.service";
+import {
+  NEGLECT_FROM, NEGLECT_CHANCE, TRACK_INCIDENT_CHANCE, TRACK_INCIDENTS, SERVICE_DISCOUNT, PARTS,
+  organBias, weakestOrgan, freshBias, breakdownData, readStock, takeFromStock, partPrice, partDelayMs, serviceMinutes, runWorkshop, Organ,
+} from "../services/workshop.service";
+import { crewByTrain, controllerBonus, driverEffects } from "../services/crew.service";
 import { staffEffectsByCompany, runStaffExperience, repairCostPerPoint, staffEffectsFor, CompanyStaffEffects, WEAR_PER_TICK } from "../services/staff.service";
 
 /* Arrondi aléatoire : 1,72 donne 2 dans 72 % des cas et 1 dans les autres.
@@ -67,7 +79,8 @@ export function startSimulationJob() {
       return;
     }
     ticking = true;
-    runSimulationTick()
+    holdLease()
+      .then((mine) => (mine ? runSimulationTick() : undefined))
       .catch((err) => {
         console.error("[simulation] tour ignoré après erreur :", err);
       })
@@ -78,6 +91,53 @@ export function startSimulationJob() {
   console.log("Simulation du réseau démarrée (tick toutes les 30s)");
 }
 
+/* 1.7.2 : un seul serveur à la fois fait tourner la simulation.
+
+   Pendant un déploiement (Coolify lance le nouveau conteneur avant d'arrêter
+   l'ancien), deux processus se partageaient la même base et jouaient chacun
+   leur tour : salaires et entretien prélevés deux fois, et une trésorerie qui
+   tombait à zéro faisait partir le personnel. Le serveur qui tient le bail le
+   renouvelle à chaque tour ; un autre ne le prend que s'il a expiré. */
+const LEASE_HOLDER = `${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
+const LEASE_MS = 75_000; // deux tours et demi : un tour lent ne fait pas perdre le bail
+let leaseWarned = false;
+
+async function holdLease(): Promise<boolean> {
+  try {
+    const rows = await prisma.$queryRaw<{ holder: string }[]>`
+      INSERT INTO "SimLease" ("id", "holder", "until")
+      VALUES (1, ${LEASE_HOLDER}, NOW() + (${LEASE_MS} * INTERVAL '1 millisecond'))
+      ON CONFLICT ("id") DO UPDATE
+        SET "holder" = EXCLUDED."holder", "until" = EXCLUDED."until"
+        WHERE "SimLease"."holder" = EXCLUDED."holder" OR "SimLease"."until" < NOW()
+      RETURNING "holder"`;
+    const mine = rows.length > 0 && rows[0].holder === LEASE_HOLDER;
+    if (!mine && !leaseWarned) {
+      console.log("[simulation] un autre serveur fait déjà tourner la simulation, celui-ci attend");
+      leaseWarned = true;
+    }
+    if (mine) leaseWarned = false;
+    return mine;
+  } catch (err) {
+    // table absente (migration pas encore jouée) : on tourne comme avant
+    console.error("[simulation] bail indisponible :", (err as Error).message);
+    return true;
+  }
+}
+
+/* Une rame « en panne » ne peut pas avoir moins de 100 % d'usure : si une
+   écriture concurrente l'a laissée ainsi, on la remet en service. */
+async function healStuckTrains() {
+  await prisma.train.updateMany({
+    where: { status: "MAINTENANCE", wear: { lt: 100 }, lineId: { not: null }, workshopUntil: null, partsEta: null, brokenPart: null },
+    data: { status: "EN_ROUTE", progress: 0, departedAt: new Date() },
+  });
+  await prisma.train.updateMany({
+    where: { status: "MAINTENANCE", wear: { lt: 100 }, lineId: null, workshopUntil: null, partsEta: null, brokenPart: null },
+    data: { status: "IDLE", progress: 0, departedAt: null },
+  });
+}
+
 // les paliers de parrainage bougent lentement : inutile de les recalculer
 // toutes les 30 secondes, un passage toutes les 5 minutes suffit
 let tickCount = 0;
@@ -85,14 +145,21 @@ const MILESTONE_EVERY = 10;
 
 async function runSimulationTick() {
   tickCount += 1;
-  await maybeChangeWeather();
+  // 2.0 : la vraie météo des gares, relevée toutes les 20 minutes (sans bloquer le tour)
+  // 2.0 : paiements livrés même si le webhook Stripe s'est perdu
+  void reconcilePayments().catch((err) => console.error("[stripe] rattrapage :", (err as Error).message));
+  void refreshWeather().catch((err) => console.error("[météo] échec :", (err as Error).message));
   // gares : un événement naît de temps en temps, annoncé une heure à l'avance
   await maybeSpawnStationEvent().catch((err) => console.error("[gares] échec :", (err as Error).message));
-  const weather = await getActiveWeather();
+  const weather = await weatherMap().catch(() => new Map<string, StationWeather>());
   await runLineTrains(weather);
   await runFreightContracts(weather);
   await runPayroll();
   await runStaffExperience();
+  // 2.0 : sorties d'atelier et pièces livrées
+  await runWorkshop().catch((err) => console.error("[atelier] échec :", (err as Error).message));
+  await runWrecks().catch((err) => console.error("[épaves] échec :", (err as Error).message));
+  if (tickCount % 10 === 2) await healStuckTrains().catch((err) => console.error("[rames] échec :", (err as Error).message));
   await runUpkeep();
   // avant de réapprovisionner : les ordres périmés libèrent leur marchandise
   await expireMissions();
@@ -140,6 +207,25 @@ async function runSimulationTick() {
     lastPricingHour = hourNow;
     await runAutoPricing().catch((err) => console.error("[prix auto] échec :", (err as Error).message));
   }
+  // 2.0 : saisons (ouverture, clôture, rang de la veille) et points du tour
+  if (tickCount % 10 === 1) {
+    await runSeasons()
+      .then(async (closed) => {
+        if (closed) await notifySeasonEnd(closed.id).catch(() => {});
+      })
+      .catch((err) => console.error("[saisons] échec :", (err as Error).message));
+  }
+  await flushSeason().catch((err) => console.error("[saisons, points] échec :", (err as Error).message));
+  await flushWorld()
+    .then(async (opened) => {
+      if (!opened) return;
+      // le tunnel vient d'ouvrir : tout le monde est prévenu
+      const ids = (await prisma.company.findMany({ select: { id: true } })) as { id: string }[];
+      for (const c of ids) {
+        await sendToCompany(c.id, { title: `${TUNNEL_NAME} est ouvert`, body: `${TUNNEL_STATIONS.join(" et ")} rejoignent la carte.`, url: "/dashboard", tag: "chantier" }).catch(() => {});
+      }
+    })
+    .catch((err) => console.error("[grand chantier] échec :", (err as Error).message));
   if (tickCount % 120 === 4) await prisma.lineLoadHour.deleteMany({ where: { hour: { lt: new Date(Date.now() - 48 * 3600_000) } } }).catch(() => {});
   const premiumNotify = async (companyId: string, title: string, body: string, tag: string) => {
     await sendToCompany(companyId, { title, body, url: "/dashboard", tag });
@@ -211,46 +297,13 @@ export function lengthYield(durationMinutes: number) {
   const d = Math.max(3, Math.min(20, durationMinutes));
   return 1 + 0.25 * ((d - 3) / 17);
 }
-const FOG_SLOWDOWN_CHANCE = 0.3; // par temps de brouillard, chance qu'un train soit ralenti ce tick
 const DAMAGE_CHANCE = 0.3;       // pour une cargaison fragile, probabilité de dommage à la livraison
 const DAMAGE_PAYOUT_RATIO = 0.2; // fraction de la récompense encaissée en cas de dommage
 const DAMAGE_WEAR_PENALTY = 15;  // usure supplémentaire infligée au train en cas de dommage
 
-async function getActiveWeather(): Promise<string> {
-  const active = await prisma.weatherEvent.findFirst({
-    where: { endsAt: { gt: new Date() } },
-    orderBy: { startedAt: "desc" },
-  });
-  return active?.type ?? "CLAIR";
-}
-
-/* La météo suit la saison, à l'heure de Paris : la neige seulement de décembre
-   à février, le verglas de novembre à mars, la canicule de mai à septembre.
-   Le brouillard peut tomber toute l'année. Une entrée apparaît plusieurs fois
-   quand elle doit être plus fréquente. */
-export function seasonalWeatherTypes(now = new Date()): string[] {
-  const month = Number(new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Paris", month: "numeric" }).format(now));
-  const types = ["BROUILLARD"];
-  if (month === 12 || month <= 2) types.push("NEIGE", "NEIGE");
-  if (month >= 11 || month <= 3) types.push("VERGLAS");
-  if (month >= 5 && month <= 9) types.push("CANICULE", ...(month >= 6 && month <= 8 ? ["CANICULE"] : []));
-  return types;
-}
-
-async function maybeChangeWeather() {
-  const active = await prisma.weatherEvent.findFirst({ where: { endsAt: { gt: new Date() } } });
-  if (active) return;
-
-  // ~15% de chance par tick de déclencher un nouvel épisode météo (dure 3 à 6 minutes)
-  if (Math.random() < 0.15) {
-    const types = seasonalWeatherTypes();
-    const type = types[Math.floor(Math.random() * types.length)];
-    const durationMinutes = 3 + Math.floor(Math.random() * 4);
-    await prisma.weatherEvent.create({
-      data: { type, endsAt: new Date(Date.now() + durationMinutes * 60_000) },
-    });
-  }
-}
+/* 2.0 : les épisodes météo inventés (brouillard, canicule, verglas, neige sur
+   tout le réseau d'un coup) ont laissé la place à la vraie météo des gares :
+   voir realweather.service. */
 
 /* Réputations clients de toutes les compagnies, en une requête : appeler la
    base pour chaque livraison serait absurde alors que le tick en traite des dizaines. */
@@ -272,13 +325,16 @@ async function getPremiumCompanyIds(): Promise<Set<string>> {
   return new Set(rows.map((r) => r.id));
 }
 
-export async function runLineTrains(weather: string) {
+export async function runLineTrains(weather: Map<string, StationWeather> = new Map()) {
   const runningTrains = await prisma.train.findMany({
     where: { status: "EN_ROUTE", lineId: { not: null } },
     include: { line: true },
   });
   const staffEffects = await staffEffectsByCompany();
-  const incidentChance = weather === "VERGLAS" ? INCIDENT_CHANCE * 2 : weather === "NEIGE" ? INCIDENT_CHANCE * 1.5 : INCIDENT_CHANCE;
+  // 2.0 : contrôleurs et conducteurs affectés aux rames
+  const crews = await crewByTrain().catch(() => new Map());
+  const mountainBoost = mountainDemand();
+  const weekend = isWeekend();
   // gares et concurrence : calculées une fois pour tout le tour
   /* 1.5 : les gares d'un temps fort de saison s'ajoutent aux événements du
      moment, et les correspondances de chaque compagnie sont comptées une fois. */
@@ -299,6 +355,14 @@ export async function runLineTrains(weather: string) {
   };
   const stationEvents = [...liveEvents, ...seasonalStationEvents()];
   const night = isNightService();
+  // 2.0 : alliances, pour la correspondance d'alliance et les redevances entre alliés
+  const allianceOf = await allianceMap().catch(() => new Map<string, string>());
+  const alliesCache = new Map<string, Set<string>>();
+  const alliesFor = (companyId: string) => {
+    let a = alliesCache.get(companyId);
+    if (!a) alliesCache.set(companyId, (a = alliesOf(allianceOf, companyId)));
+    return a;
+  };
   // 1.7 : heures de pointe, la demande suit l'heure de la journée
   const rush = peakFactor();
   // 1.7 : rames de chaque ligne en circulation, qui se partagent ses voyageurs
@@ -313,7 +377,12 @@ export async function runLineTrains(weather: string) {
        depuis departedAt, il ne suffit pas de sauter le tour — il faut repousser
        l'heure de départ, sinon le « retard » n'a aucun effet sur l'arrivée.
        Par temps de verglas, ce risque est doublé. */
-    if (Math.random() < incidentChance) {
+    const crew = crews.get(train.id);
+    const driver = driverEffects(crew?.CONDUCTEUR);
+    const dlcModel = DLC_MODELS[train.model];
+    // 2.0 : la vraie météo, la pire rencontrée sur l'itinéraire de la ligne
+    const wx = routeWeather(weather instanceof Map ? weather : new Map(), routeOf(train.line as typeof train.line & { stops?: string[] }));
+    if (Math.random() < INCIDENT_CHANCE * wx.incident * driver.delay) {
       await prisma.$transaction([
         prisma.train.update({
           where: { id: train.id },
@@ -322,15 +391,15 @@ export async function runLineTrains(weather: string) {
         prisma.incident.create({
           data: {
             trainId: train.id,
-            message: `Retard signalé : ${train.name} sur ${train.line.departureStation} → ${train.line.arrivalStation}`,
+            message: `Retard signalé : ${train.name} sur ${train.line.departureStation} → ${train.line.arrivalStation}${wx.effect && wx.at ? ` (${wx.label.toLowerCase()} à ${wx.at})` : ""}`,
           },
         }),
       ]);
       continue;
     }
 
-    // Par temps de brouillard ou de neige, un train peut être ralenti (pas d'avancée ce tick, sans pénalité d'usure)
-    if ((weather === "BROUILLARD" || weather === "NEIGE") && Math.random() < FOG_SLOWDOWN_CHANCE) {
+    // Par brouillard, neige ou orage, un train peut être ralenti (pas d'avancée ce tick, sans pénalité d'usure)
+    if (wx.slow > 0 && Math.random() < wx.slow) {
       continue;
     }
 
@@ -342,29 +411,43 @@ export async function runLineTrains(weather: string) {
        les fractions réelles au lieu d'être avalées par l'arrondi. */
     // l'équipe de mécaniciens réduit l'usure des rames qu'elle couvre (voir staff.service)
     let wearRate = WEAR_PER_TICK * fx.wearMultiplier;
-    if (weather === "CANICULE") wearRate = wearRate * 1.5;
+    wearRate = wearRate * wx.wear;
     const lineX = train.line as typeof train.line & { stops?: string[]; priceRatio?: number; electrified?: boolean };
     const trainX = train as typeof train & { cars?: string[]; direction?: number };
     // 1.7 : une ligne électrifiée use moins le matériel, un atelier sur l'itinéraire aussi
     if (lineX.electrified) wearRate = wearRate * ELECTRIC_WEAR;
     const shops = workshops.get(train.companyId);
     if (shops && routeOf(lineX).some((st) => shops.has(st))) wearRate = wearRate * WORKSHOP_WEAR;
+    // 2.0 : le matériel d'extension, la pente sans crémaillère, le conducteur
+    if (dlcModel) wearRate = wearRate * dlcModel.wear;
+    const heritage = heritageOf(train as { heritage?: unknown });
+    if (heritage) wearRate = wearRate * HERITAGE_WEAR;
+    const mountainLine = routeOf(lineX).some((st) => MOUNTAIN_STATIONS.includes(st));
+    if (mountainLine && train.model !== "CREMAILLERE") wearRate = wearRate * MOUNTAIN_WEAR;
+    wearRate = wearRate * driver.wear;
     const newWear = Math.min(100, train.wear + stochasticRound(wearRate));
-    if (newWear >= 100) {
-      /* Réparation automatique en Premium : c'est du confort, pas un avantage
-         économique — la facture est identique, seul l'aller-retour manuel
-         disparaît. Si la trésorerie ne suit pas, la rame reste en panne. */
-      const repaired = await tryAutoRepair(train.id, train.companyId, train.name, train.lineId);
+    /* 2.0 : une rame négligée peut casser avant 100 % */
+    const neglected = newWear >= NEGLECT_FROM && newWear < 100 && Math.random() < NEGLECT_CHANCE * driver.incident;
+    if (newWear >= 100 || neglected) {
+      /* Réparation automatique : la pièce vient du magasin si elle y est,
+         sinon elle est commandée et la rame attend sa livraison. Si la
+         trésorerie ne suit pas, la rame reste en panne. */
+      const handled = await tryAutoRepair(train, train.lineId);
 
-      if (!repaired) {
-        await prisma.train.update({
-          where: { id: train.id },
-          data: { wear: 100, status: "MAINTENANCE" },
+      if (!handled) {
+        // écriture conditionnelle : une rame révisée par le joueur pendant le tour n'est pas écrasée
+        const hit = await prisma.train.updateMany({
+          where: { id: train.id, status: "EN_ROUTE", workshopUntil: null },
+          data: breakdownData(train),
         });
+        if (hit.count === 0) continue;
+        const part = PARTS[weakestOrgan(organBias(train))];
         await prisma.incident.create({
           data: {
             trainId: train.id,
-            message: `${train.name} est tombé en panne et nécessite une réparation`,
+            message: neglected
+              ? `${train.name} a cassé faute d'entretien (${part.label.toLowerCase()}) : il faut ${part.need}`
+              : `${train.name} est tombé en panne (${part.label.toLowerCase()}) : il faut ${part.need}`,
           },
         });
       }
@@ -376,7 +459,7 @@ export async function runLineTrains(weather: string) {
     // Une rame Express effectue le trajet 30% plus vite ; 1.7 : chaque voiture ajoutée ralentit,
     // l'électrification fait gagner 10 %
     const effectiveDuration =
-      train.line.durationMinutes * (train.model === "EXPRESS" ? 0.7 : 1) * speedFactor(trainX) * (lineX.electrified ? ELECTRIC_SPEED : 1);
+      train.line.durationMinutes * (train.model === "EXPRESS" ? 0.7 : 1) * (dlcModel?.speed ?? 1) * speedFactor(trainX) * (lineX.electrified ? ELECTRIC_SPEED : 1);
     const progress = Math.min(100, Math.floor((elapsedMinutes / effectiveDuration) * 100));
 
     if (progress >= 100) {
@@ -394,7 +477,11 @@ export async function runLineTrains(weather: string) {
          donne les deux bouts du trajet qui vient de se terminer */
       const route = routeOf(lineX);
       const [from, to] = ((r) => [r[0], r[r.length - 1]])(routeInDirection(lineX, trainX.direction ?? 0));
-      const demand = routeDemand(route, stationEvents);
+      /* 2.0 : la montagne se remplit l'hiver et l'été, la vapeur le week-end */
+      const demand =
+        routeDemand(route, stationEvents) *
+        (route.some((st) => MOUNTAIN_STATIONS.includes(st)) ? mountainBoost : 1) *
+        (weekend && dlcModel?.weekendDemand ? dlcModel.weekendDemand : 1);
       const contenders = competition.get(pairKey(dep, arr)) ?? [];
       const competitionMultiplier = contenders.find((c) => c.companyId === train.companyId)?.multiplier ?? 1;
       const boosted = routeHasBoost(route, stationEvents);
@@ -407,6 +494,8 @@ export async function runLineTrains(weather: string) {
       );
       // correspondances : une gare où la compagnie a plusieurs lignes rapporte plus
       const hub = hubMultiplier(hubCounts.get(train.companyId), dep, arr);
+      // 2.0 : correspondance d'alliance, +3 % par allié qui dessert l'une des deux gares
+      const allyMult = allyMultiplier(alliesFor(train.companyId), hubCounts, dep, arr);
       /* 1.6 — la rame couchettes : moins confortable qu'une voiture assise le
          jour, mais c'est elle que les voyageurs de nuit paient cher. */
       const couchettes = train.model === "COUCHETTES";
@@ -423,23 +512,29 @@ export async function runLineTrains(weather: string) {
           // 1.7 : voyageurs réellement emportés × prix du billet (demande et concurrence y sont)
           load.revenueFactor *
           hub *
+          allyMult *
           nightMultiplier *
           // 1.6 : grève, travaux, campagne touristique… décidés par le directeur
           decisionMultiplier(decisionEffects.get(train.companyId), dep, arr) *
-          (international ? INTL_REVENUE_BONUS : 1)
+          (international ? INTL_REVENUE_BONUS : 1) *
+          // 2.0 : le billet du matériel d'extension, le contrôleur à bord
+          (dlcModel?.fare ?? 1) *
+          // 2.0 : le prestige d'une rame de collection
+          (heritage?.prestige ?? 1) *
+          controllerBonus(crew?.CONTROLEUR)
       );
       /* 1.7 : gares achetées. Chez soi, le trajet rapporte un peu plus ; chez
          les autres, il leur doit une redevance de quai ; partout où il y a des
          commerces, ses voyageurs y dépensent. */
-      const infra = stationEffects(route, train.companyId, revenue, load.passengers, owners);
+      const infra = stationEffects(route, train.companyId, revenue, load.passengers, owners, alliesFor(train.companyId));
       const revenueHome = Math.round(revenue * infra.homeBonus);
       const platformFees = infra.fees.reduce((a, f) => a + f.amount, 0);
       for (const f of infra.fees) owe(f.station, "fees", f.amount);
       for (const sh of infra.shops) owe(sh.station, "shops", sh.amount);
       const toll = international ? Math.round(revenue * TOLL_RATE) : 0;
       const ops: any[] = [
-        prisma.train.update({
-          where: { id: train.id },
+        prisma.train.updateMany({
+          where: { id: train.id, status: "EN_ROUTE", workshopUntil: null },
           // 1.7 : la rame repart dans l'autre sens
           data: { progress: 0, departedAt: new Date(), wear: newWear, direction: (trainX.direction ?? 0) === 0 ? 1 : 0, lastPassengers: load.passengers, lastSeats: load.seats },
         }),
@@ -492,9 +587,19 @@ export async function runLineTrains(weather: string) {
         }));
       }
       await prisma.$transaction(ops);
+      /* 2.0 : points de saison et objectifs de la semaine (écrits en fin de tour) */
+      const fullish = load.seats > 0 && load.passengers >= load.seats * 0.8;
+      addSeasonPoints(train.companyId, POINTS.TRIP + (fullish ? POINTS.TRIP_FULL : 0));
+      seasonEvent(train.companyId, "TRIPS");
+      contribute(train.companyId); // 2.0 : le Grand Chantier avance d'un trajet
+      if (fullish) seasonEvent(train.companyId, "FULL_TRIPS");
+      if (load.seats > 0 && load.passengers >= load.seats && PEAK_HOURS.includes(parisHour())) seasonEvent(train.companyId, "RUSH_FULL");
+      if (international) seasonEvent(train.companyId, "INTL");
+      if (nightTrip) seasonEvent(train.companyId, "NIGHT");
+      await afterTrip(train, newWear, route, driver.incident).catch((err) => console.error("[atelier] fin de trajet :", (err as Error).message));
     } else if (progress !== train.progress || newWear !== train.wear) {
-      await prisma.train.update({
-        where: { id: train.id },
+      await prisma.train.updateMany({
+        where: { id: train.id, status: "EN_ROUTE", workshopUntil: null },
         data: { progress, wear: newWear },
       });
     }
@@ -502,7 +607,7 @@ export async function runLineTrains(weather: string) {
   await accruePending(pending).catch((err) => console.error("[gares] redevances non enregistrées :", (err as Error).message));
 }
 
-async function runFreightContracts(weather: string) {
+async function runFreightContracts(weather: Map<string, StationWeather> = new Map()) {
   const activeContracts = await prisma.contract.findMany({
     where: { status: "EN_COURS" },
     include: { train: true },
@@ -511,10 +616,12 @@ async function runFreightContracts(weather: string) {
   const staffEffects = await staffEffectsByCompany();
   const reputationByClient = await getReputationByCompany();
   const cargoIndex = await getCargoIndexMap();
-  const incidentChance = weather === "VERGLAS" ? INCIDENT_CHANCE * 2 : weather === "NEIGE" ? INCIDENT_CHANCE * 1.5 : INCIDENT_CHANCE;
 
   for (const contract of activeContracts) {
     if (!contract.train || !contract.acceptedAt) continue;
+    // 2.0 : la vraie météo, au départ ou à l'arrivée de la cargaison
+    const fwx = routeWeather(weather instanceof Map ? weather : new Map(), [contract.originStation, contract.destinationStation]);
+    const incidentChance = INCIDENT_CHANCE * fwx.incident;
 
     /* Usure du fret. Elle manquait purement et simplement : une rame affectée
        au fret roulait indéfiniment sans jamais tomber en panne, alors que le
@@ -524,7 +631,7 @@ async function runFreightContracts(weather: string) {
        accumule en fractions pour que l'arrondi n'avale pas le bonus. */
     const ffx = staffEffects.get(contract.companyId as string) ?? NO_STAFF;
     let freightWearRate = WEAR_PER_TICK * ffx.wearMultiplier;
-    if (weather === "CANICULE") freightWearRate = freightWearRate * 1.5;
+    freightWearRate = freightWearRate * fwx.wear;
     const wearNow = Math.min(100, contract.train.wear + stochasticRound(freightWearRate));
 
     // Même risque de retard aléatoire que sur les lignes voyageurs, renforcé par temps de verglas
@@ -595,6 +702,7 @@ async function runFreightContracts(weather: string) {
             progress: 0,
             departedAt: null,
             wear: newWear,
+            ...(arrivesBroken ? { brokenPart: weakestOrgan(organBias(contract.train)) } : {}),
           },
         }),
         prisma.company.update({
@@ -626,6 +734,10 @@ async function runFreightContracts(weather: string) {
       }
 
       await prisma.$transaction(updates);
+      // 2.0 : saison
+      addSeasonPoints(contract.companyId as string, POINTS.FREIGHT);
+      seasonEvent(contract.companyId as string, "FREIGHT");
+      if (contract.risky && !damaged) seasonEvent(contract.companyId as string, "FRAGILE");
 
       /* Une cargaison endommagée ne compte pas pour un ordre : le client a
          commandé de la marchandise en bon état, pas des débris. */
@@ -635,7 +747,7 @@ async function runFreightContracts(weather: string) {
 
       // même règle qu'en ligne : la rame qui rentre en panne est réparée si la trésorerie suit
       if (arrivesBroken) {
-        const repaired = await tryAutoRepair(contract.train.id, contract.companyId as string, contract.train.name, null);
+        const repaired = await tryAutoRepair({ ...contract.train, companyId: contract.companyId as string }, null);
         if (!repaired) {
           await prisma.incident.create({
             data: {
@@ -678,36 +790,107 @@ async function runFreightContracts(weather: string) {
    alors que la simulation ne fait rouler que les rames « en route ». Une rame
    de ligne réparée automatiquement s'arrêtait donc net. Elle repart désormais
    sur sa ligne, comme après une réparation manuelle. */
-async function tryAutoRepair(trainId: string, companyId: string, trainName: string, lineId: string | null) {
+async function tryAutoRepair(
+  train: { id: string; companyId: string; name: string; organs?: unknown; wear?: number },
+  lineId: string | null,
+  forcedPart?: Organ
+): Promise<false | "repaired" | "ordered"> {
   const [company, fx] = await Promise.all([
-    prisma.company.findUnique({ where: { id: companyId }, select: { balance: true } }),
-    staffEffectsFor(companyId),
+    prisma.company.findUnique({ where: { id: train.companyId }, select: { balance: true, partsStock: true } }),
+    staffEffectsFor(train.companyId),
   ]);
   if (!company) return false;
 
-  const cost = Math.ceil(100 * repairCostPerPoint(fx));
-  if (company.balance < cost) return false;
+  /* 2.0 : la réparation demande la pièce de l'organe qui a lâché. Au
+     magasin, la rame repart tout de suite ; sinon la pièce est commandée au
+     tarif normal et la rame attend sa livraison, en panne. */
+  const part = forcedPart ?? (weakestOrgan(organBias(train)) as Organ);
+  const labor = Math.ceil(100 * repairCostPerPoint(fx));
+  const inStock = (readStock(company.partsStock)[part] ?? 0) > 0;
 
+  if (inStock && company.balance >= labor && (await takeFromStock(train.companyId, part))) {
+    await prisma.$transaction([
+      prisma.train.update({
+        where: { id: train.id },
+        data: {
+          wear: 0,
+          brokenPart: null,
+          organs: freshBias() as unknown as Prisma.InputJsonValue,
+          ...(lineId ? { status: "EN_ROUTE", progress: 0, departedAt: new Date() } : { status: "IDLE", progress: 0, departedAt: null }),
+        },
+      }),
+      prisma.company.update({ where: { id: train.companyId }, data: { balance: { decrement: labor } } }),
+      prisma.transaction.create({
+        data: { companyId: train.companyId, type: "REPARATION", amount: -labor, description: `Réparation automatique de ${train.name}, pièce du magasin (${PARTS[part].part.toLowerCase()})`, trainId: train.id, lineId },
+      }),
+    ]);
+    return "repaired";
+  }
+
+  const cost = labor + partPrice(part, "order");
+  if (company.balance < cost) return false;
+  const eta = new Date(Date.now() + partDelayMs(part, "order"));
+  const hhmm = new Intl.DateTimeFormat("fr-FR", { timeZone: "Europe/Paris", hour: "2-digit", minute: "2-digit" }).format(eta);
+  await prisma.$transaction([
+    prisma.train.update({ where: { id: train.id }, data: { ...breakdownData(train, part), partsEta: eta } }),
+    prisma.company.update({ where: { id: train.companyId }, data: { balance: { decrement: cost } } }),
+    prisma.transaction.create({
+      data: { companyId: train.companyId, type: "REPARATION", amount: -cost, description: `Réparation automatique de ${train.name} : pièce commandée (${PARTS[part].part.toLowerCase()}), livrée à ${hhmm}`, trainId: train.id, lineId },
+    }),
+    prisma.incident.create({ data: { trainId: train.id, message: `${train.name} est en panne (${PARTS[part].label.toLowerCase()}) : pièce commandée, livrée à ${hhmm}` } }),
+  ]);
+  return "ordered";
+}
+
+/* 2.0 : en fin de trajet, un incident sur la voie peut survenir, et une rame
+   dont la révision est programmée part à l'atelier si elle a atteint son seuil. */
+async function afterTrip(
+  train: { id: string; name: string; companyId: string; lineId: string | null; organs?: unknown; serviceAt?: number | null },
+  wear: number,
+  route: string[],
+  incidentFactor: number
+) {
+  if (Math.random() < TRACK_INCIDENT_CHANCE * incidentFactor) {
+    const inc = TRACK_INCIDENTS[Math.floor(Math.random() * TRACK_INCIDENTS.length)];
+    const place = route[Math.floor(Math.random() * route.length)];
+    const bias = organBias(train);
+    bias[inc.organ] = Math.min(2, bias[inc.organ] + 0.35);
+    const hit = Math.min(100, wear + inc.wear);
+    const breaks = hit >= 100 || Math.random() < inc.breakChance;
+    await prisma.train.update({
+      where: { id: train.id },
+      data: breaks ? { ...breakdownData({ id: train.id, organs: bias }, inc.organ) } : { wear: hit, organs: bias as unknown as Prisma.InputJsonValue },
+    });
+    await prisma.incident.create({ data: { trainId: train.id, message: `${inc.text(train.name, place)}${breaks ? ` : ${PARTS[inc.organ].label.toLowerCase()} hors service` : ""}` } });
+    void sendToCompany(train.companyId, {
+      title: breaks ? `${train.name} immobilisée` : `Incident sur la voie`,
+      body: `${inc.text(train.name, place)}.${breaks ? ` Il faut ${PARTS[inc.organ].need}.` : ""}`,
+      url: "/dashboard",
+      tag: "incident",
+    });
+    if (breaks) {
+      const handled = await tryAutoRepair({ ...train, organs: bias }, train.lineId, inc.organ);
+      if (!handled) return;
+    }
+    return;
+  }
+
+  // révision programmée : en fin de trajet, au-delà du seuil
+  if (!train.serviceAt || wear < train.serviceAt) return;
+  const company = await prisma.company.findUnique({ where: { id: train.companyId }, select: { balance: true } });
+  const fx = await staffEffectsFor(train.companyId);
+  const cost = Math.ceil(wear * repairCostPerPoint(fx) * SERVICE_DISCOUNT);
+  if (!company || company.balance < cost) return;
+  const until = new Date(Date.now() + serviceMinutes(wear) * 60_000);
   await prisma.$transaction([
     prisma.train.update({
-      where: { id: trainId },
-      data: lineId
-        ? { wear: 0, status: "EN_ROUTE", progress: 0, departedAt: new Date() }
-        : { wear: 0, status: "IDLE", progress: 0, departedAt: null },
+      where: { id: train.id },
+      data: { wear: 0, status: "MAINTENANCE", workshopUntil: until, progress: 0, departedAt: null, organs: freshBias() as unknown as Prisma.InputJsonValue },
     }),
-    prisma.company.update({ where: { id: companyId }, data: { balance: { decrement: cost } } }),
-    prisma.transaction.create({
-      data: {
-        companyId,
-        type: "REPARATION",
-        amount: -cost,
-        description: `Réparation automatique de ${trainName}`,
-        trainId,
-        lineId,
-      },
-    }),
+    prisma.company.update({ where: { id: train.companyId }, data: { balance: { decrement: cost } } }),
+    prisma.transaction.create({ data: { companyId: train.companyId, type: "REPARATION", amount: -cost, description: `Révision programmée de ${train.name}`, trainId: train.id, lineId: train.lineId } }),
   ]);
-  return true;
+  seasonEvent(train.companyId, "REVISE");
 }
 
 async function runUpkeep() {
@@ -753,7 +936,10 @@ async function runUpkeep() {
    reste payé : son travail ne dépend pas des rames qui roulent. */
 const ROLES_IDLE_WITH_FLEET = new Set(["MECANICIEN", "CHEF_DEPOT"]);
 
-async function runPayroll() {
+const STAFF_PATIENCE_TICKS = 120; // une heure de tours de 30 s
+const warnedCompanies = new Set<string>();
+
+export async function runPayroll() {
   const [staffMembers, running] = await Promise.all([
     prisma.staff.findMany(),
     prisma.train.groupBy({ by: ["companyId"], where: { status: "EN_ROUTE" }, _count: { _all: true } }),
@@ -768,8 +954,37 @@ async function runPayroll() {
     const company = await prisma.company.findUnique({ where: { id: staff.companyId } });
     if (!company) continue;
 
+    const unpaid = staff.unpaidTicks ?? 0;
     if (company.balance < staff.salaryPerTick) {
-      // trésorerie insuffisante : l'employé quitte la compagnie
+      /* 1.7.2 : un salaire manqué ne fait plus partir l'employé sur-le-champ.
+         Avant, un seul tour à trésorerie vide (un achat, l'entretien du
+         réseau) vidait toute l'équipe d'un coup. Il patiente désormais une
+         heure ; le joueur est prévenu au premier salaire manqué. */
+      const next = unpaid + 1;
+      if (next < STAFF_PATIENCE_TICKS) {
+        await prisma.staff.update({ where: { id: staff.id }, data: { unpaidTicks: next } });
+        if (next === 1) {
+          await prisma.transaction.create({
+            data: {
+              companyId: staff.companyId,
+              type: "PERSONNEL",
+              amount: 0,
+              description: `${staff.name || "Un employé"} n'a pas été payé : sans trésorerie d'ici une heure, il quittera la compagnie`,
+            },
+          });
+          if (!warnedCompanies.has(staff.companyId)) {
+            warnedCompanies.add(staff.companyId);
+            void sendToCompany(staff.companyId, {
+              title: "Salaires impayés",
+              body: "Votre trésorerie ne couvre plus les salaires. Sans rentrée d'argent d'ici une heure, votre personnel partira.",
+              url: "/dashboard",
+              tag: "personnel",
+            });
+          }
+        }
+        continue;
+      }
+      // une heure sans salaire : l'employé quitte la compagnie
       await prisma.$transaction([
         prisma.staff.delete({ where: { id: staff.id } }),
         prisma.transaction.create({
@@ -777,7 +992,7 @@ async function runPayroll() {
             companyId: staff.companyId,
             type: "PERSONNEL",
             amount: 0,
-            description: `${staff.name || "Un employé"} a quitté la compagnie faute de trésorerie suffisante`,
+            description: `${staff.name || "Un employé"} a quitté la compagnie après une heure sans salaire`,
           },
         }),
       ]);
@@ -788,5 +1003,9 @@ async function runPayroll() {
       where: { id: staff.companyId },
       data: { balance: { decrement: staff.salaryPerTick } },
     });
+    if (unpaid > 0) {
+      await prisma.staff.update({ where: { id: staff.id }, data: { unpaidTicks: 0 } });
+      warnedCompanies.delete(staff.companyId);
+    }
   }
 }

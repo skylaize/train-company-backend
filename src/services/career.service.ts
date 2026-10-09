@@ -157,7 +157,7 @@ export const RANK_DEFINITIONS: { name: string; reward: string | null; requiremen
     name: "Magnat européen",
     reward: "Titre « Magnat européen » au classement",
     requirements: [
-      req("Desservir les 6 gares étrangères", (c) => c.foreignStations ?? 0, 6),
+      req("Desservir 6 gares étrangères", (c) => c.foreignStations ?? 0, 6),
       req("Posséder 6 gares", (c) => c.stationsOwned ?? 0, 6),
       req("Réputation d'au moins 92 %", (c) => c.reputation, 92),
       req("Avoir généré 4 000 000 pi. de recettes cumulées", (c) => c.totalRevenue, 4000000),

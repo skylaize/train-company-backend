@@ -77,7 +77,8 @@ export function stationEffects(
   companyId: string,
   revenue: number,
   passengers: number,
-  owners: Map<string, OwnerInfo>
+  owners: Map<string, OwnerInfo>,
+  allies?: Set<string> // 2.0 : pas de redevance de quai entre alliés
 ) {
   let own = 0;
   const fees: { station: string; ownerId: string; amount: number }[] = [];
@@ -86,7 +87,7 @@ export function stationEffects(
     const o = owners.get(st);
     if (!o) continue;
     if (o.companyId === companyId) own += 1;
-    else fees.push({ station: st, ownerId: o.companyId, amount: Math.round(revenue * PLATFORM_FEE) });
+    else if (!allies?.has(o.companyId)) fees.push({ station: st, ownerId: o.companyId, amount: Math.round(revenue * PLATFORM_FEE) });
     const shop = Math.round(passengers * SHOP_PER_PASSENGER * (SHOP_LEVEL_MULT[o.level] ?? 1));
     if (shop > 0) shops.push({ station: st, amount: shop });
   }

@@ -54,6 +54,14 @@ const STATION_COORDS: Record<string, { x: number; y: number }> = {
   "Genève": { x: 281.12, y: 210 },
   "Milan": { x: 372.23, y: 241 },
   "Barcelone": { x: 162.27, y: 418 },
+  // 2.0 — ouvertes par le Grand Chantier (tunnel du Mont-Blanc), voir world.service
+  "Turin": { x: 326.84, y: 259 },
+  "Zurich": { x: 352.13, y: 160 },
+  // 2.0 — extension Montagne (dlc.service), même projection
+  "Chamonix": { x: 302.7, y: 222.4 },
+  "Bourg-Saint-Maurice": { x: 299.7, y: 235.3 },
+  "Briançon": { x: 295.9, y: 266.2 },
+  "Font-Romeu": { x: 159.8, y: 369.3 },
 };
 
 export const STATIONS = Object.keys(STATION_COORDS);
@@ -63,7 +71,7 @@ export function isKnownStation(name: string) {
 }
 
 /* Projection inverse : on remonte aux degrés pour mesurer en kilomètres. */
-function toLonLat(p: { x: number; y: number }) {
+export function toLonLat(p: { x: number; y: number }) {
   // 1.6 : 29,58 px par degré de longitude (42,97 × cos 46,5°) : la carte n'est plus étirée en hauteur
   return { lon: 3.06 + (p.x - 190) / 29.58, lat: 50.63 - (p.y - 20) / 42.97 };
 }
@@ -89,4 +97,10 @@ export function durationFromKm(km: number) {
 export function durationBetween(a: string, b: string): number | null {
   const km = distanceKm(a, b);
   return km === null ? null : durationFromKm(km);
+}
+
+/* 2.0 : latitude et longitude réelles d'une gare (pour la météo) */
+export function stationLonLat(name: string) {
+  const p = STATION_COORDS[name];
+  return p ? toLonLat(p) : null;
 }
