@@ -26,6 +26,8 @@ import { peakFactor, PEAK_HOURS } from "../services/peak.service";
 import { allianceMap, alliesOf, allyMultiplier } from "../services/alliance.service";
 import { contribute, flushWorld, TUNNEL_NAME, TUNNEL_STATIONS } from "../services/world.service";
 import { addSeasonPoints, seasonEvent, flushSeason, runSeasons, notifySeasonEnd, POINTS } from "../services/saison.service";
+import { runDiscordFeed, announceSeasonEnd } from "../services/discord-feed.service";
+import { syncAllRoles } from "../services/discord-roles.service";
 import { parisHour } from "../services/time.service";
 let lastPricingHour = -1;
 import { checkPriceAlerts, runStandingOrders } from "../controllers/market.controller";
@@ -217,7 +219,10 @@ async function runSimulationTick() {
   if (tickCount % 10 === 1) {
     await runSeasons()
       .then(async (closed) => {
-        if (closed) await notifySeasonEnd(closed.id).catch(() => {});
+        if (closed) {
+          await notifySeasonEnd(closed.id).catch(() => {});
+          await announceSeasonEnd(closed.id).catch((err) => console.error("[discord] fin de saison :", (err as Error).message));
+        }
       })
       .catch((err) => console.error("[saisons] échec :", (err as Error).message));
   }
@@ -247,6 +252,13 @@ async function runSimulationTick() {
   // bilan du matin : isolé, un raté ne doit pas interrompre le tick
   await runMorningDigest().catch((err) => console.error("[bilan] échec :", (err as Error).message));
   if (tickCount % MILESTONE_EVERY === 0) await processReferralMilestones();
+  /* 2.1 : Discord, toutes les cinq minutes. Sans bloquer le tour : une API
+     Discord lente ne doit jamais retarder la simulation. Le bail garantit
+     qu'un seul serveur publie, même pendant un déploiement. */
+  if (tickCount % 10 === 6) {
+    void runDiscordFeed().catch((err) => console.error("[discord] annonces :", (err as Error).message));
+    void syncAllRoles().catch((err) => console.error("[discord] rôles :", (err as Error).message));
+  }
 }
 
 const REFERRAL_REWARD = 150; // versé au parrain une fois que l'ami invité a vraiment commencé à jouer

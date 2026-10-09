@@ -3,6 +3,7 @@ import { Request, Response } from "express";
 import Stripe from "stripe";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
+import { syncCompany } from "../services/discord-roles.service";
 import { grantShopItem } from "./shop.controller";
 import { hasAdFree, AD_FREE_ITEM } from "../services/shop.service";
 
@@ -191,6 +192,8 @@ export async function processCheckoutSession(session: Stripe.Checkout.Session) {
       },
     });
     console.log("[stripe] Premium activé pour", company.id, "session", session.id);
+    // 2.1 : rôle Premium sur Discord tout de suite, sans attendre le passage des cinq minutes
+    void syncCompany(company.id).catch(() => undefined);
   }
   return { done: true as const, kind: "premium" as const };
 }

@@ -2,6 +2,7 @@ import { Response } from "express";
 import bcrypt from "bcrypt";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
+import { forgetDiscord } from "./discord.controller";
 
 export async function changePassword(req: AuthRequest, res: Response) {
   const { currentPassword, newPassword } = req.body;
@@ -31,6 +32,8 @@ export async function changePassword(req: AuthRequest, res: Response) {
 
 export async function deleteAccount(req: AuthRequest, res: Response) {
   const userId = req.userId as string;
+  // 2.1 : les rôles Discord du jeu partent avec le compte
+  await forgetDiscord(userId);
 
   const company = await prisma.company.findUnique({ where: { ownerId: userId } });
 

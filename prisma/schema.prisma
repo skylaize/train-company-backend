@@ -21,6 +21,10 @@ model User {
   pseudo    String
   password  String
   createdAt DateTime @default(now())
+  // 2.1 : compte Discord lié (rôles automatiques, /profil). Null tant que le
+  // joueur n'a pas cliqué sur « Lier mon Discord » dans les Paramètres.
+  discordId   String? @unique
+  discordName String?
 
   company   Company?
   passwordResets PasswordReset[]
@@ -881,4 +885,15 @@ model SeasonPassClaim {
   createdAt DateTime @default(now())
 
   @@unique([seasonId, companyId, tier])
+}
+
+// 2.1 : messages publiés par le bot Discord. La clé dit de quoi il s'agit
+// ("classement", "patch:2.1.0", "saison-fin:3", "chantier:50"…) : un message
+// déjà publié ne l'est pas deux fois, même après un redéploiement, et le
+// message du classement est modifié sur place plutôt que republié.
+model DiscordPost {
+  key       String   @id
+  channelId String
+  messageId String
+  createdAt DateTime @default(now())
 }

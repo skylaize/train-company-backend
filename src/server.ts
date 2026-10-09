@@ -32,6 +32,8 @@ import { decisionRouter } from "./routes/decision.routes";
 import { infrastructureRouter } from "./routes/infrastructure.routes";
 import { financeRouter } from "./routes/finance.routes";
 import { v2Router } from "./routes/v2.routes";
+import { discordRouter } from "./routes/discord.routes";
+import { discordInteractions, registerDiscordCommands } from "./controllers/discord.controller";
 import { responseCache } from "./middleware/responseCache";
 import { handleStripeWebhook } from "./controllers/billing.controller";
 import { startSimulationJob } from "./jobs/simulation.job";
@@ -53,6 +55,8 @@ app.options("*", cors(corsOptions));
    express.json(), sinon le corps serait déjà décodé et la signature invalide.
    C'est l'erreur la plus courante de cette intégration. */
 app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), handleStripeWebhook);
+// 2.1 : commandes slash Discord, signées elles aussi sur le corps brut
+app.post("/api/discord/interactions", express.raw({ type: "application/json" }), discordInteractions);
 
 app.use(express.json());
 // 2.0 : réponses lourdes gardées quelques secondes par joueur (voir responseCache)
@@ -79,6 +83,7 @@ app.use("/api", reportRouter);
 app.use("/api", infrastructureRouter);
 app.use("/api", financeRouter);
 app.use("/api", v2Router);
+app.use("/api", discordRouter);
 app.use("/api", tenderRouter);
 app.use("/api", decisionRouter);
 app.use("/api", incidentRouter);
@@ -99,4 +104,5 @@ const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`Serveur démarré sur http://localhost:${PORT}`);
   startSimulationJob();
+  void registerDiscordCommands();
 });
