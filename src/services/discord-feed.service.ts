@@ -4,6 +4,7 @@ import { buildLeaderRows, rankRows } from "./leaderboard.service";
 import { allianceRanking } from "./alliance.service";
 import { currentSeason, DIVISIONS } from "./saison.service";
 import { ensureProject, TUNNEL_NAME, TUNNEL_STATIONS } from "./world.service";
+import { pruneLogKeys } from "./discord-modlog.service";
 
 /* ============================================================
    Ce que le jeu publie tout seul sur Discord (2.1).
@@ -252,6 +253,7 @@ export async function runDiscordFeed() {
     ["saison", checkSeasonStart],
     ["chantier", updateWorldPost],
     ["chantier, paliers", checkWorld],
+    ["ménage du journal", pruneLogKeys],
   ];
   for (const [label, fn] of steps) {
     await fn().catch((err) => console.error(`[discord] ${label} :`, (err as Error).message));

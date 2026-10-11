@@ -42,6 +42,7 @@ export const CHANNELS = {
   SAISONS: "🏆・saisons",
   CLASSEMENTS: "📊・classements",
   CHANTIER: "🏔️・grand-chantier",
+  LOGS: "📋・logs",
 } as const;
 export type ChannelKey = keyof typeof CHANNELS;
 
@@ -148,6 +149,8 @@ export type Embed = {
   url?: string;
   color?: number;
   fields?: { name: string; value: string; inline?: boolean }[];
+  author?: { name: string; icon_url?: string };
+  thumbnail?: { url: string };
   footer?: { text: string };
   timestamp?: string;
 };

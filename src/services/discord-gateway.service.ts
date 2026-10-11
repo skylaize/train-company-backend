@@ -1,4 +1,5 @@
-import { ActivityType, Client, Events, GatewayIntentBits, GuildMember } from "discord.js";
+import { ActivityType, Client, Events, GatewayIntentBits, GuildMember, Options, Partials } from "discord.js";
+import { attachModLog } from "./discord-modlog.service";
 import { prisma } from "../prisma";
 import { BOT_TOKEN, botEnabled, BRAND_COLOR, channelId, CHANNELS, esc, GUILD_ID, managedRoleIds, NOTIFY_ROLES, ROLES } from "./discord.service";
 import { syncUser } from "./discord-roles.service";
@@ -121,13 +122,39 @@ async function diagnose() {
   else console.log("[discord] diagnostic : salons, rôles et base de données OK");
 }
 
-export function startDiscordGateway() {
+/* Les intents demandés, du plus complet au plus réduit : si un intent
+   privilégié n'est pas activé dans le portail, on retente sans lui plutôt
+   que de tout perdre. */
+const INTENT_SETS: { intents: GatewayIntentBits[]; missing: string | null }[] = [
+  {
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildModeration, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+    missing: null,
+  },
+  {
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildModeration, GatewayIntentBits.GuildMessages],
+    missing: "« Message Content Intent » : le journal ne montrera pas le texte des messages supprimés ou modifiés",
+  },
+  {
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildModeration, GatewayIntentBits.GuildMessages],
+    missing: "« Server Members Intent » et « Message Content Intent » : pas de bienvenue ni d'arrivées/départs dans le journal",
+  },
+];
+
+export function startDiscordGateway(level = 0) {
   if (!botEnabled() || client) return;
-  client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
+  const set = INTENT_SETS[level];
+  client = new Client({
+    intents: set.intents,
+    // un message supprimé qui n'est pas en mémoire arrive quand même, sans son texte
+    partials: [Partials.Message, Partials.Channel, Partials.GuildMember, Partials.User],
+    // de quoi retrouver le texte des messages récents, sans laisser grossir la mémoire
+    makeCache: Options.cacheWithLimits({ ...Options.DefaultMakeCacheSettings, MessageManager: 100 }),
+  });
 
   client.once(Events.ClientReady, async (c) => {
     const guild = c.guilds.cache.get(GUILD_ID);
     console.log(`[discord] connecté en tant que ${c.user.tag}${guild ? ` sur « ${guild.name} »` : " — ATTENTION : le bot n'est pas sur le serveur DISCORD_GUILD_ID"}`);
+    if (set.missing) console.warn(`[discord] ⚠️  à activer dans le portail développeur → Bot → Privileged Gateway Intents : ${set.missing}`);
     await setPresence();
     setInterval(() => void setPresence(), 10 * 60_000).unref();
     await diagnose();
@@ -137,16 +164,17 @@ export function startDiscordGateway() {
     if (member.guild.id !== GUILD_ID) return;
     welcome(member).catch((err) => console.error("[discord] bienvenue :", (err as Error).message));
   });
+  attachModLog(client, GUILD_ID);
 
   client.on(Events.Error, (err) => console.error("[discord] gateway :", err.message));
 
   client.login(BOT_TOKEN).catch((err: Error) => {
-    if (/disallowed intents/i.test(err.message)) {
-      console.error("[discord] connexion refusée : active « Server Members Intent » (portail développeur → Bot → Privileged Gateway Intents). Les messages de bienvenue sont désactivés en attendant, le reste fonctionne.");
-    } else {
-      console.error("[discord] connexion au gateway impossible :", err.message);
-    }
     client?.destroy().catch(() => undefined);
     client = null;
+    if (/disallowed intents/i.test(err.message) && level + 1 < INTENT_SETS.length) {
+      startDiscordGateway(level + 1);
+      return;
+    }
+    console.error("[discord] connexion au gateway impossible :", err.message);
   });
 }

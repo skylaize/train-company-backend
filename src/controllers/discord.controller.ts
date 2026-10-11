@@ -5,6 +5,7 @@ import { prisma } from "../prisma";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { APP_ID, botEnabled, BRAND_COLOR, Embed, esc, fmt, GUILD_ID, PUBLIC_KEY, rest } from "../services/discord.service";
 import { clearRoles, syncUser } from "../services/discord-roles.service";
+import { logAccount } from "../services/discord-modlog.service";
 import { BOARDS, BoardId, buildLeaderRows, rankRows } from "../services/leaderboard.service";
 import { allianceRanking, ALLIANCE_MAX } from "../services/alliance.service";
 import { currentSeason, DIVISIONS } from "../services/saison.service";
@@ -93,6 +94,8 @@ export async function discordCallback(req: Request, res: Response) {
       return backToGame(res, { discord: "erreur", raison: "Ce compte Discord est déjà lié à une autre compagnie" });
     }
     await prisma.user.update({ where: { id: userId }, data: { discordId: me.id, discordName: me.global_name || me.username || null } });
+    const linked = await prisma.user.findUnique({ where: { id: userId }, select: { pseudo: true, company: { select: { name: true } } } });
+    void logAccount(`a lié son compte Réseau **${linked?.pseudo ?? "?"}**${linked?.company ? ` (compagnie **${linked.company.name}**)` : ""}`, me.id);
 
     // ajoute le joueur au serveur s'il n'y est pas encore (sans effet s'il y est déjà)
     await rest("PUT", `/guilds/${GUILD_ID}/members/${me.id}`, { body: { access_token } }).catch((err) =>
@@ -110,6 +113,7 @@ export async function discordUnlink(req: AuthRequest, res: Response) {
   const user = await prisma.user.findUnique({ where: { id: req.userId }, select: { discordId: true } });
   if (user?.discordId) await clearRoles(user.discordId).catch(() => undefined);
   await prisma.user.update({ where: { id: req.userId }, data: { discordId: null, discordName: null } });
+  if (user?.discordId) void logAccount("a délié son compte Réseau", user.discordId);
   return res.json({ ok: true });
 }
 
