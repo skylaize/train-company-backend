@@ -25,7 +25,7 @@ import { isNightService, NIGHT_MULTIPLIER, DAY_COUCHETTES_MULTIPLIER } from "../
 import { peakFactor, PEAK_HOURS } from "../services/peak.service";
 import { allianceMap, alliesOf, allyMultiplier } from "../services/alliance.service";
 import { contribute, flushWorld, TUNNEL_NAME, TUNNEL_STATIONS } from "../services/world.service";
-import { addSeasonPoints, seasonEvent, flushSeason, runSeasons, notifySeasonEnd, POINTS } from "../services/saison.service";
+import { addSeasonPoints, seasonEvent, flushSeason, runSeasons, reconcileObjectives, notifySeasonEnd, POINTS } from "../services/saison.service";
 import { runDiscordFeed, announceSeasonEnd } from "../services/discord-feed.service";
 import { syncAllRoles } from "../services/discord-roles.service";
 import { parisHour } from "../services/time.service";
@@ -225,6 +225,7 @@ async function runSimulationTick() {
         }
       })
       .catch((err) => console.error("[saisons] échec :", (err as Error).message));
+    await reconcileObjectives().catch((err) => console.error("[saisons, objectifs] échec :", (err as Error).message));
   }
   await flushSeason().catch((err) => console.error("[saisons, points] échec :", (err as Error).message));
   await flushWorld()

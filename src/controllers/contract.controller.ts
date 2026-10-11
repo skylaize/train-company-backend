@@ -1,3 +1,4 @@
+import { clientById } from "../services/client.service";
 import { Response } from "express";
 import { Prisma } from "@prisma/client";
 import { AuthRequest } from "../middleware/auth.middleware";
@@ -145,14 +146,42 @@ export async function ensureMarketStocked() {
   }
 }
 
+/* 2.0 : pour chaque marchandise, l'ordre de donneur d'ordre que la prochaine
+   livraison fera avancer (le plus ancien accepté). Affiché sur la page du fret,
+   pour savoir d'un coup d'œil quel contrat sert à quel ordre. */
+async function ordersByCargo(companyId: string) {
+  const missions = (await prisma.mission.findMany({
+    where: { companyId, status: "ACCEPTEE" },
+    orderBy: { createdAt: "asc" },
+    select: { id: true, clientId: true, cargoType: true, progress: true, target: true },
+  })) as { id: string; clientId: string; cargoType: string; progress: number; target: number }[];
+  const map = new Map<string, { ref: string; client: string; progress: number; target: number; more: number }>();
+  for (const m of missions) {
+    const cur = map.get(m.cargoType);
+    if (cur) {
+      cur.more += 1;
+      continue;
+    }
+    map.set(m.cargoType, {
+      ref: `${m.clientId.slice(0, 2)}-${m.id.slice(0, 4).toUpperCase()}`,
+      client: clientById(m.clientId)?.name ?? m.clientId,
+      progress: m.progress,
+      target: m.target,
+      more: 0,
+    });
+  }
+  return map;
+}
+
 export async function listMarket(req: AuthRequest, res: Response) {
   await removeExpiredContracts();
   await ensureMarketStocked();
 
   const company = await prisma.company.findUnique({
     where: { ownerId: req.userId as string },
-    select: { isPremium: true },
+    select: { id: true, isPremium: true },
   });
+  const orders = company ? await ordersByCargo(company.id) : new Map();
 
   const contracts = await prisma.contract.findMany({
     where: { status: "DISPONIBLE", companyId: null },
@@ -173,6 +202,7 @@ export async function listMarket(req: AuthRequest, res: Response) {
       // récompense réellement attendue, cours compris — c'est ce chiffre qui décide
       effectiveReward: Math.round(c.reward * multiplier),
       marketDelta: Math.round((multiplier - 1) * 100),
+      forOrder: orders.get(c.cargoType) ?? null,
     };
   });
 
@@ -190,8 +220,11 @@ export async function listMyContracts(req: AuthRequest, res: Response) {
     include: { train: true },
     orderBy: { createdAt: "desc" },
   });
+  const orders = await ordersByCargo(company.id);
 
-  return res.json(contracts);
+  return res.json(
+    (contracts as { status: string; cargoType: string }[]).map((c) => ({ ...c, forOrder: c.status === "EN_COURS" ? orders.get(c.cargoType) ?? null : null }))
+  );
 }
 
 const INSURANCE_PREMIUM_RATIO = 0.15; // 15% de la récompense, payé d'avance, non remboursable

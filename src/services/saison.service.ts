@@ -278,6 +278,46 @@ let lastSnapshotDay = "";
 /* Appelé régulièrement : ouvre la première saison, clôt celle qui se
    termine et ouvre la suivante, et note chaque nuit le rang de chacun pour
    la flèche d'évolution. Renvoie la saison close, s'il y en a une. */
+/* 2.0 : les objectifs qui naissent d'une action du joueur (ouvrir une ligne,
+   réviser une rame) étaient comptés en mémoire jusqu'au tour suivant. Une
+   action faite pendant un redéploiement pouvait s'y perdre : « j'ai ouvert une
+   ligne et l'objectif reste à 0/1 ». On les recompte désormais depuis la base,
+   pour la semaine en cours, et on rattrape ce qui manque. */
+export async function reconcileObjectives(now = new Date()) {
+  const season = await currentSeason();
+  if (!season || now >= season.endsAt || now < season.startsAt) return 0;
+  const week = weekOf(season, now);
+  const since = new Date(season.startsAt.getTime() + week * 7 * DAY_MS);
+  const objectives = objectivesFor(season.number, week).filter((o) => o.kind === "NEW_LINE" || o.kind === "REVISE");
+  let fixed = 0;
+  for (const obj of objectives) {
+    const counts =
+      obj.kind === "NEW_LINE"
+        ? ((await (prisma.line.groupBy as any)({ by: ["companyId"], where: { createdAt: { gte: since } }, _count: { _all: true } })) as { companyId: string; _count: { _all: number } }[])
+        : ((await (prisma.transaction.groupBy as any)({
+            by: ["companyId"],
+            where: { createdAt: { gte: since }, type: "REPARATION", description: { startsWith: "Révision" } },
+            _count: { _all: true },
+          })) as { companyId: string; _count: { _all: number } }[]);
+    for (const c of counts) {
+      const n = c._count._all;
+      const row = await prisma.seasonObjectiveProgress.findUnique({
+        where: { seasonId_week_kind_companyId: { seasonId: season.id, week, kind: obj.kind, companyId: c.companyId } },
+      });
+      if (row && row.progress >= n) continue;
+      const saved = row
+        ? await prisma.seasonObjectiveProgress.update({ where: { id: row.id }, data: { progress: n } })
+        : await prisma.seasonObjectiveProgress.create({ data: { seasonId: season.id, week, kind: obj.kind, companyId: c.companyId, progress: n } });
+      fixed++;
+      if (!saved.doneAt && saved.progress >= obj.target) {
+        const done = await prisma.seasonObjectiveProgress.updateMany({ where: { id: saved.id, doneAt: null }, data: { doneAt: now } });
+        if (done.count) addSeasonPoints(c.companyId, obj.points);
+      }
+    }
+  }
+  return fixed;
+}
+
 export async function runSeasons(now = new Date()) {
   // SEASONS_START_AT (date ISO) : la première saison n'ouvre pas avant cette date
   const startAt = process.env.SEASONS_START_AT ? new Date(process.env.SEASONS_START_AT) : null;
