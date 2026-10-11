@@ -207,6 +207,41 @@ async function checkWorld() {
   if (posted) for (const m of reached.slice(0, -1)) await markPosted(`chantier:${m}`);
 }
 
+/* Un message tenu à jour dans #grand-chantier : l'avancée du tunnel et
+   les cinq compagnies qui ont le plus creusé. */
+const bar = (pct: number) => "█".repeat(Math.round(pct / 5)) + "░".repeat(20 - Math.round(pct / 5));
+async function updateWorldPost() {
+  const p = await ensureProject();
+  const pct = p.completedAt ? 100 : Math.min(100, (Math.min(p.progress, p.target) / p.target) * 100);
+  const top = (await prisma.worldContribution.findMany({ where: { projectId: p.id }, orderBy: { amount: "desc" }, take: 5 })) as { companyId: string; amount: number }[];
+  const names = new Map(
+    ((await prisma.company.findMany({ where: { id: { in: top.map((t) => t.companyId) } }, select: { id: true, name: true } })) as { id: string; name: string }[]).map((c) => [c.id, c.name])
+  );
+  const contributors = await prisma.worldContribution.count({ where: { projectId: p.id } });
+  await upsertPost("chantier-live", "CHANTIER", {
+    embeds: [
+      {
+        title: p.completedAt ? `🎉 ${TUNNEL_NAME} est ouvert` : `⛏️ ${TUNNEL_NAME}`,
+        url: SITE_URL ? `${SITE_URL}/dashboard` : undefined,
+        description: [
+          `\`${bar(pct)}\` **${pct.toFixed(1).replace(".", ",")} %**`,
+          `${fmt(Math.min(p.progress, p.target))} / ${fmt(p.target)} trajets · ${fmt(contributors)} compagnie${contributors > 1 ? "s" : ""} au chantier`,
+          "",
+          p.completedAt
+            ? `${TUNNEL_STATIONS.join(" et ")} sont sur la carte pour tout le monde.`
+            : `Chaque trajet voyageurs de chaque joueur creuse le tunnel. À l'ouverture, ${TUNNEL_STATIONS.join(" et ")} rejoignent la carte.`,
+        ].join("\n"),
+        color: BRAND_COLOR,
+        fields: top.length
+          ? [{ name: "Les plus gros bâtisseurs", value: top.map((t, i) => `${medal(i)} **${esc(names.get(t.companyId) ?? "—")}** — ${fmt(t.amount)} trajets`).join("\n") }]
+          : undefined,
+        footer: { text: "Mis à jour toutes les 5 minutes" },
+        timestamp: new Date().toISOString(),
+      },
+    ],
+  });
+}
+
 /* ---------------- un passage, toutes les cinq minutes ---------------- */
 
 export async function runDiscordFeed() {
@@ -215,7 +250,8 @@ export async function runDiscordFeed() {
     ["classement", updateLeaderboardPost],
     ["notes de version", checkPatchNotes],
     ["saison", checkSeasonStart],
-    ["chantier", checkWorld],
+    ["chantier", updateWorldPost],
+    ["chantier, paliers", checkWorld],
   ];
   for (const [label, fn] of steps) {
     await fn().catch((err) => console.error(`[discord] ${label} :`, (err as Error).message));

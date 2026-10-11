@@ -34,6 +34,7 @@ import { financeRouter } from "./routes/finance.routes";
 import { v2Router } from "./routes/v2.routes";
 import { discordRouter } from "./routes/discord.routes";
 import { discordInteractions, registerDiscordCommands } from "./controllers/discord.controller";
+import { startDiscordGateway } from "./services/discord-gateway.service";
 import { responseCache } from "./middleware/responseCache";
 import { handleStripeWebhook } from "./controllers/billing.controller";
 import { startSimulationJob } from "./jobs/simulation.job";
@@ -105,4 +106,6 @@ app.listen(PORT, () => {
   console.log(`Serveur démarré sur http://localhost:${PORT}`);
   startSimulationJob();
   void registerDiscordCommands();
+  // 2.1 : bienvenue aux nouveaux membres et bot « en ligne »
+  startDiscordGateway();
 });
