@@ -125,7 +125,7 @@ async function checkPatchNotes() {
   if (!r.ok) return;
   const c = (await r.json().catch(() => null)) as Changelog | null;
   if (!c?.version || !Array.isArray(c.changes)) return;
-  await postOnce(`patch:${c.version}`, "PATCH_NOTES", patchNotePayloads(c), { crosspost: true });
+  await postOnce(`patch:${c.version}`, "PATCH_NOTES", patchNotePayloads(c), { crosspost: true, ping: "MAJ" });
 }
 
 /* ---------------- saisons ---------------- */
@@ -149,7 +149,7 @@ async function checkSeasonStart() {
         },
       ],
     },
-  ], { crosspost: true });
+  ], { crosspost: true, ping: "EVENEMENTS" });
 }
 
 /* Appelé par la simulation au moment où une saison se clôt. */
@@ -184,7 +184,7 @@ export async function announceSeasonEnd(seasonId: string) {
         },
       ],
     },
-  ], { crosspost: true });
+  ], { crosspost: true, ping: "EVENEMENTS" });
 }
 
 /* ---------------- Grand Chantier ---------------- */
@@ -202,7 +202,7 @@ async function checkWorld() {
       : `${TUNNEL_NAME} est creusé à **${top} %** (${fmt(p.progress)} / ${fmt(p.target)} trajets). Chaque trajet voyageurs fait avancer le chantier.`;
   const posted = await postOnce(`chantier:${top}`, "CHANTIER", [
     { embeds: [{ title: top === 100 ? "🎉 Le tunnel est ouvert" : `⛏️ Grand Chantier : ${top} %`, description, color: BRAND_COLOR }] },
-  ]);
+  ], { ping: "EVENEMENTS" });
   // les paliers déjà dépassés (premier démarrage en cours de route) ne sont pas rattrapés
   if (posted) for (const m of reached.slice(0, -1)) await markPosted(`chantier:${m}`);
 }

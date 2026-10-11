@@ -29,6 +29,13 @@ export const ROLES = {
 } as const;
 export type ManagedRole = keyof typeof ROLES;
 
+// 2.1 : rôles de notification, choisis par les membres à l'arrivée (onboarding)
+export const NOTIFY_ROLES = {
+  MAJ: "🔔 Mises à jour",
+  EVENEMENTS: "🔔 Événements",
+} as const;
+export type NotifyRole = keyof typeof NOTIFY_ROLES;
+
 export const CHANNELS = {
   ANNONCES: "📣・annonces",
   PATCH_NOTES: "🛠️・patch-notes",
@@ -113,6 +120,16 @@ export async function managedRoleIds() {
   return out;
 }
 
+/* La mention d'un rôle de notification, à ajouter en tête d'une annonce. */
+async function rolePing(key: NotifyRole): Promise<MessagePayload> {
+  const id = (await guildRoles()).get(NOTIFY_ROLES[key]);
+  if (!id) {
+    warnOnce(`role:${key}`, `rôle « ${NOTIFY_ROLES[key]} » introuvable sur le serveur`);
+    return {};
+  }
+  return { content: `<@&${id}>`, allowed_mentions: { parse: [], roles: [id] } as MessagePayload["allowed_mentions"] };
+}
+
 export async function channelId(key: ChannelKey) {
   if (!channelsCache || Date.now() - channelsCache.at >= CACHE_MS) {
     const list = (await rest<{ id: string; name: string }[]>("GET", `/guilds/${GUILD_ID}/channels`)) ?? [];
@@ -134,7 +151,7 @@ export type Embed = {
   footer?: { text: string };
   timestamp?: string;
 };
-export type MessagePayload = { content?: string; embeds?: Embed[]; allowed_mentions?: { parse: string[] } };
+export type MessagePayload = { content?: string; embeds?: Embed[]; allowed_mentions?: { parse: string[]; roles?: string[] } };
 
 // jamais de @everyone ou de mention surprise venue d'un nom de compagnie
 const SAFE = { allowed_mentions: { parse: [] as string[] } };
@@ -154,7 +171,7 @@ async function send(channel: string, payload: MessagePayload) {
 /* Publie une seule fois un message (ou une suite de messages) identifié par
    sa clé. Dans un salon d'annonces, il est aussi « publié » vers les serveurs
    qui suivent le salon. Renvoie false s'il l'était déjà. */
-export async function postOnce(key: string, channelKey: ChannelKey, payloads: MessagePayload[], opts: { crosspost?: boolean } = {}) {
+export async function postOnce(key: string, channelKey: ChannelKey, payloads: MessagePayload[], opts: { crosspost?: boolean; ping?: NotifyRole } = {}) {
   if (!botEnabled() || payloads.length === 0) return false;
   if (await prisma.discordPost.findUnique({ where: { key } })) return false;
   const channel = await channelId(channelKey);
@@ -168,6 +185,8 @@ export async function postOnce(key: string, channelKey: ChannelKey, payloads: Me
   }
   try {
     let first = "";
+    // la mention ne part qu'avec le premier message d'une annonce en plusieurs parties
+    if (opts.ping) payloads = [{ ...payloads[0], ...(await rolePing(opts.ping)) }, ...payloads.slice(1)];
     for (const p of payloads) {
       const id = await send(channel, p);
       if (!first) first = id;
