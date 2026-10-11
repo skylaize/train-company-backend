@@ -799,6 +799,9 @@ model Alliance {
   discordUrl String?
   founderId  String
   createdAt  DateTime @default(now())
+  // 2.0.2 : candidatures
+  recruiting Boolean  @default(true)
+  pitch      String?
 }
 
 model AllianceMember {
@@ -806,8 +809,21 @@ model AllianceMember {
   allianceId String
   companyId  String   @unique
   joinedAt   DateTime @default(now())
+  viaApplication Boolean @default(false)
 
   @@index([allianceId])
+}
+
+// 2.0.2 : une compagnie sans alliance postule, le fondateur accepte ou refuse
+model AllianceApplication {
+  id         String   @id @default(uuid())
+  allianceId String
+  companyId  String
+  message    String   @default("")
+  createdAt  DateTime @default(now())
+
+  @@unique([allianceId, companyId])
+  @@index([companyId])
 }
 
 model AllianceInvite {

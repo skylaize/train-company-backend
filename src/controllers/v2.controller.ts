@@ -8,6 +8,7 @@ import { passView, claimFreeTier } from "../services/pass.service";
 import { DLCS, ownedDlcs } from "../services/dlc.service";
 import {
   ALLIANCE_MAX, ALLIANCE_COST, ALLIANCE_COLORS, MESSAGE_MAX, MESSAGE_COOLDOWN_MS, ALLY_STEP, ALLY_MAX_ALLIES,
+  APPLY_MAX_PENDING, APPLY_MESSAGE_MAX, PITCH_MAX,
   allianceOfCompany, allianceRanking, cleanName, invalidateAlliances, pruneMessages,
 } from "../services/alliance.service";
 import { allStationCounts } from "../services/hub.service";
@@ -44,16 +45,28 @@ export async function getAlliance(req: AuthRequest, res: Response) {
   if (!company) return err(res, 404, "Créez d'abord votre compagnie");
   const alliance = await allianceOfCompany(company.id);
   const ranking = await allianceRanking();
-  const rules = { max: ALLIANCE_MAX, cost: ALLIANCE_COST, allyStep: ALLY_STEP, allyMaxAllies: ALLY_MAX_ALLIES, messageMax: MESSAGE_MAX, colors: ALLIANCE_COLORS };
+  const rules = {
+    max: ALLIANCE_MAX, cost: ALLIANCE_COST, allyStep: ALLY_STEP, allyMaxAllies: ALLY_MAX_ALLIES, messageMax: MESSAGE_MAX, colors: ALLIANCE_COLORS,
+    applyMax: APPLY_MAX_PENDING, applyMessageMax: APPLY_MESSAGE_MAX, pitchMax: PITCH_MAX,
+  };
 
   // invitations reçues, quand on n'a pas encore d'alliance
   if (!alliance) {
     const invites = (await prisma.allianceInvite.findMany({ where: { companyId: company.id }, orderBy: { createdAt: "desc" } })) as { id: string; allianceId: string; createdAt: Date }[];
     const names = (await prisma.alliance.findMany({ where: { id: { in: invites.map((i) => i.allianceId) } } })) as { id: string; name: string; color: string }[];
+    const mine = (await prisma.allianceApplication.findMany({ where: { companyId: company.id }, orderBy: { createdAt: "desc" } })) as { id: string; allianceId: string; message: string; createdAt: Date }[];
+    const directory = await allianceDirectory(ranking);
+    const appliedTo = new Set(mine.map((a) => a.allianceId));
     return res.json({
       alliance: null,
       rules,
       invites: invites.map((i) => ({ id: i.id, alliance: names.find((n) => n.id === i.allianceId)?.name ?? "—", color: names.find((n) => n.id === i.allianceId)?.color ?? "#94a3b8", at: i.createdAt })),
+      // 2.0.2 : les alliances qui recrutent et mes candidatures en attente
+      directory: directory.map((d) => ({ ...d, applied: appliedTo.has(d.id) })),
+      myApplications: mine.map((a) => {
+        const r = ranking.find((x) => x.id === a.allianceId);
+        return { id: a.id, allianceId: a.allianceId, alliance: r?.name ?? "—", color: r?.color ?? "#94a3b8", message: a.message, at: a.createdAt };
+      }),
       ranking: ranking.slice(0, 10),
     });
   }
@@ -88,12 +101,45 @@ export async function getAlliance(req: AuthRequest, res: Response) {
   const invitedIds = (invites as { companyId: string }[]).map((i) => i.companyId);
   const invited = (await prisma.company.findMany({ where: { id: { in: invitedIds } }, select: { id: true, name: true } })) as { id: string; name: string }[];
 
+  // 2.0.2 : candidatures reçues, montrées au fondateur seulement
+  let applications: { id: string; companyId: string; name: string; liveryColor: string; points: number; lines: number; message: string; at: Date }[] = [];
+  if (alliance.founderId === company.id) {
+    const apps = (await prisma.allianceApplication.findMany({ where: { allianceId: alliance.id }, orderBy: { createdAt: "asc" } })) as { id: string; companyId: string; message: string; createdAt: Date }[];
+    if (apps.length) {
+      const appIds = apps.map((a) => a.companyId);
+      const [who, appLines, appEntries] = await Promise.all([
+        prisma.company.findMany({ where: { id: { in: appIds } }, select: { id: true, name: true, liveryColor: true } }) as Promise<{ id: string; name: string; liveryColor: string }[]>,
+        prisma.line.findMany({ where: { companyId: { in: appIds } }, select: { companyId: true } }) as Promise<{ companyId: string }[]>,
+        season
+          ? (prisma.seasonEntry.findMany({ where: { seasonId: season.id, companyId: { in: appIds } }, select: { companyId: true, points: true } }) as Promise<{ companyId: string; points: number }[]>)
+          : Promise.resolve([] as { companyId: string; points: number }[]),
+      ]);
+      applications = apps
+        .filter((a) => who.some((w) => w.id === a.companyId))
+        .map((a) => {
+          const w = who.find((x) => x.id === a.companyId)!;
+          return {
+            id: a.id,
+            companyId: a.companyId,
+            name: w.name,
+            liveryColor: w.liveryColor,
+            points: appEntries.find((e) => e.companyId === a.companyId)?.points ?? 0,
+            lines: appLines.filter((l) => l.companyId === a.companyId).length,
+            message: a.message,
+            at: a.createdAt,
+          };
+        });
+    }
+  }
+
   res.json({
     alliance: {
       id: alliance.id,
       name: alliance.name,
       color: alliance.color,
       discordUrl: alliance.discordUrl,
+      recruiting: (alliance as { recruiting?: boolean }).recruiting ?? true,
+      pitch: (alliance as { pitch?: string | null }).pitch ?? null,
       founder: alliance.founderId === company.id,
       rank: rank?.rank ?? null,
       total: ranking.length,
@@ -123,6 +169,7 @@ export async function getAlliance(req: AuthRequest, res: Response) {
       mine: m.companyId === company.id,
     })),
     invited: invited.map((c) => c.name),
+    applications,
     rules,
     ranking: ranking.slice(0, 10),
   });
@@ -141,6 +188,7 @@ export async function createAlliance(req: AuthRequest, res: Response) {
     const a = await tx.alliance.create({ data: { name, color, founderId: company.id } });
     await tx.allianceMember.create({ data: { allianceId: a.id, companyId: company.id } });
     await tx.allianceInvite.deleteMany({ where: { companyId: company.id } });
+    await tx.allianceApplication.deleteMany({ where: { companyId: company.id } });
     await tx.company.update({ where: { id: company.id }, data: { balance: { decrement: ALLIANCE_COST } } });
     await tx.transaction.create({ data: { companyId: company.id, type: "ALLIANCE", amount: -ALLIANCE_COST, description: `Fondation de l'alliance ${name}` } });
     return a;
@@ -187,6 +235,7 @@ export async function answerInvite(req: AuthRequest, res: Response) {
   await prisma.$transaction([
     prisma.allianceMember.create({ data: { allianceId: invite.allianceId, companyId: company.id } }),
     prisma.allianceInvite.deleteMany({ where: { companyId: company.id } }),
+    prisma.allianceApplication.deleteMany({ where: { companyId: company.id } }),
   ]);
   invalidateAlliances();
   res.json({ ok: true });
@@ -203,6 +252,7 @@ export async function leaveAlliance(req: AuthRequest, res: Response) {
     // dernière compagnie partie : l'alliance disparaît
     await prisma.$transaction([
       prisma.allianceInvite.deleteMany({ where: { allianceId: alliance.id } }),
+      prisma.allianceApplication.deleteMany({ where: { allianceId: alliance.id } }),
       prisma.allianceMessage.deleteMany({ where: { allianceId: alliance.id } }),
       prisma.alliance.delete({ where: { id: alliance.id } }),
     ]);
@@ -233,7 +283,13 @@ export async function updateAlliance(req: AuthRequest, res: Response) {
   if (!company) return err(res, 404, "Créez d'abord votre compagnie");
   const alliance = await allianceOfCompany(company.id);
   if (!alliance || alliance.founderId !== company.id) return err(res, 403, "Seul le fondateur peut modifier l'alliance");
-  const data: { discordUrl?: string | null; color?: string } = {};
+  const data: { discordUrl?: string | null; color?: string; recruiting?: boolean; pitch?: string | null } = {};
+  if (typeof req.body.recruiting === "boolean") data.recruiting = req.body.recruiting;
+  if (req.body.pitch !== undefined) {
+    const pitch = String(req.body.pitch ?? "").replace(/\s+/g, " ").trim();
+    if (pitch.length > PITCH_MAX) return err(res, 400, `${PITCH_MAX} caractères au plus pour la présentation`);
+    data.pitch = pitch || null;
+  }
   if (req.body.discordUrl !== undefined) {
     const url = String(req.body.discordUrl ?? "").trim();
     if (url && !/^https:\/\/(discord\.gg|discord\.com\/invite)\/[\w-]+$/.test(url)) return err(res, 400, "Un lien d'invitation Discord (https://discord.gg/…)");
@@ -242,6 +298,119 @@ export async function updateAlliance(req: AuthRequest, res: Response) {
   if (req.body.color !== undefined && ALLIANCE_COLORS.includes(req.body.color)) data.color = req.body.color;
   await prisma.alliance.update({ where: { id: alliance.id }, data });
   res.json({ ok: true });
+}
+
+/* ---------------- 2.0.2 : candidatures ----------------
+   Une compagnie sans alliance postule auprès d'une alliance qui recrute
+   (trois candidatures en attente au plus). Le fondateur accepte ou refuse ;
+   accepter fait entrer la compagnie et retire ses autres candidatures. */
+
+type RankRow = { id: string; name: string; color: string; members: number; points: number; rank: number };
+
+/* Les alliances qui recrutent et ont encore de la place, invitations comprises. */
+async function allianceDirectory(ranking: RankRow[]) {
+  const open = (await prisma.alliance.findMany({ where: { recruiting: true }, select: { id: true, name: true, color: true, pitch: true, founderId: true, discordUrl: true } })) as {
+    id: string; name: string; color: string; pitch: string | null; founderId: string; discordUrl: string | null;
+  }[];
+  if (!open.length) return [];
+  const ids = open.map((a) => a.id);
+  const [invites, founders] = await Promise.all([
+    prisma.allianceInvite.findMany({ where: { allianceId: { in: ids } }, select: { allianceId: true } }) as Promise<{ allianceId: string }[]>,
+    prisma.company.findMany({ where: { id: { in: open.map((a) => a.founderId) } }, select: { id: true, name: true } }) as Promise<{ id: string; name: string }[]>,
+  ]);
+  return open
+    .map((a) => {
+      const r = ranking.find((x) => x.id === a.id);
+      const members = r?.members ?? 0;
+      const reserved = invites.filter((i) => i.allianceId === a.id).length;
+      return {
+        id: a.id,
+        name: a.name,
+        color: a.color,
+        pitch: a.pitch,
+        founder: founders.find((f) => f.id === a.founderId)?.name ?? "—",
+        members,
+        room: ALLIANCE_MAX - members - reserved,
+        points: r?.points ?? 0,
+        rank: r?.rank ?? null,
+      };
+    })
+    .filter((a) => a.members > 0 && a.room > 0)
+    .sort((x, y) => (x.rank ?? 999) - (y.rank ?? 999));
+}
+
+/* Place libre pour une compagnie donnée : ses propres invitations ne comptent pas. */
+async function roomFor(allianceId: string, companyId: string) {
+  const [members, invites] = await Promise.all([
+    prisma.allianceMember.count({ where: { allianceId } }),
+    prisma.allianceInvite.count({ where: { allianceId, companyId: { not: companyId } } }),
+  ]);
+  return ALLIANCE_MAX - members - invites;
+}
+
+export async function applyToAlliance(req: AuthRequest, res: Response) {
+  const company = await myCompany(req);
+  if (!company) return err(res, 404, "Créez d'abord votre compagnie");
+  if (await prisma.allianceMember.findUnique({ where: { companyId: company.id } })) return err(res, 409, "Vous êtes déjà dans une alliance");
+  const alliance = await prisma.alliance.findUnique({ where: { id: String(req.params.id) } });
+  if (!alliance) return err(res, 404, "Alliance introuvable");
+  if (!(alliance as { recruiting?: boolean }).recruiting) return err(res, 409, `${alliance.name} ne recrute pas en ce moment`);
+  if ((await roomFor(alliance.id, company.id)) <= 0) return err(res, 409, `${alliance.name} est complète`);
+  const message = String(req.body?.message ?? "").replace(/\s+/g, " ").trim();
+  if (message.length > APPLY_MESSAGE_MAX) return err(res, 400, `${APPLY_MESSAGE_MAX} caractères au plus`);
+  const existing = await prisma.allianceApplication.findUnique({ where: { allianceId_companyId: { allianceId: alliance.id, companyId: company.id } } });
+  if (existing) {
+    await prisma.allianceApplication.update({ where: { id: existing.id }, data: { message } });
+    return res.json({ ok: true, updated: true });
+  }
+  const pending = await prisma.allianceApplication.count({ where: { companyId: company.id } });
+  if (pending >= APPLY_MAX_PENDING) return err(res, 409, `${APPLY_MAX_PENDING} candidatures en attente au plus. Retirez-en une d'abord.`);
+  await prisma.allianceApplication.create({ data: { allianceId: alliance.id, companyId: company.id, message } });
+  const { sendToCompany } = await import("../services/push.service");
+  await sendToCompany(alliance.founderId, { title: "Nouvelle candidature", body: `${company.name} veut rejoindre ${alliance.name}.`, url: "/dashboard", tag: "alliance" }).catch(() => {});
+  res.json({ ok: true });
+}
+
+export async function withdrawApplication(req: AuthRequest, res: Response) {
+  const company = await myCompany(req);
+  if (!company) return err(res, 404, "Créez d'abord votre compagnie");
+  const app = await prisma.allianceApplication.findFirst({ where: { id: req.params.id, companyId: company.id } });
+  if (!app) return err(res, 404, "Candidature introuvable");
+  await prisma.allianceApplication.delete({ where: { id: app.id } });
+  res.json({ ok: true });
+}
+
+export async function answerApplication(req: AuthRequest, res: Response) {
+  const company = await myCompany(req);
+  if (!company) return err(res, 404, "Créez d'abord votre compagnie");
+  const alliance = await allianceOfCompany(company.id);
+  if (!alliance || alliance.founderId !== company.id) return err(res, 403, "Seul le fondateur répond aux candidatures");
+  const app = await prisma.allianceApplication.findFirst({ where: { id: req.params.id, allianceId: alliance.id } });
+  if (!app) return err(res, 404, "Candidature introuvable, peut-être retirée");
+  const applicant = await prisma.company.findUnique({ where: { id: app.companyId }, select: { id: true, name: true } });
+  const { sendToCompany } = await import("../services/push.service");
+  if (req.body?.accept !== true) {
+    await prisma.allianceApplication.delete({ where: { id: app.id } });
+    if (applicant) await sendToCompany(applicant.id, { title: "Candidature refusée", body: `${alliance.name} n'a pas retenu votre candidature.`, url: "/dashboard", tag: "alliance" }).catch(() => {});
+    return res.json({ ok: true });
+  }
+  if (!applicant) {
+    await prisma.allianceApplication.delete({ where: { id: app.id } });
+    return err(res, 404, "Cette compagnie n'existe plus");
+  }
+  if (await prisma.allianceMember.findUnique({ where: { companyId: applicant.id } })) {
+    await prisma.allianceApplication.delete({ where: { id: app.id } });
+    return err(res, 409, `${applicant.name} a déjà rejoint une autre alliance`);
+  }
+  if ((await roomFor(alliance.id, applicant.id)) <= 0) return err(res, 409, `Votre alliance est complète (${ALLIANCE_MAX} compagnies, invitations comprises)`);
+  await prisma.$transaction([
+    prisma.allianceMember.create({ data: { allianceId: alliance.id, companyId: applicant.id, viaApplication: true } }),
+    prisma.allianceApplication.deleteMany({ where: { companyId: applicant.id } }),
+    prisma.allianceInvite.deleteMany({ where: { companyId: applicant.id } }),
+  ]);
+  invalidateAlliances();
+  await sendToCompany(applicant.id, { title: "Candidature acceptée", body: `Bienvenue dans ${alliance.name} !`, url: "/dashboard", tag: "alliance" }).catch(() => {});
+  res.json({ ok: true, name: applicant.name });
 }
 
 const lastPost = new Map<string, number>();

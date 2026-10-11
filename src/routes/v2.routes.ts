@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth.middleware";
 import {
-  getSeason, getWorld, getAlliance, createAlliance, inviteToAlliance, answerInvite, leaveAlliance, kickMember, updateAlliance, postMessage, deleteMessage, getGazette, getDlcs, getPass, claimPass,
+  getSeason, getWorld, getAlliance, createAlliance, inviteToAlliance, answerInvite, leaveAlliance, kickMember, updateAlliance, postMessage, deleteMessage, applyToAlliance, withdrawApplication, answerApplication, getGazette, getDlcs, getPass, claimPass,
 } from "../controllers/v2.controller";
 import { getWrecks, postBuyWreck, postRestore, postCommission } from "../controllers/wreck.controller";
 
@@ -17,6 +17,10 @@ v2Router.post("/alliance/invite", requireAuth, inviteToAlliance);
 v2Router.post("/alliance/invites/:id", requireAuth, answerInvite);
 v2Router.post("/alliance/leave", requireAuth, leaveAlliance);
 v2Router.post("/alliance/kick", requireAuth, kickMember);
+// 2.0.2 : candidatures
+v2Router.post("/alliances/:id/apply", requireAuth, applyToAlliance);
+v2Router.delete("/alliance/applications/:id", requireAuth, withdrawApplication);
+v2Router.post("/alliance/applications/:id", requireAuth, answerApplication);
 v2Router.post("/alliance/messages", requireAuth, postMessage);
 v2Router.delete("/alliance/messages/:id", requireAuth, deleteMessage);
 v2Router.get("/gazette", requireAuth, getGazette);

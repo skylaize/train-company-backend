@@ -208,6 +208,12 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     prisma.allianceMember.count({ where: { companyId: company.id } }),
     isBuilder(company.id),
   ])) as [number, number, number, boolean];
+  // 2.0.2 : candidatures
+  const myAlliance = await prisma.alliance.findFirst({ where: { founderId: company.id }, select: { id: true } });
+  const [joinedByApplication, recruited] = (await Promise.all([
+    prisma.allianceMember.count({ where: { companyId: company.id, viaApplication: true } }),
+    myAlliance ? prisma.allianceMember.count({ where: { allianceId: myAlliance.id, viaApplication: true } }) : Promise.resolve(0),
+  ])) as [number, number];
   const division = (company as { division?: number }).division ?? 0;
   // 2.0 : l'atelier, les équipages, les extensions
   const [planned, crewRows, dlcTrains, mountainLines, partsOrdered, revisions] = (await Promise.all([
@@ -802,6 +808,9 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     { id: "montee", name: "Montée", description: "Monter de division en fin de saison", liveMet: promoted >= 1 },
     { id: "platine", name: "Platine", description: "Atteindre la division Platine", liveMet: division >= 3 },
     { id: "allie", name: "Allié", description: "Rejoindre ou fonder une alliance", liveMet: allied >= 1 },
+    // ---- 2.0.2 : candidatures ----
+    { id: "candidature-retenue", name: "Candidature retenue", description: "Entrer dans une alliance après y avoir postulé", liveMet: joinedByApplication >= 1 },
+    { id: "recruteur", name: "Recruteur", description: "Accepter deux candidatures dans votre alliance", liveMet: recruited >= 2 },
     { id: "batisseur-du-tunnel", name: "Bâtisseur du tunnel", description: "Faire avancer le tunnel du Mont-Blanc de 300 trajets", liveMet: builder },
     // ---- 2.0 : l'atelier, les équipages, les extensions ----
     { id: "chef-atelier", name: "Chef d'atelier", description: "Programmer la révision de 5 rames", liveMet: planned >= 5 },

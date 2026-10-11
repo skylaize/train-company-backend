@@ -20,6 +20,10 @@ export const ALLY_MAX_ALLIES = 3;
 export const MESSAGE_MAX = 280;
 export const MESSAGE_DAYS = 7;
 export const MESSAGE_COOLDOWN_MS = 15_000;
+// 2.0.2 : candidatures
+export const APPLY_MAX_PENDING = 3;
+export const APPLY_MESSAGE_MAX = 200;
+export const PITCH_MAX = 200;
 
 export const ALLIANCE_COLORS = ["#f59e0b", "#38bdf8", "#10b981", "#ef4444", "#a78bfa", "#f472b6", "#e2e8f0"];
 

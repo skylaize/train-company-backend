@@ -79,6 +79,7 @@ export async function deleteAccount(req: AuthRequest, res: Response) {
       prisma.seasonObjectiveProgress.deleteMany({ where: { companyId: company.id } }),
       prisma.allianceMember.deleteMany({ where: { companyId: company.id } }),
       prisma.allianceInvite.deleteMany({ where: { companyId: company.id } }),
+      prisma.allianceApplication.deleteMany({ where: { companyId: company.id } }),
       prisma.allianceMessage.deleteMany({ where: { companyId: company.id } }),
       prisma.worldContribution.deleteMany({ where: { companyId: company.id } }),
       prisma.decisionFollowUp.deleteMany({ where: { companyId: company.id } }),
