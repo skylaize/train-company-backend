@@ -61,7 +61,7 @@ export function lineRidership(l: RidershipLine, companyId: string, events: Event
   };
 }
 
-/* Premium : chaque heure, les lignes en prix automatique se calent sur le prix conseillé. */
+/* Premium : chaque minute, les lignes en prix automatique se calent sur le prix conseillé. */
 export async function runAutoPricing() {
   const lines = (await prisma.line.findMany({
     where: { autoPrice: true, company: { isPremium: true } },

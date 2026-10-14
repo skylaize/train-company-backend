@@ -208,10 +208,10 @@ async function runSimulationTick() {
     await sendToCompany(companyId, { title, body, url: "/dashboard", tag: "banque" });
   }).catch((err) => console.error("[emprunts] échec :", (err as Error).message));
   if (tickCount % 120 === 1) await runSharePrices().catch((err) => console.error("[bourse] échec :", (err as Error).message));
-  // Premium : prix automatique (toutes les heures), ordres de bourse, alertes
-  // 1.7 : et dès que l'heure change, pour suivre la pointe du matin et du soir
+  // Premium : prix automatique. 2.0.3 : recalé chaque minute (et dès que l'heure
+  // change), pour suivre la pointe, les rames ajoutées, les concurrents et les événements
   const hourNow = parisHour();
-  if (tickCount % 120 === 3 || hourNow !== lastPricingHour) {
+  if (tickCount % 2 === 1 || hourNow !== lastPricingHour) {
     lastPricingHour = hourNow;
     await runAutoPricing().catch((err) => console.error("[prix auto] échec :", (err as Error).message));
   }

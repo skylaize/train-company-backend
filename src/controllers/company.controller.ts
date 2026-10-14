@@ -285,3 +285,37 @@ export async function buyLicence(req: AuthRequest, res: Response) {
   });
   return res.status(201).json({ ok: true });
 }
+
+/* 2.0.3 : primes du tutoriel. Chaque gare franchie du stage verse une prime,
+   une seule fois, aux compagnies de moins de quatorze jours. Le serveur
+   vérifie que le geste est vraiment fait : on ne touche pas la prime
+   « service » sans rame en ligne. */
+export const TUTORIAL_REWARDS: Record<string, number> = { ligne: 100, service: 100, carte: 50, prix: 100 };
+const TUTORIAL_WINDOW_MS = 14 * 86_400_000;
+
+export async function claimTutorialReward(req: AuthRequest, res: Response) {
+  const company = await prisma.company.findUnique({ where: { ownerId: req.userId as string } });
+  if (!company) return res.status(404).json({ error: "Créez d'abord votre compagnie" });
+  const step = String(req.body?.step ?? "");
+  const amount = TUTORIAL_REWARDS[step];
+  if (!amount) return res.status(400).json({ error: "Étape inconnue" });
+  const done = ((company as { tutorialRewards?: string[] }).tutorialRewards ?? []) as string[];
+  if (done.includes(step)) return res.json({ ok: true, already: true, amount: 0 });
+  if (Date.now() - company.createdAt.getTime() > TUTORIAL_WINDOW_MS) return res.json({ ok: true, expired: true, amount: 0 });
+
+  const [lines, running] = await Promise.all([
+    prisma.line.count({ where: { companyId: company.id } }),
+    prisma.train.count({ where: { companyId: company.id, lineId: { not: null } } }),
+  ]);
+  const ok = step === "ligne" ? lines >= 1 : running >= 1;
+  if (!ok) return res.status(409).json({ error: "Cette étape n'est pas encore faite" });
+
+  // une seule fois, même si deux demandes arrivent ensemble
+  const updated = await prisma.company.updateMany({
+    where: { id: company.id, NOT: { tutorialRewards: { has: step } } },
+    data: { tutorialRewards: { push: step }, balance: { increment: amount } },
+  });
+  if (updated.count === 0) return res.json({ ok: true, already: true, amount: 0 });
+  await prisma.transaction.create({ data: { companyId: company.id, type: "PRIME", amount, description: `Prime de stage : ${step === "ligne" ? "première ligne" : step === "service" ? "première rame en service" : step === "carte" ? "premier départ suivi" : "premier prix réglé"}` } });
+  res.json({ ok: true, amount });
+}

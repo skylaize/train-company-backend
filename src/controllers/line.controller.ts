@@ -107,7 +107,7 @@ export async function updateLine(req: AuthRequest, res: Response) {
     const on = Boolean(req.body.autoPrice);
     let priceNow: number | undefined;
     if (on) {
-      // le prix conseillé s'applique tout de suite, puis chaque heure
+      // le prix conseillé s'applique tout de suite, puis chaque minute
       const full = (await prisma.line.findUnique({
         where: { id: lineId },
         select: { id: true, departureStation: true, arrivalStation: true, stops: true, priceRatio: true, trains: { select: { model: true, cars: true, status: true } } },

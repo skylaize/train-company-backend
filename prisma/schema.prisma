@@ -54,6 +54,7 @@ model Company {
   isPremium    Boolean  @default(false) // débloque les modèles de trains exclusifs
   premiumReveal String? // 2.0 : animation Premium à montrer ("" = acheté soi-même, sinon nom de qui l'offre)
   tutorialSeen Boolean  @default(false) // mémorisé côté compte, pas par navigateur
+  tutorialRewards String[] @default([]) // 2.0.3 : primes de stage déjà versées (ligne, service, carte, prix)
   theme        String   @default("sombre") // "sombre" | "papier", suit le joueur d'un appareil à l'autre
   lastSeenVersion String? // dernier bulletin de nouveautés lu, mémorisé sur le compte et non par navigateur
   hintsSeen    String   @default("") // ids des explications déjà lues, séparés par des virgules
