@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth.middleware";
 import {
-  getSeason, getWorld, getAlliance, createAlliance, inviteToAlliance, answerInvite, leaveAlliance, kickMember, updateAlliance, postMessage, deleteMessage, applyToAlliance, withdrawApplication, answerApplication, getGazette, getDlcs, getPass, claimPass,
+  getSeason, getWorld, getAlliance, createAlliance, inviteToAlliance, answerInvite, leaveAlliance, kickMember, updateAlliance, postMessage, deleteMessage, applyToAlliance, withdrawApplication, answerApplication, setAllianceLivery, getMuseum, getGazette, getDlcs, getPass, claimPass,
 } from "../controllers/v2.controller";
 import { getWrecks, postBuyWreck, postRestore, postCommission } from "../controllers/wreck.controller";
 
@@ -21,6 +21,10 @@ v2Router.post("/alliance/kick", requireAuth, kickMember);
 v2Router.post("/alliances/:id/apply", requireAuth, applyToAlliance);
 v2Router.delete("/alliance/applications/:id", requireAuth, withdrawApplication);
 v2Router.post("/alliance/applications/:id", requireAuth, answerApplication);
+// 2.1 : livrée commune d'alliance, musée
+v2Router.post("/alliance/livery", requireAuth, setAllianceLivery);
+v2Router.get("/museum", requireAuth, getMuseum);
+v2Router.get("/museum/:companyId", requireAuth, getMuseum);
 v2Router.post("/alliance/messages", requireAuth, postMessage);
 v2Router.delete("/alliance/messages/:id", requireAuth, deleteMessage);
 v2Router.get("/gazette", requireAuth, getGazette);

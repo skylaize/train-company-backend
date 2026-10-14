@@ -164,7 +164,7 @@ export async function updateLine(req: AuthRequest, res: Response) {
       stops: cleaned.stops,
       durationMinutes: nextDuration,
       // 1.7 : changer les gares, c'est poser d'autres voies — l'électrification est perdue
-      ...(routeChanged ? { electrified: false } : {}),
+      ...(routeChanged ? { electrified: false, doubleTrack: false } : {}),
       // un prix posé à la main reprend la main sur le prix automatique
       ...(priceRatio !== undefined ? { priceRatio: clampPrice(priceRatio), autoPrice: false } : {}),
     },

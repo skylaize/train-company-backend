@@ -140,6 +140,7 @@ export async function getAlliance(req: AuthRequest, res: Response) {
       discordUrl: alliance.discordUrl,
       recruiting: (alliance as { recruiting?: boolean }).recruiting ?? true,
       pitch: (alliance as { pitch?: string | null }).pitch ?? null,
+      livery: (alliance as { livery?: string | null }).livery ?? null, // 2.1
       founder: alliance.founderId === company.id,
       rank: rank?.rank ?? null,
       total: ranking.length,
@@ -170,6 +171,11 @@ export async function getAlliance(req: AuthRequest, res: Response) {
     })),
     invited: invited.map((c) => c.name),
     applications,
+    // 2.1 : les livrées communes que ce membre peut poser (coffret d'alliance)
+    liveryChoices: await (async () => {
+      const { unlockedFor } = await import("../services/shop.service");
+      return [...(await unlockedFor(company.id)).allianceLiveries];
+    })(),
     rules,
     ranking: ranking.slice(0, 10),
   });
@@ -283,7 +289,7 @@ export async function updateAlliance(req: AuthRequest, res: Response) {
   if (!company) return err(res, 404, "Créez d'abord votre compagnie");
   const alliance = await allianceOfCompany(company.id);
   if (!alliance || alliance.founderId !== company.id) return err(res, 403, "Seul le fondateur peut modifier l'alliance");
-  const data: { discordUrl?: string | null; color?: string; recruiting?: boolean; pitch?: string | null } = {};
+  const data: { discordUrl?: string | null; color?: string; recruiting?: boolean; pitch?: string | null; livery?: string | null } = {};
   if (typeof req.body.recruiting === "boolean") data.recruiting = req.body.recruiting;
   if (req.body.pitch !== undefined) {
     const pitch = String(req.body.pitch ?? "").replace(/\s+/g, " ").trim();
@@ -296,6 +302,14 @@ export async function updateAlliance(req: AuthRequest, res: Response) {
     data.discordUrl = url || null;
   }
   if (req.body.color !== undefined && ALLIANCE_COLORS.includes(req.body.color)) data.color = req.body.color;
+  /* 2.1 : la livrée commune. Le fondateur la pose s'il possède le coffret
+     d'alliance, ou un membre qui le possède la lui a offerte (voir setAllianceLivery). */
+  if (req.body.livery !== undefined) {
+    const { unlockedFor } = await import("../services/shop.service");
+    const u = await unlockedFor(company.id);
+    if (req.body.livery !== null && !u.allianceLiveries.has(String(req.body.livery).toLowerCase())) return err(res, 403, "Le coffret d'alliance se trouve en boutique");
+    data.livery = req.body.livery === null ? null : String(req.body.livery).toLowerCase();
+  }
   await prisma.alliance.update({ where: { id: alliance.id }, data });
   res.json({ ok: true });
 }
@@ -473,4 +487,51 @@ export async function claimPass(req: AuthRequest, res: Response) {
   const r = await claimFreeTier(company.id, Number(req.body?.tier));
   if (!("ok" in r)) return err(res, r.status, r.error);
   res.json(r);
+}
+
+/* 2.1 : un membre (pas forcément le fondateur) qui possède le coffret
+   d'alliance pose la livrée commune pour toute l'alliance. */
+export async function setAllianceLivery(req: AuthRequest, res: Response) {
+  const company = await myCompany(req);
+  if (!company) return err(res, 404, "Créez d'abord votre compagnie");
+  const alliance = await allianceOfCompany(company.id);
+  if (!alliance) return err(res, 409, "Vous n'avez pas d'alliance");
+  const { unlockedFor } = await import("../services/shop.service");
+  const u = await unlockedFor(company.id);
+  const livery = req.body?.livery === null ? null : String(req.body?.livery ?? "").toLowerCase();
+  if (livery !== null && !u.allianceLiveries.has(livery)) return err(res, 403, "Le coffret d'alliance se trouve en boutique");
+  if (livery === null && alliance.founderId !== company.id) return err(res, 403, "Seul le fondateur retire la livrée commune");
+  await prisma.alliance.update({ where: { id: alliance.id }, data: { livery } });
+  res.json({ ok: true, livery });
+}
+
+/* 2.1 : le Musée de la compagnie — les épaves restaurées, sous les
+   projecteurs. On visite le sien, ou celui d'un allié. */
+export async function getMuseum(req: AuthRequest, res: Response) {
+  const company = await myCompany(req);
+  if (!company) return err(res, 404, "Créez d'abord votre compagnie");
+  const target = req.params.companyId ? String(req.params.companyId) : company.id;
+  if (target !== company.id) {
+    const mine = await allianceOfCompany(company.id);
+    const theirs = await allianceOfCompany(target);
+    if (!mine || !theirs || mine.id !== theirs.id) return err(res, 403, "On visite le musée de ses alliés seulement");
+  }
+  const { unlockedFor } = await import("../services/shop.service");
+  const u = await unlockedFor(target);
+  const owner = await prisma.company.findUnique({ where: { id: target }, select: { id: true, name: true, liveryColor: true } });
+  const wrecks = (await prisma.wreck.findMany({ where: { companyId: target, trainId: { not: null } }, orderBy: { completedAt: "asc" } })) as any[];
+  const trains = (await prisma.train.findMany({ where: { id: { in: wrecks.map((w) => w.trainId) } }, select: { id: true, name: true, plateStyle: true, wear: true } })) as any[];
+  res.json({
+    open: u.museum,
+    owner,
+    pieces: wrecks.map((w) => ({
+      id: w.id,
+      kind: w.kind,
+      serial: w.serial,
+      year: w.year,
+      station: w.station,
+      restoredAt: w.completedAt,
+      train: trains.find((t) => t.id === w.trainId) ?? null,
+    })),
+  });
 }

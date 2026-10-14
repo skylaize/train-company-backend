@@ -12,9 +12,10 @@ import { runMorningDigest } from "../services/report.service";
 import { activeStationEvents, competitionMap, routeDemand, routeHasBoost, maybeSpawnStationEvent, pairKey, watchCompetition } from "../services/station.service";
 import { routeOf, routeInDirection } from "../services/route.service";
 import { passengersPerDeparture, tripLoad, speedFactor } from "../services/ridership.service";
-import { stationOwners, stationEffects, accruePending, payStationIncome, workshopsByCompany, WORKSHOP_WEAR, ELECTRIC_SPEED, ELECTRIC_WEAR } from "../services/infrastructure.service";
+import { stationOwners, stationEffects, accruePending, payStationIncome, workshopsByCompany, WORKSHOP_WEAR, ELECTRIC_SPEED, ELECTRIC_WEAR, DOUBLE_SPEED, DOUBLE_DELAY, cadenceBonus, yardsByCompany, YARD_PAY } from "../services/infrastructure.service";
 import { runLoanPayments, runSharePrices, runDividends, runWeeklyReports, runStockOrders, runPremiumAlerts } from "../services/finance.service";
 import { runAutoPricing } from "../services/pricing.service";
+import { isFreightModel, modelBonus } from "../services/freight.service";
 import { sendToCompany } from "../services/push.service";
 import { seasonalStationEvents } from "../services/season.service";
 import { allStationCounts, hubMultiplier } from "../services/hub.service";
@@ -401,7 +402,9 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
     const dlcModel = DLC_MODELS[train.model];
     // 2.0 : la vraie météo, la pire rencontrée sur l'itinéraire de la ligne
     const wx = routeWeather(weather instanceof Map ? weather : new Map(), routeOf(train.line as typeof train.line & { stops?: string[] }));
-    if (Math.random() < INCIDENT_CHANCE * wx.incident * driver.delay) {
+    // 2.1 : sur double voie, un train en retard ne bloque plus celui d'en face
+    const doubled = (train.line as { doubleTrack?: boolean }).doubleTrack === true;
+    if (Math.random() < INCIDENT_CHANCE * wx.incident * driver.delay * (doubled ? DOUBLE_DELAY : 1)) {
       await prisma.$transaction([
         prisma.train.update({
           where: { id: train.id },
@@ -478,7 +481,7 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
     // Une rame Express effectue le trajet 30% plus vite ; 1.7 : chaque voiture ajoutée ralentit,
     // l'électrification fait gagner 10 %
     const effectiveDuration =
-      train.line.durationMinutes * (train.model === "EXPRESS" ? 0.7 : 1) * (dlcModel?.speed ?? 1) * speedFactor(trainX) * (lineX.electrified ? ELECTRIC_SPEED : 1);
+      train.line.durationMinutes * (train.model === "EXPRESS" ? 0.7 : 1) * (dlcModel?.speed ?? 1) * speedFactor(trainX) * (lineX.electrified ? ELECTRIC_SPEED : 1) * (doubled ? DOUBLE_SPEED : 1);
     const progress = Math.min(100, Math.floor((elapsedMinutes / effectiveDuration) * 100));
 
     if (progress >= 100) {
@@ -540,7 +543,9 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
           (dlcModel?.fare ?? 1) *
           // 2.0 : le prestige d'une rame de collection
           (heritage?.prestige ?? 1) *
-          controllerBonus(crew?.CONTROLEUR)
+          controllerBonus(crew?.CONTROLEUR) *
+          // 2.1 : double voie, le cadencement attire du monde
+          (doubled ? cadenceBonus(runningOnLine.get(train.lineId as string) ?? 1) : 1)
       );
       /* 1.7 : gares achetées. Chez soi, le trajet rapporte un peu plus ; chez
          les autres, il leur doit une redevance de quai ; partout où il y a des
@@ -626,161 +631,136 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
   await accruePending(pending).catch((err) => console.error("[gares] redevances non enregistrées :", (err as Error).message));
 }
 
-async function runFreightContracts(weather: Map<string, StationWeather> = new Map()) {
-  const activeContracts = await prisma.contract.findMany({
+export async function runFreightContracts(weather: Map<string, StationWeather> = new Map()) {
+  const activeContracts = (await prisma.contract.findMany({
     where: { status: "EN_COURS" },
     include: { train: true },
-  });
+  })) as any[];
+  if (activeContracts.length === 0) return;
   const premiumCompanyIds = await getPremiumCompanyIds();
   const staffEffects = await staffEffectsByCompany();
   const reputationByClient = await getReputationByCompany();
   const cargoIndex = await getCargoIndexMap();
+  const yards = await yardsByCompany();
 
-  for (const contract of activeContracts) {
-    if (!contract.train || !contract.acceptedAt) continue;
-    // 2.0 : la vraie météo, au départ ou à l'arrivée de la cargaison
-    const fwx = routeWeather(weather instanceof Map ? weather : new Map(), [contract.originStation, contract.destinationStation]);
+  /* 2.1 : une rame peut porter plusieurs contrats (une tournée). On avance
+     donc rame par rame : un seul tirage d'incident, une seule usure, une
+     seule arrivée — et chaque contrat de la tournée est payé à l'arrivée. */
+  const byTrain = new Map<string, any[]>();
+  for (const c of activeContracts) {
+    if (!c.train || !c.acceptedAt) continue;
+    byTrain.set(c.train.id, [...(byTrain.get(c.train.id) ?? []), c]);
+  }
+
+  for (const tour of byTrain.values()) {
+    const first = tour[0];
+    const train = first.train;
+    const companyId = first.companyId as string;
+    // 2.0 : la vraie météo, la pire des gares de la tournée
+    const fwx = routeWeather(weather instanceof Map ? weather : new Map(), tour.flatMap((c) => [c.originStation, c.destinationStation]));
     const incidentChance = INCIDENT_CHANCE * fwx.incident;
 
-    /* Usure du fret. Elle manquait purement et simplement : une rame affectée
-       au fret roulait indéfiniment sans jamais tomber en panne, alors que le
-       fret paie mieux qu'une ligne voyageurs. Le choix entre les deux n'en
-       était donc pas un. Mêmes règles que pour les lignes : le mécanicien
-       divise l'usure par deux, la canicule la multiplie par 1,5, et on
-       accumule en fractions pour que l'arrondi n'avale pas le bonus. */
-    const ffx = staffEffects.get(contract.companyId as string) ?? NO_STAFF;
-    let freightWearRate = WEAR_PER_TICK * ffx.wearMultiplier;
-    freightWearRate = freightWearRate * fwx.wear;
-    const wearNow = Math.min(100, contract.train.wear + stochasticRound(freightWearRate));
+    /* Usure du fret. Mêmes règles que pour les lignes : le mécanicien divise
+       l'usure par deux, la canicule la multiplie par 1,5, et on accumule en
+       fractions pour que l'arrondi n'avale pas le bonus. */
+    const ffx = staffEffects.get(companyId) ?? NO_STAFF;
+    const freightWearRate = WEAR_PER_TICK * ffx.wearMultiplier * fwx.wear;
+    const wearNow = Math.min(100, train.wear + stochasticRound(freightWearRate));
 
     // Même risque de retard aléatoire que sur les lignes voyageurs, renforcé par temps de verglas
     if (Math.random() < incidentChance) {
       await prisma.incident.create({
-        data: {
-          trainId: contract.train.id,
-          message: `Retard signalé sur le fret : ${contract.train.name} (${contract.cargoType})`,
-        },
+        data: { trainId: train.id, message: `Retard signalé sur le fret : ${train.name} (${tour.map((c) => c.cargoType).join(", ")})` },
       });
-      /* Le retard doit vraiment retarder : la progression étant calculée depuis
-         l'heure d'acceptation, décaler cette heure est le seul moyen de rendre
-         l'incident réel. Sans cela, il ne coûtait rien — et faisait même sauter
-         l'usure du tour, ce qui en faisait un bonus. */
-      await prisma.contract.update({
-        where: { id: contract.id },
-        data: { acceptedAt: new Date(new Date(contract.acceptedAt).getTime() + TICK_INTERVAL_MS) },
-      });
-      await prisma.train.update({ where: { id: contract.train.id }, data: { wear: wearNow } });
+      /* Le retard doit vraiment retarder : la progression se calcule depuis
+         l'heure d'acceptation, on la décale pour toute la tournée. */
+      await prisma.$transaction([
+        ...tour.map((c) => prisma.contract.update({ where: { id: c.id }, data: { acceptedAt: new Date(new Date(c.acceptedAt).getTime() + TICK_INTERVAL_MS) } })),
+        prisma.train.update({ where: { id: train.id }, data: { wear: wearNow } }),
+      ]);
       continue;
     }
 
-    const elapsedMs = Date.now() - new Date(contract.acceptedAt).getTime();
-    const elapsedMinutes = elapsedMs / 60_000;
-    const progress = Math.min(100, Math.floor((elapsedMinutes / contract.durationMinutes) * 100));
+    const minutes = first.tourMinutes ?? Math.max(...tour.map((c) => c.durationMinutes));
+    const elapsedMinutes = (Date.now() - new Date(first.acceptedAt).getTime()) / 60_000;
+    const progress = Math.min(100, Math.floor((elapsedMinutes / Math.max(1, minutes)) * 100));
 
-    if (progress >= 100) {
-      // Livraison terminée : pour une cargaison fragile, risque de dommage réduisant
-      // fortement la récompense et abîmant le train ; sinon récompense pleine.
-      // Une rame Fret Lourd rapporte 25% de récompense en plus, le directeur commercial 15% de plus (Premium).
-      let baseReward = contract.train.model === "FRET_LOURD" ? Math.round(contract.reward * 1.25) : contract.reward;
-      if (ffx.revenueMultiplier > 1) {
-        baseReward = Math.round(baseReward * ffx.revenueMultiplier);
-      }
-      /* Fidélité client : la réputation gagnée en honorant des ordres majore
-         le tarif de TOUTES les cargaisons de ce donneur d'ordre. C'est ce qui
-         fait de la spécialisation une stratégie et non une collection de primes. */
-      const loyalty = cargoBonus(
-        contract.cargoType,
-        reputationByClient.get(contract.companyId as string) ?? new Map<string, number>()
-      );
+    if (progress < 100) {
+      await prisma.train.update({ where: { id: train.id }, data: { progress, wear: wearNow } });
+      continue;
+    }
+
+    // Arrivée : chaque contrat est payé, avec sa charge et ses aléas
+    let wearAfter = wearNow;
+    const updates: Prisma.PrismaPromise<any>[] = [];
+    const delivered: { cargoType: string; risky: boolean; damaged: boolean }[] = [];
+    for (const contract of tour) {
+      /* La paie : la récompense, multipliée par la charge des wagons et le
+         bonus de la locomotive (2.1), puis le directeur commercial, la
+         fidélité du donneur d'ordre et le cours du jour. Une rame voyageurs
+         d'avant la 2.1 garde l'ancienne règle (une Fret lourd +25 %). */
+      let baseReward = isFreightModel(train.model)
+        ? Math.round(contract.reward * (contract.loadFactor ?? 1) * modelBonus(train.model))
+        : train.model === "FRET_LOURD"
+        ? Math.round(contract.reward * 1.25)
+        : contract.reward;
+      if (ffx.revenueMultiplier > 1) baseReward = Math.round(baseReward * ffx.revenueMultiplier);
+      const loyalty = cargoBonus(contract.cargoType, reputationByClient.get(companyId) ?? new Map<string, number>());
       if (loyalty > 0) baseReward = Math.round(baseReward * (1 + loyalty));
-      /* Cours du jour : livrer une marchandise recherchée paie mieux que la
-         livrer quand personne n'en veut. C'est ce qui relie le tableau des
-         cours aux trains, au lieu d'en faire un jeu séparé. */
       const index = cargoIndex.get(contract.cargoType);
       if (index !== undefined) baseReward = Math.round(baseReward * freightMultiplier(index));
-      // Une compagnie Premium subit deux fois moins de risque de dommage sur les cargaisons fragiles
-      let effectiveDamageChance = premiumCompanyIds.has(contract.companyId as string) ? DAMAGE_CHANCE / 2 : DAMAGE_CHANCE;
-      if (contract.insured) effectiveDamageChance /= 2; // la prime d'assurance réduit encore le risque de moitié
+      // 2.1 : gare de triage au départ ou à l'arrivée
+      const myYards = yards.get(companyId);
+      if (myYards && (myYards.has(contract.originStation) || myYards.has(contract.destinationStation))) baseReward = Math.round(baseReward * YARD_PAY);
+      // Une compagnie Premium subit deux fois moins de risque de dommage ; l'assurance encore deux fois moins
+      let effectiveDamageChance = premiumCompanyIds.has(companyId) ? DAMAGE_CHANCE / 2 : DAMAGE_CHANCE;
+      if (contract.insured) effectiveDamageChance /= 2;
       const damaged = contract.risky && Math.random() < effectiveDamageChance;
       const payout = damaged ? Math.round(baseReward * DAMAGE_PAYOUT_RATIO) : baseReward;
-      const newWear = Math.min(100, damaged ? wearNow + DAMAGE_WEAR_PENALTY : wearNow);
-      /* Une rame qui atteint l'usure maximale rentre en panne — mais seulement
-         à l'arrivée. L'immobiliser en pleine livraison laisserait la cargaison
-         dans les limbes et le contrat sans issue. */
-      const arrivesBroken = newWear >= 100;
-
-      const updates: Prisma.PrismaPromise<any>[] = [
-        prisma.contract.update({
-          where: { id: contract.id },
-          data: { status: "LIVREE", trainId: null },
-        }),
-        prisma.train.update({
-          where: { id: contract.train.id },
-          data: {
-            status: arrivesBroken ? "MAINTENANCE" : "IDLE",
-            progress: 0,
-            departedAt: null,
-            wear: newWear,
-            ...(arrivesBroken ? { brokenPart: weakestOrgan(organBias(contract.train)) } : {}),
-          },
-        }),
-        prisma.company.update({
-          where: { id: contract.companyId as string },
-          data: { balance: { increment: payout } },
-        }),
+      if (damaged) wearAfter = Math.min(100, wearAfter + DAMAGE_WEAR_PENALTY);
+      const load = (contract.loadFactor ?? 1) > 1 ? ` ×${String(contract.loadFactor).replace(".", ",")}` : "";
+      updates.push(
+        prisma.contract.update({ where: { id: contract.id }, data: { status: "LIVREE", trainId: null } }),
+        prisma.company.update({ where: { id: companyId }, data: { balance: { increment: payout } } }),
         prisma.transaction.create({
           data: {
-            companyId: contract.companyId as string,
+            companyId,
             type: "FRET",
             amount: payout,
-            trainId: contract.train.id,
+            trainId: train.id,
             description: damaged
               ? `Cargaison endommagée en route : ${contract.cargoType} (${contract.originStation} → ${contract.destinationStation})`
-              : `Livraison "${contract.cargoType}" (${contract.originStation} → ${contract.destinationStation})`,
+              : `Livraison "${contract.cargoType}"${load} (${contract.originStation} → ${contract.destinationStation})`,
           },
-        }),
-      ];
+        })
+      );
+      if (damaged) updates.push(prisma.incident.create({ data: { trainId: train.id, message: `Cargaison fragile endommagée durant le transport : ${contract.cargoType}` } }));
+      delivered.push({ cargoType: contract.cargoType, risky: contract.risky, damaged });
+    }
+    /* Une rame qui atteint l'usure maximale rentre en panne — seulement à
+       l'arrivée, pour ne pas laisser la cargaison dans les limbes. */
+    const arrivesBroken = wearAfter >= 100;
+    updates.push(
+      prisma.train.update({
+        where: { id: train.id },
+        data: { status: arrivesBroken ? "MAINTENANCE" : "IDLE", progress: 0, departedAt: null, wear: wearAfter, ...(arrivesBroken ? { brokenPart: weakestOrgan(organBias(train)) } : {}) },
+      })
+    );
+    await prisma.$transaction(updates);
 
-      if (damaged) {
-        updates.push(
-          prisma.incident.create({
-            data: {
-              trainId: contract.train.id,
-              message: `Cargaison fragile endommagée durant le transport : ${contract.cargoType}`,
-            },
-          })
-        );
-      }
-
-      await prisma.$transaction(updates);
+    for (const d of delivered) {
       // 2.0 : saison
-      addSeasonPoints(contract.companyId as string, POINTS.FREIGHT);
-      seasonEvent(contract.companyId as string, "FREIGHT");
-      if (contract.risky && !damaged) seasonEvent(contract.companyId as string, "FRAGILE");
+      addSeasonPoints(companyId, POINTS.FREIGHT);
+      seasonEvent(companyId, "FREIGHT");
+      if (d.risky && !d.damaged) seasonEvent(companyId, "FRAGILE");
+      // une cargaison endommagée ne compte pas pour un ordre
+      if (!d.damaged) await creditDelivery(companyId, d.cargoType);
+    }
 
-      /* Une cargaison endommagée ne compte pas pour un ordre : le client a
-         commandé de la marchandise en bon état, pas des débris. */
-      if (!damaged) {
-        await creditDelivery(contract.companyId as string, contract.cargoType);
-      }
-
-      // même règle qu'en ligne : la rame qui rentre en panne est réparée si la trésorerie suit
-      if (arrivesBroken) {
-        const repaired = await tryAutoRepair({ ...contract.train, companyId: contract.companyId as string }, null);
-        if (!repaired) {
-          await prisma.incident.create({
-            data: {
-              trainId: contract.train.id,
-              message: `${contract.train.name} est rentré en panne et nécessite une réparation`,
-            },
-          });
-        }
-      }
-    } else {
-      await prisma.train.update({
-        where: { id: contract.train.id },
-        data: { progress, wear: wearNow },
-      });
+    // même règle qu'en ligne : la rame qui rentre en panne est réparée si la trésorerie suit
+    if (arrivesBroken) {
+      const repaired = await tryAutoRepair({ ...train, companyId }, null);
+      if (!repaired) await prisma.incident.create({ data: { trainId: train.id, message: `${train.name} est rentré en panne et nécessite une réparation` } });
     }
   }
 }

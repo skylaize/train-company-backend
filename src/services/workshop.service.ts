@@ -1,3 +1,4 @@
+import { WAGONS, WagonId } from "./freight.service";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../prisma";
 import { CARS } from "./ridership.service";
@@ -182,7 +183,8 @@ export function resaleValue(t: { model: string; wear: number; cars?: string[] | 
   const share = Math.max(RESALE_FLOOR, RESALE_START - RESALE_LOSS_PER_DAY * ageDays);
   const condition = 1 - Math.min(100, t.wear) / 250; // une rame à 100 % perd encore 40 %
   const broken = t.brokenPart ? 0.85 : 1;
-  const cars = (t.cars ?? []).reduce((n, c) => n + Math.floor((CARS[c]?.price ?? 0) / 2), 0);
+  // 2.1 : les wagons de fret se reprennent aussi à moitié prix
+  const cars = (t.cars ?? []).reduce((n, c) => n + Math.floor((CARS[c]?.price ?? WAGONS[c as WagonId]?.price ?? 0) / 2), 0);
   return Math.max(10, Math.round(modelCost * share * condition * broken) + cars);
 }
 

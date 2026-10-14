@@ -186,6 +186,13 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     prisma.decision.count({ where: { companyId: company.id, status: "TRANCHEE" } }),
     prisma.decision.count({ where: { companyId: company.id, goalDone: true } }),
   ]);
+  // 2.1 : double voie et gares de triage
+  const [doubledLines21, yards21] = (await Promise.all([
+    prisma.line.findMany({ where: { companyId: company.id, doubleTrack: true }, select: { _count: { select: { trains: true } } } }),
+    prisma.yard.count({ where: { companyId: company.id } }),
+  ])) as [{ _count: { trains: number } }[], number];
+  const doubled21 = doubledLines21.length;
+  const cadenced21 = doubledLines21.some((l) => l._count.trains >= 3);
   // 1.7 : itinéraires, composition, infrastructures, finances
   const [lines17, trains17, stationsOwned, electrified, workshopsOpen, loansRepaid, dividends] = (await Promise.all([
     prisma.line.findMany({ where: { companyId: company.id }, select: { stops: true, priceRatio: true } }),
@@ -824,6 +831,10 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     { id: "restaurateur", name: "Restaurateur", description: "Remettre une épave en service", liveMet: restoredWrecks.length >= 1 },
     { id: "conservateur", name: "Conservateur", description: "Faire rouler trois rames de collection restaurées", liveMet: restoredWrecks.length >= 3 },
     { id: "piece-de-musee", name: "Pièce de musée", description: "Restaurer une épave légendaire", liveMet: restoredWrecks.some((w) => w.rarity === "LEGENDAIRE") },
+    // ---- 2.1 : double voie, gares de triage ----
+    { id: "voie-double", name: "Voie double", description: "Poser la deuxième voie sur une ligne", liveMet: doubled21 >= 1 },
+    { id: "cadencement", name: "Cadencement", description: "Faire rouler trois rames sur une même ligne à double voie", liveMet: cadenced21 },
+    { id: "bosse-de-triage", name: "Bosse de triage", description: "Ouvrir une gare de triage", liveMet: yards21 >= 1 },
   ];
 
   /* 1.6 : « Premiers pas » récompense la liste de départ au complet. Chaque étape

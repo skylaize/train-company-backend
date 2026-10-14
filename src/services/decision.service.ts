@@ -388,7 +388,7 @@ Object.assign(MAKERS, {
   },
 });
 
-const MODEL_LABEL: Record<string, string> = { STANDARD: "Standard", EXPRESS: "Express", FRET_LOURD: "Fret lourd", COUCHETTES: "Couchettes", VAPEUR: "Vapeur", LUXE: "Grand luxe", CREMAILLERE: "Crémaillère" };
+const MODEL_LABEL: Record<string, string> = { STANDARD: "Standard", EXPRESS: "Express", FRET_LOURD: "Fret lourd", LOCOTRACTEUR: "Locotracteur", FRET_RAPIDE: "Messagerie rapide", FRET_ELECTRIQUE: "Électrique longue distance", COUCHETTES: "Couchettes", VAPEUR: "Vapeur", LUXE: "Grand luxe", CREMAILLERE: "Crémaillère" };
 
 export const KINDS = Object.keys(MAKERS);
 

@@ -6,6 +6,8 @@ import { prisma } from "../prisma";
 import { requiredCargoTypes } from "../services/mission.service";
 import { getCargoIndexMap, freightMultiplier } from "../services/market.service";
 import { distanceKm } from "../services/geography.service";
+import { yardsOf, YARD_TIME } from "../services/infrastructure.service";
+import { loadCheck, loadFactorFor, tourMinutes, isFreightModel, isWagon, wagonFor } from "../services/freight.service";
 
 async function getOwnedCompanyOrFail(userId: string) {
   return prisma.company.findUnique({ where: { ownerId: userId } });
@@ -203,6 +205,7 @@ export async function listMarket(req: AuthRequest, res: Response) {
       effectiveReward: Math.round(c.reward * multiplier),
       marketDelta: Math.round((multiplier - 1) * 100),
       forOrder: orders.get(c.cargoType) ?? null,
+      wagon: wagonFor(c.cargoType), // 2.1 : le wagon qui la transporte
     };
   });
 
@@ -229,25 +232,40 @@ export async function listMyContracts(req: AuthRequest, res: Response) {
 
 const INSURANCE_PREMIUM_RATIO = 0.15; // 15% de la récompense, payé d'avance, non remboursable
 
+/* 2.1 : accepter un contrat, ou une tournée de plusieurs contrats sur une
+   même rame (un par type de wagon). Corps : { trainId, contractIds: string[],
+   insuredIds?: string[] } ; l'ancien { trainId, contractId, insured } marche encore. */
 export async function acceptContract(req: AuthRequest, res: Response) {
-  const { contractId, trainId, insured } = req.body;
+  const { trainId } = req.body ?? {};
+  const ids: string[] = Array.isArray(req.body?.contractIds)
+    ? [...new Set((req.body.contractIds as unknown[]).map(String))]
+    : req.body?.contractId
+    ? [String(req.body.contractId)]
+    : [];
+  const insuredIds = new Set<string>(
+    Array.isArray(req.body?.insuredIds) ? (req.body.insuredIds as unknown[]).map(String) : req.body?.insured && req.body?.contractId ? [String(req.body.contractId)] : []
+  );
 
-  if (!contractId || !trainId) {
-    return res.status(400).json({ error: "contractId et trainId sont requis" });
+  if (ids.length === 0 || !trainId) {
+    return res.status(400).json({ error: "trainId et au moins un contrat sont requis" });
   }
+  if (ids.length > 6) return res.status(400).json({ error: "Six contrats au plus par tournée" });
 
   const company = await getOwnedCompanyOrFail(req.userId as string);
   if (!company) {
     return res.status(404).json({ error: "Créez d'abord votre compagnie" });
   }
 
-  const contract = await prisma.contract.findUnique({ where: { id: contractId } });
-  if (!contract || contract.status !== "DISPONIBLE" || contract.companyId) {
-    return res.status(409).json({ error: "Ce contrat n'est plus disponible" });
+  const contracts = (await prisma.contract.findMany({ where: { id: { in: ids } } })) as {
+    id: string; status: string; companyId: string | null; expiresAt: Date | null; cargoType: string; risky: boolean; reward: number; durationMinutes: number; originStation: string; destinationStation: string;
+  }[];
+  if (contracts.length !== ids.length || contracts.some((c) => c.status !== "DISPONIBLE" || c.companyId)) {
+    return res.status(409).json({ error: ids.length > 1 ? "Un des contrats n'est plus disponible" : "Ce contrat n'est plus disponible" });
   }
-  if (contract.expiresAt && contract.expiresAt < new Date()) {
-    await prisma.contract.delete({ where: { id: contractId } });
-    return res.status(409).json({ error: "Ce contrat vient d'expirer" });
+  const expired = contracts.filter((c) => c.expiresAt && c.expiresAt < new Date());
+  if (expired.length) {
+    await prisma.contract.deleteMany({ where: { id: { in: expired.map((c) => c.id) } } });
+    return res.status(409).json({ error: expired.length > 1 ? "Des contrats viennent d'expirer" : "Ce contrat vient d'expirer" });
   }
 
   const train = await prisma.train.findFirst({ where: { id: trainId, companyId: company.id } });
@@ -264,28 +282,50 @@ export async function acceptContract(req: AuthRequest, res: Response) {
     return res.status(409).json({ error: "Ce train doit être réparé avant de pouvoir circuler" });
   }
 
-  const wantsInsurance = Boolean(insured);
-  if (wantsInsurance && !contract.risky) {
-    return res.status(400).json({ error: "Seules les cargaisons fragiles peuvent être assurées" });
-  }
+  // 2.1 : les wagons décident de ce que la rame peut charger
+  const why = loadCheck(train, contracts.map((c) => c.cargoType));
+  if (why) return res.status(409).json({ error: why });
 
-  const premium = wantsInsurance ? Math.round(contract.reward * INSURANCE_PREMIUM_RATIO) : 0;
-  if (wantsInsurance && company.balance < premium) {
+  for (const id of insuredIds) {
+    const c = contracts.find((x) => x.id === id);
+    if (c && !c.risky) return res.status(400).json({ error: "Seules les cargaisons fragiles peuvent être assurées" });
+  }
+  const premium = contracts.filter((c) => insuredIds.has(c.id)).reduce((s, c) => s + Math.round(c.reward * INSURANCE_PREMIUM_RATIO), 0);
+  if (premium > 0 && company.balance < premium) {
     return res.status(409).json({ error: `Trésorerie insuffisante pour la prime d'assurance (${premium} pièces)` });
   }
 
+  // 2.1 : l'allure de la locomotive et le poids des wagons font la durée de la tournée
+  /* 2.1 : une gare de triage au départ ou à l'arrivée d'un contrat raccourcit
+     sa part de la tournée */
+  const yards = await yardsOf(company.id);
+  const durations = contracts.map((c) => Math.round(c.durationMinutes * (yards.has(c.originStation) || yards.has(c.destinationStation) ? YARD_TIME : 1)));
+  const tour = isFreightModel(train.model)
+    ? tourMinutes(train.model, durations, (train.cars ?? []).filter((c: string) => isWagon(c)).length)
+    : null;
+  const now = new Date();
   const updates: Prisma.PrismaPromise<any>[] = [
-    prisma.contract.update({
-      where: { id: contractId },
-      data: { companyId: company.id, trainId, status: "EN_COURS", acceptedAt: new Date(), insured: wantsInsurance },
-    }),
+    ...contracts.map((c) =>
+      prisma.contract.update({
+        where: { id: c.id },
+        data: {
+          companyId: company.id,
+          trainId,
+          status: "EN_COURS",
+          acceptedAt: now,
+          insured: insuredIds.has(c.id),
+          tourMinutes: tour,
+          loadFactor: loadFactorFor(train, c.cargoType),
+        },
+      })
+    ),
     prisma.train.update({
       where: { id: trainId },
-      data: { status: "EN_ROUTE", progress: 0, departedAt: new Date() },
+      data: { status: "EN_ROUTE", progress: 0, departedAt: now },
     }),
   ];
 
-  if (wantsInsurance) {
+  if (premium > 0) {
     updates.push(
       prisma.company.update({ where: { id: company.id }, data: { balance: { decrement: premium } } }),
       prisma.transaction.create({
@@ -293,14 +333,14 @@ export async function acceptContract(req: AuthRequest, res: Response) {
           companyId: company.id,
           type: "FRET",
           amount: -premium,
-          description: `Prime d'assurance : ${contract.cargoType}`,
+          description: `Prime d'assurance : ${contracts.filter((c) => insuredIds.has(c.id)).map((c) => c.cargoType).join(", ")}`,
           trainId,
         },
       })
     );
   }
 
-  const [updatedContract] = await prisma.$transaction(updates);
+  const done = await prisma.$transaction(updates);
 
-  return res.status(201).json(updatedContract);
+  return res.status(201).json(contracts.length === 1 ? done[0] : { ok: true, contracts: done.slice(0, contracts.length), tourMinutes: tour });
 }

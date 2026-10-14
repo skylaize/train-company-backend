@@ -4,6 +4,7 @@ import { seasonEvent } from "../services/saison.service";
 import { Response } from "express";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { CARS, MAX_CARS, seatsOf } from "../services/ridership.service";
+import { WAGONS, FREIGHT_MODELS, isWagon, freightOnly, isFreightModel } from "../services/freight.service";
 import { prisma } from "../prisma";
 import { staffEffectsFor, repairCostPerPoint } from "../services/staff.service";
 import { buildLeaderRows } from "../services/leaderboard.service";
@@ -26,6 +27,10 @@ export const TRAIN_MODELS: Record<string, { cost: number; minGradeId: number; dl
   STANDARD: { cost: 200, minGradeId: 0 },
   EXPRESS: { cost: 450, minGradeId: 1 },   // Gestionnaire confirmé
   FRET_LOURD: { cost: 450, minGradeId: 2 }, // Chef de réseau
+  // 2.1 : la catégorie fret (freight.service)
+  LOCOTRACTEUR: { cost: 300, minGradeId: 0 }, // dès le départ : le fret ne se ferme à personne
+  FRET_RAPIDE: { cost: 900, minGradeId: 2 }, // Chef de réseau
+  FRET_ELECTRIQUE: { cost: 1800, minGradeId: 4 }, // Magnat ferroviaire
   COUCHETTES: { cost: 900, minGradeId: 2 }, // Chef de réseau (1.6) : train de nuit
   // 2.0 : le matériel des extensions (dlc.service)
   ...Object.fromEntries(Object.values(DLC_MODELS).map((m) => [m.id, { cost: m.cost, minGradeId: m.minGradeId, dlc: m.dlc }])),
@@ -122,6 +127,9 @@ export async function assignTrainToLine(req: AuthRequest, res: Response) {
   if (!line) {
     return res.status(404).json({ error: "Ligne introuvable" });
   }
+  // 2.1 : une rame de fret pure ne prend pas de voyageurs, ni une rame qui tire des wagons
+  if (freightOnly(train.model)) return res.status(409).json({ error: "Une rame de fret ne prend pas de voyageurs : envoyez-la livrer des contrats" });
+  if ((train.cars ?? []).some((c: string) => isWagon(c))) return res.status(409).json({ error: "Dételez ses wagons avant de l'affecter à une ligne voyageurs" });
   const dm = DLC_MODELS[train.model];
   if (dm?.minDuration && line.durationMinutes < dm.minDuration) {
     return res.status(409).json({ error: `Une rame ${dm.label.toLowerCase()} ne fait que les lignes d'au moins ${dm.minDuration} minutes` });
@@ -153,9 +161,11 @@ export async function assignTrainToLine(req: AuthRequest, res: Response) {
    ============================================================ */
 export async function changeCars(req: AuthRequest, res: Response) {
   const { trainId, car, action } = req.body ?? {};
-  const def = CARS[String(car)];
+  // 2.1 : les wagons de fret passent par le même guichet que les voitures
+  const wagon = isWagon(String(car)) ? WAGONS[String(car) as keyof typeof WAGONS] : null;
+  const def = wagon ? { label: wagon.label, price: wagon.price, unique: false } : CARS[String(car)];
   if (!trainId || !def || (action !== "add" && action !== "remove")) {
-    return res.status(400).json({ error: "trainId, car (SECONDE, PREMIERE, BAR) et action (add, remove) sont requis" });
+    return res.status(400).json({ error: "trainId, car (SECONDE, PREMIERE, BAR ou un wagon) et action (add, remove) sont requis" });
   }
   const company = await getOwnedCompanyOrFail(req.userId as string);
   if (!company) return res.status(404).json({ error: "Créez d'abord votre compagnie" });
@@ -164,7 +174,17 @@ export async function changeCars(req: AuthRequest, res: Response) {
   const cars = [...((train as { cars?: string[] }).cars ?? [])];
 
   if (action === "add") {
-    if (cars.length >= MAX_CARS) return res.status(409).json({ error: `Une rame tire ${MAX_CARS} voitures au plus` });
+    if (wagon) {
+      const fm = FREIGHT_MODELS[train.model];
+      if (!fm) return res.status(409).json({ error: "Les wagons s'attellent à une rame de fret" });
+      if (train.status !== "IDLE") return res.status(409).json({ error: "Attelez les wagons quand la rame est au dépôt" });
+      if (cars.some((c) => !isWagon(c))) return res.status(409).json({ error: "Retirez d'abord ses voitures voyageurs" });
+      if (cars.length >= fm.maxWagons) return res.status(409).json({ error: `La ${fm.label} tire ${fm.maxWagons} wagons au plus` });
+    } else {
+      if (freightOnly(train.model)) return res.status(409).json({ error: "Une rame de fret tire des wagons, pas des voitures voyageurs" });
+      if (isFreightModel(train.model) && cars.some((c) => isWagon(c))) return res.status(409).json({ error: "Dételez d'abord ses wagons" });
+    }
+    if (!wagon && cars.length >= MAX_CARS) return res.status(409).json({ error: `Une rame tire ${MAX_CARS} voitures au plus` });
     if (def.unique && cars.includes(String(car))) return res.status(409).json({ error: `${def.label} : une seule par rame` });
     if (company.balance < def.price) return res.status(409).json({ error: `Trésorerie insuffisante (${def.price} pi.)` });
     cars.push(String(car));
@@ -172,17 +192,18 @@ export async function changeCars(req: AuthRequest, res: Response) {
     if (done.count === 0) return res.status(409).json({ error: `Trésorerie insuffisante (${def.price} pi.)` });
     await prisma.$transaction([
       prisma.train.update({ where: { id: train.id }, data: { cars } }),
-      prisma.transaction.create({ data: { companyId: company.id, type: "COMPOSITION", amount: -def.price, description: `${def.label} ajoutée à ${train.name}`, trainId: train.id } }),
+      prisma.transaction.create({ data: { companyId: company.id, type: "COMPOSITION", amount: -def.price, description: `${def.label} ${wagon ? "attelé" : "ajoutée"} à ${train.name}`, trainId: train.id } }),
     ]);
   } else {
     const i = cars.lastIndexOf(String(car));
     if (i < 0) return res.status(409).json({ error: "Cette rame n'a pas cette voiture" });
+    if (wagon && train.status !== "IDLE") return res.status(409).json({ error: "Dételez les wagons quand la rame est au dépôt" });
     cars.splice(i, 1);
     const refund = Math.floor(def.price / 2);
     await prisma.$transaction([
       prisma.train.update({ where: { id: train.id }, data: { cars } }),
       prisma.company.update({ where: { id: company.id }, data: { balance: { increment: refund } } }),
-      prisma.transaction.create({ data: { companyId: company.id, type: "COMPOSITION", amount: refund, description: `${def.label} retirée de ${train.name}`, trainId: train.id } }),
+      prisma.transaction.create({ data: { companyId: company.id, type: "COMPOSITION", amount: refund, description: `${def.label} ${wagon ? "dételé" : "retirée"} de ${train.name}`, trainId: train.id } }),
     ]);
   }
   return res.json({ cars, seats: seatsOf({ model: train.model, cars }) });
@@ -497,4 +518,20 @@ export async function listMyTrains(req: AuthRequest, res: Response) {
         .map((c) => ({ id: c.id, name: c.name, role: c.role, level: c.level })),
     }))
   );
+}
+
+/* 2.1 : la plaque nominative d'une rame (laiton, émail, bois), débloquée en boutique */
+export async function setTrainPlate(req: AuthRequest, res: Response) {
+  const company = await getOwnedCompanyOrFail(req.userId as string);
+  if (!company) return res.status(404).json({ error: "Créez d'abord votre compagnie" });
+  const train = await prisma.train.findFirst({ where: { id: String(req.body?.trainId ?? ""), companyId: company.id } });
+  if (!train) return res.status(404).json({ error: "Rame introuvable" });
+  const style = req.body?.style === null ? null : String(req.body?.style ?? "");
+  if (style !== null) {
+    const { unlockedFor } = await import("../services/shop.service");
+    const unlocked = await unlockedFor(company.id);
+    if (!unlocked.trainPlates.has(style)) return res.status(403).json({ error: "Les plaques nominatives se trouvent en boutique" });
+  }
+  await prisma.train.update({ where: { id: train.id }, data: { plateStyle: style } });
+  res.json({ ok: true, plateStyle: style });
 }

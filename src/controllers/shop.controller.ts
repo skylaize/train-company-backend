@@ -3,7 +3,7 @@ import Stripe from "stripe";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
 import { SHOP_ITEMS, findItem, unlockedFor, dailyRotation, inShopToday } from "../services/shop.service";
-import { activeSeasonalEvent, nextEdition, seasonalEventById } from "../services/season.service";
+import { activeSeasonalEvent, nextEdition, seasonalEventById, seasonOpen } from "../services/season.service";
 import { currentPassItem, passSeasonNumber } from "../services/pass.service";
 import { sendToCompany } from "../services/push.service";
 
@@ -23,7 +23,7 @@ const stripe = secretKey ? new Stripe(secretKey) : null;
 async function companyOf(req: AuthRequest) {
   return prisma.company.findUnique({
     where: { ownerId: req.userId as string },
-    select: { id: true, name: true, emblem: true, title: true, theme: true, liveryColor: true, cabSkin: true, plate: true },
+    select: { id: true, name: true, emblem: true, title: true, theme: true, liveryColor: true, cabSkin: true, plate: true, soundPack: true, stationSkin: true, uniform: true },
   });
 }
 
@@ -39,9 +39,9 @@ export async function getShop(req: AuthRequest, res: Response) {
     /* Les éditions de saison n'apparaissent que pendant leur temps fort, ou
        chez ceux qui les possèdent déjà. Les autres savent seulement quand
        revient la prochaine. */
-    items: SHOP_ITEMS.filter((item) => !item.season || item.season === activeSeasonalEvent()?.id || unlocked.owned.has(item.id)).map((item) => {
+    items: SHOP_ITEMS.filter((item) => !item.season || seasonOpen(item.season) || unlocked.owned.has(item.id)).map((item) => {
       const ev = item.season ? seasonalEventById(item.season) : null;
-      const active = ev && activeSeasonalEvent()?.id === ev.id;
+      const active = ev && seasonOpen(ev.id);
       return { ...item, owned: unlocked.owned.has(item.id), includedInPremium: Boolean(item.dlc?.premium && isPremium), availableUntil: active ? nextEdition(ev!).end : null, seasonName: ev?.name ?? null };
     }),
     // 2.0 : la boutique du jour
@@ -52,7 +52,7 @@ export async function getShop(req: AuthRequest, res: Response) {
       return p ? { ...p, owned: unlocked.owned.has(p.id) } : null;
     })(),
     nextSeason: (() => {
-      if (activeSeasonalEvent()) return null;
+      if (SHOP_ITEMS.some((i) => i.season && seasonOpen(i.season))) return null;
       const upcoming = SHOP_ITEMS.filter((i) => i.season).map((i) => ({ item: i, ev: seasonalEventById(i.season!)! }))
         .map(({ item, ev }) => ({ name: ev.name, itemName: item.name, startsAt: nextEdition(ev).start }))
         .sort((a, b) => a.startsAt.getTime() - b.startsAt.getTime());
@@ -66,6 +66,10 @@ export async function getShop(req: AuthRequest, res: Response) {
       livery: company.liveryColor,
       cabSkin: (company as { cabSkin?: string | null }).cabSkin ?? null,
       plate: (company as { plate?: string | null }).plate ?? null,
+      // 2.1
+      soundPack: (company as { soundPack?: string | null }).soundPack ?? null,
+      stationSkin: (company as { stationSkin?: string | null }).stationSkin ?? null,
+      uniform: (company as { uniform?: string | null }).uniform ?? null,
     },
     unlocked: {
       emblems: [...unlocked.emblems],
@@ -74,6 +78,14 @@ export async function getShop(req: AuthRequest, res: Response) {
       liveries: [...unlocked.liveries],
       cabSkins: [...unlocked.cabSkins],
       plates: [...unlocked.plates],
+      // 2.1
+      posters: [...unlocked.posters],
+      trainPlates: [...unlocked.trainPlates],
+      sounds: [...unlocked.sounds],
+      stationSkins: [...unlocked.stationSkins],
+      uniforms: [...unlocked.uniforms],
+      museum: unlocked.museum,
+      allianceLiveries: [...unlocked.allianceLiveries],
     },
   });
 }
@@ -104,7 +116,7 @@ export async function createShopCheckout(req: AuthRequest, res: Response) {
   if (req.body?.giftTo && !giftTo) return res.status(404).json({ error: "Aucune compagnie ne porte ce nom" });
   if (giftTo && giftTo.id === company.id) return res.status(409).json({ error: "Pour vous-même, achetez sans l'offrir" });
   const target = giftTo ?? company;
-  if (item.season && activeSeasonalEvent()?.id !== item.season) {
+  if (item.season && !seasonOpen(item.season)) {
     return res.status(410).json({ error: "Cette édition limitée n'est plus en vente. Elle reviendra à sa saison." });
   }
 

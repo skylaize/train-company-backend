@@ -55,6 +55,10 @@ model Company {
   premiumReveal String? // 2.0 : animation Premium à montrer ("" = acheté soi-même, sinon nom de qui l'offre)
   tutorialSeen Boolean  @default(false) // mémorisé côté compte, pas par navigateur
   tutorialRewards String[] @default([]) // 2.0.3 : primes de stage déjà versées (ligne, service, carte, prix)
+  // 2.1 : les sons de gare, l'habillage des gares en vue cabine, les tenues du personnel
+  soundPack    String?
+  stationSkin  String?
+  uniform      String?
   theme        String   @default("sombre") // "sombre" | "papier", suit le joueur d'un appareil à l'autre
   lastSeenVersion String? // dernier bulletin de nouveautés lu, mémorisé sur le compte et non par navigateur
   hintsSeen    String   @default("") // ids des explications déjà lues, séparés par des virgules
@@ -109,6 +113,7 @@ model Company {
   // 1.7 : infrastructures, emprunts, bourse
   stationsOwned StationOwnership[]
   workshops    Workshop[]
+  yards        Yard[]       // 2.1 : gares de triage
   loans        Loan[]
   holdings     Shareholding[] @relation("Holder")
   shareholders Shareholding[] @relation("Issuer")
@@ -321,6 +326,7 @@ model Line {
   stops             String[] @default([])
   priceRatio        Float    @default(1)
   electrified       Boolean  @default(false)
+  doubleTrack       Boolean  @default(false) // 2.1 : double voie
   autoPrice         Boolean  @default(false) // Premium : le prix se cale chaque heure sur le prix conseillé
 
   company           Company  @relation(fields: [companyId], references: [id])
@@ -364,7 +370,9 @@ model Train {
   line         Line?       @relation(fields: [lineId], references: [id])
   lineId       String?
 
-  contract     Contract?
+  contracts    Contract[]
+  // 2.1 : la plaque nominative (laiton, émail, bois)
+  plateStyle   String?
 
   incidents    Incident[]
 
@@ -434,9 +442,14 @@ model Contract {
   companyId         String?
 
   train             Train?         @relation(fields: [trainId], references: [id])
-  trainId           String?        @unique
+  trainId           String?
+  // 2.1 : tournée de fret (plusieurs contrats sur une rame) et charge portée par les wagons
+  tourMinutes       Int?
+  loadFactor        Float          @default(1)
 
   createdAt         DateTime       @default(now())
+
+  @@index([trainId])
 }
 
 model Incident {
@@ -647,6 +660,18 @@ model StationOwnership {
   companyId      String
 }
 
+// 2.1 : gare de triage — le fret qui en part ou y arrive est trié plus vite et payé un peu plus
+model Yard {
+  id        String   @id @default(uuid())
+  station   String
+  createdAt DateTime @default(now())
+
+  company   Company  @relation(fields: [companyId], references: [id])
+  companyId String
+
+  @@unique([companyId, station])
+}
+
 // Un atelier régional : les rames qui desservent sa gare s'usent moins.
 model Workshop {
   id        String   @id @default(uuid())
@@ -803,6 +828,8 @@ model Alliance {
   // 2.0.2 : candidatures
   recruiting Boolean  @default(true)
   pitch      String?
+  // 2.1 : la livrée commune, posée par un membre qui possède le coffret d'alliance
+  livery     String?
 }
 
 model AllianceMember {

@@ -125,6 +125,23 @@ export function seasonalStationEvents(now = new Date()): StationEvent[] {
   }));
 }
 
+/* 2.1 : des éditions limitées de boutique seulement, sans gares à l'honneur
+   ni succès : la Toussaint, le Nouvel An, la Saint-Valentin. Elles peuvent
+   chevaucher un temps fort, sans rien changer à la simulation. */
+export const SHOP_EDITIONS: { id: string; name: string; from: [number, number]; to: [number, number] }[] = [
+  { id: "toussaint", name: "La Toussaint", from: [10, 18], to: [11, 3] },
+  { id: "nouvel-an", name: "Le Nouvel An", from: [1, 1], to: [1, 12] },
+  { id: "saint-valentin", name: "La Saint-Valentin", from: [2, 7], to: [2, 16] },
+];
+
 export function seasonalEventById(id: string) {
-  return SEASONAL_EVENTS.find((e) => e.id === id) ?? null;
+  return (SEASONAL_EVENTS.find((e) => e.id === id) ?? (SHOP_EDITIONS.find((e) => e.id === id) as unknown as SeasonalEvent | undefined)) ?? null;
+}
+
+/* Une édition (temps fort ou édition de boutique) est-elle en vente maintenant ? */
+export function seasonOpen(id: string, now = new Date()) {
+  const ev = seasonalEventById(id);
+  if (!ev) return false;
+  const e = nextEdition(ev, now);
+  return e.start <= now && now < e.end;
 }

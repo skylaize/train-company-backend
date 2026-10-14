@@ -198,6 +198,8 @@ const EXPENSE_GROUPS: Record<string, string> = {
   ELECTRIFICATION: "Investissements",
   GARE: "Investissements",
   ATELIER: "Investissements",
+  DOUBLE_VOIE: "Investissements",
+  TRIAGE: "Investissements",
   LICENCE: "Investissements",
   REMBOURSEMENT: "Banque",
   BOURSE: "Bourse",

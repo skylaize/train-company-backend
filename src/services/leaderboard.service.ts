@@ -10,6 +10,9 @@ const TRAIN_VALUE: Record<string, number> = {
   STANDARD: 200,
   EXPRESS: 450,
   FRET_LOURD: 450,
+  LOCOTRACTEUR: 300, // 2.1
+  FRET_RAPIDE: 900,
+  FRET_ELECTRIQUE: 1800,
   COUCHETTES: 900,
   // 2.0 : extensions
   VAPEUR: 600,

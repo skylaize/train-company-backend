@@ -4,6 +4,7 @@ import { AuthRequest } from "../middleware/auth.middleware";
 import { isKnownStation } from "../services/geography.service";
 import { stationSize, SIZE_LABEL } from "../services/station.service";
 import { routeOf } from "../services/route.service";
+import { computeCareerStatus, RANK_DEFINITIONS } from "../services/career.service";
 import { sendToCompany } from "../services/push.service";
 import {
   electrifyCost,
@@ -27,7 +28,37 @@ import {
   WORKSHOP_WEAR,
   ELECTRIC_SPEED,
   ELECTRIC_WEAR,
+  doubleTrackCost,
+  DOUBLE_SPEED,
+  DOUBLE_DELAY,
+  DOUBLE_CADENCE_STEP,
+  DOUBLE_CADENCE_CAP,
+  YARD_COST,
+  MAX_YARDS,
+  YARD_PAY,
+  YARD_TIME,
 } from "../services/infrastructure.service";
+
+/* 2.1 : le plafond de gares suit la carrière. Les derniers grades demandent
+   6 puis 10 gares alors qu'on en possédait 4 au plus : on ne pouvait pas les
+   atteindre. Le plafond monte à 6 au grade de Maître des caténaires (celui
+   qui précède le grade qui en demande 6), puis à 10 au grade de Magnat
+   européen (avant celui qui en demande 10). */
+const STATION_CAPS: { rank: string; max: number }[] = [
+  { rank: "Maître des caténaires", max: 6 },
+  { rank: "Magnat européen", max: 10 },
+];
+async function stationCap(companyId: string) {
+  const { currentRank } = await computeCareerStatus(companyId);
+  let max = MAX_STATIONS;
+  let next: { rank: string; max: number } | null = null;
+  for (const c of STATION_CAPS) {
+    const idx = RANK_DEFINITIONS.findIndex((r) => r.name === c.rank);
+    if (idx >= 0 && currentRank.id >= idx) max = Math.max(max, c.max);
+    else if (!next) next = c;
+  }
+  return { max, next };
+}
 
 async function companyOf(req: AuthRequest) {
   return prisma.company.findUnique({ where: { ownerId: req.userId as string } }) as Promise<{ id: string; name: string; balance: number } | null>;
@@ -45,16 +76,18 @@ export async function getInfrastructure(req: AuthRequest, res: Response) {
   const company = await companyOf(req);
   if (!company) return res.status(404).json({ error: "Créez d'abord votre compagnie" });
 
-  const [owned, workshops, lines, allOwners] = (await Promise.all([
+  const [owned, workshops, lines, allOwners, yards] = (await Promise.all([
     prisma.stationOwnership.findMany({ where: { companyId: company.id }, orderBy: { boughtAt: "asc" } }),
     prisma.workshop.findMany({ where: { companyId: company.id }, orderBy: { createdAt: "asc" } }),
-    prisma.line.findMany({ where: { companyId: company.id }, select: { id: true, departureStation: true, arrivalStation: true, stops: true, electrified: true }, orderBy: { createdAt: "asc" } }),
+    prisma.line.findMany({ where: { companyId: company.id }, select: { id: true, departureStation: true, arrivalStation: true, stops: true, electrified: true, doubleTrack: true, _count: { select: { trains: true } } }, orderBy: { createdAt: "asc" } }),
     prisma.stationOwnership.findMany({ select: { station: true, companyId: true, level: true, invested: true, protectedUntil: true, company: { select: { name: true, emblem: true, liveryColor: true } } } }),
+    prisma.yard.findMany({ where: { companyId: company.id }, orderBy: { createdAt: "asc" } }),
   ])) as [
     { station: string; level: number; invested: number; protectedUntil: Date; totalFees: number; totalShops: number; pendingFees: number; pendingShops: number; boughtAt: Date }[],
     { id: string; station: string; createdAt: Date }[],
-    { id: string; departureStation: string; arrivalStation: string; stops: string[]; electrified: boolean }[],
-    { station: string; companyId: string; level: number; invested: number; protectedUntil: Date; company: { name: string; emblem: string | null; liveryColor: string } }[]
+    { id: string; departureStation: string; arrivalStation: string; stops: string[]; electrified: boolean; doubleTrack: boolean; _count: { trains: number } }[],
+    { station: string; companyId: string; level: number; invested: number; protectedUntil: Date; company: { name: string; emblem: string | null; liveryColor: string } }[],
+    { id: string; station: string; createdAt: Date }[]
   ];
 
   // trafic des dernières 24 h par gare (toutes compagnies), pour juger d'un achat
@@ -74,9 +107,11 @@ export async function getInfrastructure(req: AuthRequest, res: Response) {
   const myStations = new Set(lines.flatMap((l) => routeOf(l)));
   const now = Date.now();
 
+  const cap = await stationCap(company.id);
   return res.json({
     rules: {
-      maxStations: MAX_STATIONS,
+      maxStations: cap.max,
+      nextStationCap: cap.next, // 2.1 : le grade qui débloque plus de gares
       stationPrices: STATION_PRICE,
       maxLevel: STATION_MAX_LEVEL,
       platformFee: PLATFORM_FEE,
@@ -93,6 +128,14 @@ export async function getInfrastructure(req: AuthRequest, res: Response) {
       workshopWear: WORKSHOP_WEAR,
       electricSpeed: ELECTRIC_SPEED,
       electricWear: ELECTRIC_WEAR,
+      doubleSpeed: DOUBLE_SPEED,
+      doubleDelay: DOUBLE_DELAY,
+      cadenceStep: DOUBLE_CADENCE_STEP,
+      cadenceCap: DOUBLE_CADENCE_CAP,
+      yardCost: YARD_COST,
+      maxYards: MAX_YARDS,
+      yardPay: YARD_PAY,
+      yardTime: YARD_TIME,
     },
     stations: owned.map((o) => ({
       station: o.station,
@@ -129,10 +172,11 @@ export async function getInfrastructure(req: AuthRequest, res: Response) {
       })
       .filter((m) => !m.mine)
       .sort((a, b) => Number(b.served) - Number(a.served) || b.traffic24h - a.traffic24h),
+    yards: yards.map((y) => ({ id: y.id, station: y.station, createdAt: y.createdAt, served: myStations.has(y.station) })),
     workshops: workshops.map((w) => ({ id: w.id, station: w.station, createdAt: w.createdAt, lines: lines.filter((l) => routeOf(l).includes(w.station)).length })),
     lines: lines.map((l) => {
       const route = routeOf(l);
-      return { id: l.id, route, km: routeKmOf(route), electrified: l.electrified, cost: electrifyCost(route) };
+      return { id: l.id, route, km: routeKmOf(route), electrified: l.electrified, cost: electrifyCost(route), doubleTrack: l.doubleTrack, doubleCost: doubleTrackCost(route), trains: l._count.trains };
     }),
   });
 }
@@ -159,6 +203,69 @@ export async function electrifyLine(req: AuthRequest, res: Response) {
   return res.json({ ok: true, cost });
 }
 
+/* ---------------- 2.1 : double voie ---------------- */
+
+export async function doubleLine(req: AuthRequest, res: Response) {
+  const company = await companyOf(req);
+  if (!company) return res.status(404).json({ error: "Créez d'abord votre compagnie" });
+  const line = (await prisma.line.findFirst({ where: { id: req.body?.lineId, companyId: company.id } })) as
+    | { id: string; departureStation: string; arrivalStation: string; stops: string[]; doubleTrack: boolean }
+    | null;
+  if (!line) return res.status(404).json({ error: "Ligne introuvable" });
+  if (line.doubleTrack) return res.status(409).json({ error: "Cette ligne est déjà à double voie" });
+  const route = routeOf(line);
+  const cost = doubleTrackCost(route);
+  if (!(await debit(company.id, cost))) return res.status(409).json({ error: `Trésorerie insuffisante (${cost.toLocaleString("fr-FR")} pi.)` });
+  const done = await prisma.line.updateMany({ where: { id: line.id, doubleTrack: false }, data: { doubleTrack: true } });
+  if (done.count === 0) {
+    await prisma.company.update({ where: { id: company.id }, data: { balance: { increment: cost } } });
+    return res.status(409).json({ error: "Cette ligne est déjà à double voie" });
+  }
+  await prisma.transaction.create({
+    data: { companyId: company.id, type: "DOUBLE_VOIE", amount: -cost, lineId: line.id, description: `Double voie : ${route.join(" – ")} (${routeKmOf(route)} km)` },
+  });
+  return res.json({ ok: true, cost });
+}
+
+/* ---------------- 2.1 : gares de triage ---------------- */
+
+export async function openYard(req: AuthRequest, res: Response) {
+  const company = await companyOf(req);
+  if (!company) return res.status(404).json({ error: "Créez d'abord votre compagnie" });
+  const station = String(req.body?.station ?? "");
+  if (!isKnownStation(station)) return res.status(400).json({ error: "Gare inconnue du réseau" });
+  const count = await prisma.yard.count({ where: { companyId: company.id } });
+  if (count >= MAX_YARDS) return res.status(409).json({ error: `${MAX_YARDS} gares de triage au plus` });
+  const exists = await prisma.yard.findFirst({ where: { companyId: company.id, station } });
+  if (exists) return res.status(409).json({ error: "Vous avez déjà une gare de triage à " + station });
+  if (!(await debit(company.id, YARD_COST))) return res.status(409).json({ error: `Trésorerie insuffisante (${YARD_COST.toLocaleString("fr-FR")} pi.)` });
+  try {
+    await prisma.$transaction([
+      prisma.yard.create({ data: { companyId: company.id, station } }),
+      prisma.transaction.create({ data: { companyId: company.id, type: "TRIAGE", amount: -YARD_COST, description: `Gare de triage ouverte à ${station}` } }),
+    ]);
+  } catch {
+    await prisma.company.update({ where: { id: company.id }, data: { balance: { increment: YARD_COST } } });
+    return res.status(409).json({ error: "Vous avez déjà une gare de triage à " + station });
+  }
+  return res.json({ ok: true });
+}
+
+export async function closeYard(req: AuthRequest, res: Response) {
+  const company = await companyOf(req);
+  if (!company) return res.status(404).json({ error: "Créez d'abord votre compagnie" });
+  const y = (await prisma.yard.findFirst({ where: { id: req.body?.yardId, companyId: company.id } })) as { id: string; station: string } | null;
+  if (!y) return res.status(404).json({ error: "Gare de triage introuvable" });
+  const value = Math.round(YARD_COST * SELL_BACK);
+  const gone = await prisma.yard.deleteMany({ where: { id: y.id, companyId: company.id } });
+  if (gone.count === 0) return res.status(409).json({ error: "Gare de triage déjà fermée" });
+  await prisma.$transaction([
+    prisma.company.update({ where: { id: company.id }, data: { balance: { increment: value } } }),
+    prisma.transaction.create({ data: { companyId: company.id, type: "TRIAGE", amount: value, description: `Gare de triage de ${y.station} fermée et revendue` } }),
+  ]);
+  return res.json({ ok: true, value });
+}
+
 /* ---------------- gares ---------------- */
 
 export async function buyStation(req: AuthRequest, res: Response) {
@@ -168,7 +275,11 @@ export async function buyStation(req: AuthRequest, res: Response) {
   if (!isKnownStation(station)) return res.status(400).json({ error: "Gare inconnue du réseau" });
 
   const count = await prisma.stationOwnership.count({ where: { companyId: company.id } });
-  if (count >= MAX_STATIONS) return res.status(409).json({ error: `${MAX_STATIONS} gares au plus par compagnie` });
+  const cap = await stationCap(company.id);
+  if (count >= cap.max)
+    return res.status(409).json({
+      error: cap.next ? `${cap.max} gares au plus pour l'instant : le grade ${cap.next.rank} en permet ${cap.next.max}` : `${cap.max} gares au plus par compagnie`,
+    });
 
   const current = (await prisma.stationOwnership.findUnique({ where: { station }, include: { company: { select: { name: true } } } })) as
     | { station: string; companyId: string; invested: number; protectedUntil: Date; company: { name: string } }

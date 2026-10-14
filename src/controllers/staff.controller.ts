@@ -259,7 +259,7 @@ export async function assignCrew(req: AuthRequest, res: Response) {
   if (trainId) {
     const train = await prisma.train.findFirst({ where: { id: trainId, companyId: company.id }, select: { id: true, model: true } });
     if (!train) return res.status(404).json({ error: "Train introuvable" });
-    if (member.role === "CONTROLEUR" && train.model === "FRET_LOURD") return res.status(409).json({ error: "Pas de voyageurs à contrôler dans un train de fret" });
+    if (member.role === "CONTROLEUR" && ["LOCOTRACTEUR", "FRET_LOURD", "FRET_RAPIDE", "FRET_ELECTRIQUE"].includes(train.model)) return res.status(409).json({ error: "Pas de voyageurs à contrôler dans un train de fret" });
     await prisma.$transaction([
       prisma.staff.updateMany({ where: { companyId: company.id, role: member.role, trainId, id: { not: member.id } }, data: { trainId: null } }),
       prisma.staff.update({ where: { id: member.id }, data: { trainId } }),

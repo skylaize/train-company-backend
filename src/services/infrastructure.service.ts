@@ -131,6 +131,52 @@ export async function payStationIncome() {
   }
 }
 
+/* ---------------- 2.1 : double voie ----------------
+   Sur une voie unique, les trains se croisent en gare et s'attendent. La
+   double voie supprime ces attentes : trajets 7 % plus rapides, retards
+   moins fréquents (un train en retard ne bloque plus celui d'en face), et
+   le cadencement : chaque rame de plus sur la ligne attire 5 % de
+   voyageurs en plus, jusqu'à +15 %. Payée au kilomètre, perdue si l'on
+   change les gares de la ligne. */
+
+export const DOUBLE_PER_KM = 14;
+export const DOUBLE_MIN = 1200;
+export const DOUBLE_SPEED = 0.93;
+export const DOUBLE_DELAY = 0.6;
+export const DOUBLE_CADENCE_STEP = 0.05;
+export const DOUBLE_CADENCE_CAP = 0.15;
+
+export function doubleTrackCost(route: string[]) {
+  return Math.max(DOUBLE_MIN, Math.round((routeKmOf(route) * DOUBLE_PER_KM) / 10) * 10);
+}
+
+export function cadenceBonus(running: number) {
+  return 1 + Math.min(DOUBLE_CADENCE_CAP, DOUBLE_CADENCE_STEP * Math.max(0, running - 1));
+}
+
+/* ---------------- 2.1 : gares de triage ---------------- */
+
+export const YARD_COST = 4500;
+export const MAX_YARDS = 3;
+export const YARD_PAY = 1.12; // fret qui part d'une de vos gares de triage ou y arrive : +12 %
+export const YARD_TIME = 0.85; // et la tournée est 15 % plus courte
+
+export async function yardsByCompany(): Promise<Map<string, Set<string>>> {
+  const rows = (await prisma.yard.findMany({ select: { companyId: true, station: true } })) as { companyId: string; station: string }[];
+  const m = new Map<string, Set<string>>();
+  for (const r of rows) {
+    const set = m.get(r.companyId) ?? new Set<string>();
+    set.add(r.station);
+    m.set(r.companyId, set);
+  }
+  return m;
+}
+
+export async function yardsOf(companyId: string) {
+  const rows = (await prisma.yard.findMany({ where: { companyId }, select: { station: true } })) as { station: string }[];
+  return new Set(rows.map((r) => r.station));
+}
+
 /* ---------------- ateliers ---------------- */
 
 export const WORKSHOP_COST = 3000;

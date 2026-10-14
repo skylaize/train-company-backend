@@ -27,7 +27,10 @@ import { computeCareerStatus, careerTitles } from "./career.service";
    titres, eux, sont choisis dans une liste fermée pour la même raison.
    ============================================================ */
 
-export type ShopItemKind = "PASS" | "DLC" | "LIVREES" | "EMBLEMES" | "TITRES" | "THEME" | "CABINE" | "SAISON" | "SANS_PUB" | "COFFRET" | "PLAQUE";
+export type ShopItemKind =
+  | "PASS" | "DLC" | "LIVREES" | "EMBLEMES" | "TITRES" | "THEME" | "CABINE" | "SAISON" | "SANS_PUB" | "COFFRET" | "PLAQUE"
+  // 2.1
+  | "AFFICHE" | "PLAQUE_RAME" | "SONS" | "GARE" | "MUSEE" | "TENUES" | "ALLIANCE";
 
 export interface ShopItem {
   id: string;
@@ -49,6 +52,16 @@ export interface ShopItem {
   isNew?: boolean;
   // 1.7 : prix des pièces achetées séparément, pour afficher l'économie d'un coffret
   worthCents?: number;
+  // 2.1 : l'affiche du réseau (styles), les plaques des rames, les sons de gare,
+  // l'habillage de gare en vue cabine, le musée, les tenues du personnel,
+  // la livrée commune d'alliance
+  posters?: string[];
+  trainPlates?: string[];
+  sounds?: string[];
+  stationSkins?: string[];
+  museum?: boolean;
+  uniforms?: string[];
+  allianceLiveries?: string[];
   // 2.0 : extension de jeu (voir dlc.service)
   dlc?: { tagline: string; premium: boolean; features: string[]; models: { id: string; label: string; blurb: string }[]; stations: string[] };
 }
@@ -178,6 +191,121 @@ const ALL_ITEMS: ShopItem[] = [
     emblems: ["soleil"],
     season: "ete",
   },
+  // ---- 2.1 : l'atelier de prestige ----
+  {
+    id: "affiche-reseau",
+    kind: "AFFICHE",
+    name: "L'affiche de votre réseau",
+    description: "Votre réseau dessiné comme une affiche de chemin de fer : vos lignes, vos gares, le nom de votre compagnie. Trois styles (Belle Époque, Art déco, Moderne), en haute définition, à télécharger et partager autant que vous voulez.",
+    priceCents: 299,
+    posters: ["belle-epoque", "art-deco", "moderne"],
+    isNew: true,
+  },
+  {
+    id: "plaques-rames",
+    kind: "PLAQUE_RAME",
+    name: "Plaques nominatives",
+    description: "Le nom de chaque rame gravé sur une plaque, posée sur la caisse : laiton poli, émail bleu ou bois verni. Visible en vue cabine, au quai et sur la fiche de la rame.",
+    priceCents: 99,
+    trainPlates: ["laiton", "email", "bois"],
+    isNew: true,
+  },
+  {
+    id: "sons-gare",
+    kind: "SONS",
+    name: "Sons de gare",
+    description: "Trois ambiances pour les départs et les arrivées : le carillon des années 1930, le sifflet de la vapeur et la trompe d'une machine moderne. Composés pour le jeu.",
+    priceCents: 149,
+    sounds: ["carillon", "vapeur", "trompe"],
+    isNew: true,
+  },
+  {
+    id: "gare-belle-epoque",
+    kind: "GARE",
+    name: "Gare Belle Époque",
+    description: "En vue cabine, vos gares prennent des airs de 1900 : marquise en fer forgé, verrière, grande horloge à chiffres romains et réverbères.",
+    priceCents: 199,
+    stationSkins: ["belle-epoque"],
+    isNew: true,
+  },
+  {
+    id: "gare-beton",
+    kind: "GARE",
+    name: "Gare des années 70",
+    description: "En vue cabine, le béton brut, les auvents en porte-à-faux, l'horloge à palettes et les panneaux orange des années 1970.",
+    priceCents: 199,
+    stationSkins: ["beton"],
+  },
+  {
+    id: "gare-verriere",
+    kind: "GARE",
+    name: "Gare de verre",
+    description: "En vue cabine, une grande verrière contemporaine, des quais lumineux et un écran d'affichage. La nuit, toute la gare s'éclaire.",
+    priceCents: 199,
+    stationSkins: ["verriere"],
+  },
+  {
+    id: "coffret-musee",
+    kind: "MUSEE",
+    name: "Le Musée de la compagnie",
+    description: "Une salle d'exposition pour vos épaves restaurées : chaque rame sous les projecteurs, avec sa fiche historique, son numéro et ses années de service. Vos alliés peuvent la visiter.",
+    priceCents: 249,
+    museum: true,
+    emblems: ["musee"],
+    isNew: true,
+  },
+  {
+    id: "tenues-personnel",
+    kind: "TENUES",
+    name: "Tenues du personnel",
+    description: "Trois uniformes pour votre équipe : la casquette et la veste croisée des années 1930, le gilet orange des années 1970, la tenue moderne. Sur les fiches de votre personnel.",
+    priceCents: 149,
+    uniforms: ["1930", "1970", "moderne"],
+    isNew: true,
+  },
+  {
+    id: "coffret-alliance",
+    kind: "ALLIANCE",
+    name: "Coffret d'alliance",
+    description: "Une livrée commune pour toute votre alliance, filet doré compris : bordeaux, bleu pétrole ou violet nuit. Un seul membre l'achète, tous les membres peuvent la porter tant qu'ils sont dans l'alliance.",
+    priceCents: 399,
+    allianceLiveries: ["#7a1f2b", "#0f4c5c", "#3d2b56"],
+    isNew: true,
+  },
+  // ---- 2.1 : éditions limitées de boutique ----
+  {
+    id: "coffret-toussaint",
+    kind: "SAISON",
+    name: "Coffret de la Toussaint",
+    description: "Édition limitée : la livrée feuille morte, l'emblème de la châtaigne et le titre « Compagnie d'automne ». En vente pendant la Toussaint seulement.",
+    priceCents: 199,
+    liveries: ["#8a4b1f"],
+    emblems: ["chataigne"],
+    titles: ["Compagnie d'automne"],
+    season: "toussaint",
+  },
+  {
+    id: "coffret-nouvel-an",
+    kind: "SAISON",
+    name: "Coffret du Nouvel An",
+    description: "Édition limitée : la livrée minuit pailletée d'or, l'emblème du feu d'artifice et le titre « Premier train de l'année ». En vente au Nouvel An seulement.",
+    priceCents: 199,
+    liveries: ["#1b1f3b"],
+    emblems: ["artifice"],
+    titles: ["Premier train de l'année"],
+    season: "nouvel-an",
+  },
+  {
+    id: "coffret-saint-valentin",
+    kind: "SAISON",
+    name: "Coffret de la Saint-Valentin",
+    description: "Édition limitée : la livrée rouge passion, l'emblème du cœur et le titre « Train des amoureux ». En vente pendant la Saint-Valentin seulement.",
+    priceCents: 199,
+    liveries: ["#b23a48"],
+    emblems: ["coeur"],
+    titles: ["Train des amoureux"],
+    season: "saint-valentin",
+  },
   // ---- 1.7 ----
   {
     id: "coffret-belle-epoque",
@@ -291,7 +419,12 @@ const SINGLES: ShopItem[] = [
 
 // 1.7.1 : ces objets n'apparaissent qu'à la sortie de la 1.7.1 (src/release.ts)
 const ITEMS_171 = new Set(["coffret-belle-epoque", "coffret-grande-vitesse", "cabine-duplex", "plaques-honneur", "emblemes-atelier"]);
-export const SHOP_ITEMS: ShopItem[] = [...ALL_ITEMS.filter((i) => RELEASE_171 || !ITEMS_171.has(i.id)), ...SINGLES];
+/* 2.1 : l'atelier de prestige (affiche, plaques, sons, gares, musée, tenues,
+   coffret d'alliance) sort en 2.1.1, quand la vitrine saura le montrer.
+   Passer PRESTIGE_OPEN à true pour l'ouvrir. */
+export const PRESTIGE_OPEN = false;
+const PRESTIGE_KINDS = new Set(["AFFICHE", "PLAQUE_RAME", "SONS", "GARE", "MUSEE", "TENUES", "ALLIANCE"]);
+export const SHOP_ITEMS: ShopItem[] = [...ALL_ITEMS.filter((i) => (RELEASE_171 || !ITEMS_171.has(i.id)) && (PRESTIGE_OPEN || !PRESTIGE_KINDS.has(i.kind))), ...SINGLES];
 
 /* ============================================================
    La boutique du jour (2.0).
@@ -418,6 +551,14 @@ export async function unlockedFor(companyId: string) {
   const themes = new Set<string>(["sombre", "papier"]);
   const cabSkins = new Set<string>();
   const plates = new Set<string>();
+  // 2.1
+  const posters = new Set<string>();
+  const trainPlates = new Set<string>();
+  const sounds = new Set<string>();
+  const stationSkins = new Set<string>();
+  const uniforms = new Set<string>();
+  const allianceLiveries = new Set<string>();
+  let museum = false;
 
   // 2.0 : une extension incluse dans le Premium débloque aussi ses objets
   const dlcs = await ownedDlcs(companyId);
@@ -429,6 +570,20 @@ export async function unlockedFor(companyId: string) {
     if (item.theme) themes.add(item.theme);
     item.cabSkins?.forEach((c) => cabSkins.add(c));
     item.plates?.forEach((p) => plates.add(p));
+    item.posters?.forEach((p) => posters.add(p));
+    item.trainPlates?.forEach((p) => trainPlates.add(p));
+    item.sounds?.forEach((p) => sounds.add(p));
+    item.stationSkins?.forEach((p) => stationSkins.add(p));
+    item.uniforms?.forEach((p) => uniforms.add(p));
+    item.allianceLiveries?.forEach((p) => allianceLiveries.add(p.toLowerCase()));
+    if (item.museum) museum = true;
+  }
+  /* 2.1 : la livrée commune d'alliance, achetée par un membre, se porte par
+     tous les membres tant qu'ils sont dans l'alliance */
+  const member = await prisma.allianceMember.findUnique({ where: { companyId } }).catch(() => null);
+  if (member) {
+    const al = (await prisma.alliance.findUnique({ where: { id: member.allianceId }, select: { livery: true } }).catch(() => null)) as { livery?: string | null } | null;
+    if (al?.livery) liveries.add(al.livery.toLowerCase());
   }
 
   if ((company?.referralMilestone ?? 0) >= 5) titles.add(EARNED_SPONSOR_TITLE);
@@ -449,5 +604,5 @@ export async function unlockedFor(companyId: string) {
   // 1.4 : chaque grade à partir du Directeur régional donne son nom en titre
   careerTitles(career.currentRank.id).forEach((t) => titles.add(t));
 
-  return { owned, liveries, emblems, titles, themes, cabSkins, plates };
+  return { owned, liveries, emblems, titles, themes, cabSkins, plates, posters, trainPlates, sounds, stationSkins, uniforms, museum, allianceLiveries };
 }

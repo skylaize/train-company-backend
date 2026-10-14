@@ -120,7 +120,7 @@ function mergeHint(current: string, id: string) {
 }
 
 export async function updateCompany(req: AuthRequest, res: Response) {
-  const { name, liveryColor, tutorialSeen, theme, lastSeenVersion, seenHint, emblem, title, cabSkin, plate } = req.body;
+  const { name, liveryColor, tutorialSeen, theme, lastSeenVersion, seenHint, emblem, title, cabSkin, plate, soundPack, stationSkin, uniform } = req.body;
 
   const company = await prisma.company.findUnique({ where: { ownerId: req.userId as string } });
   if (!company) {
@@ -152,6 +152,16 @@ export async function updateCompany(req: AuthRequest, res: Response) {
   if (plate !== undefined && plate !== null && !unlocked.plates.has(String(plate))) {
     return res.status(403).json({ error: "Cette plaque n'est pas débloquée" });
   }
+  // 2.1 : sons de gare, habillage des gares, tenues du personnel
+  if (soundPack !== undefined && soundPack !== null && !unlocked.sounds.has(String(soundPack))) {
+    return res.status(403).json({ error: "Ces sons ne sont pas débloqués" });
+  }
+  if (stationSkin !== undefined && stationSkin !== null && !unlocked.stationSkins.has(String(stationSkin))) {
+    return res.status(403).json({ error: "Cet habillage de gare n'est pas débloqué" });
+  }
+  if (uniform !== undefined && uniform !== null && !unlocked.uniforms.has(String(uniform))) {
+    return res.status(403).json({ error: "Cette tenue n'est pas débloquée" });
+  }
   if (theme !== undefined && !unlocked.themes.has(String(theme))) {
     return res.status(403).json({ error: "Cet habillage n'est pas débloqué pour votre compagnie" });
   }
@@ -168,6 +178,9 @@ export async function updateCompany(req: AuthRequest, res: Response) {
       ...(title !== undefined ? { title: title === null ? null : String(title) } : {}),
       ...(cabSkin !== undefined ? { cabSkin: cabSkin === null ? null : String(cabSkin) } : {}),
       ...(plate !== undefined ? { plate: plate === null ? null : String(plate) } : {}),
+      ...(soundPack !== undefined ? { soundPack: soundPack === null ? null : String(soundPack) } : {}),
+      ...(stationSkin !== undefined ? { stationSkin: stationSkin === null ? null : String(stationSkin) } : {}),
+      ...(uniform !== undefined ? { uniform: uniform === null ? null : String(uniform) } : {}),
       ...(typeof lastSeenVersion === "string" && lastSeenVersion.length <= 20
         ? { lastSeenVersion }
         : {}),
@@ -238,11 +251,16 @@ export async function getMyCompany(req: AuthRequest, res: Response) {
   /* Ce que la compagnie a débloqué, en boutique ou en jeu. Livré avec la
      compagnie plutôt que par un appel à part : la livrée, l'habillage, l'emblème
      et le titre en ont tous besoin, et ils ne doivent pas se contredire. */
-  const [unlocked, staffFx] = await Promise.all([unlockedFor(company.id), staffEffectsFor(company.id)]);
+  const [unlocked, staffFx, yards] = await Promise.all([
+    unlockedFor(company.id),
+    staffEffectsFor(company.id),
+    prisma.yard.findMany({ where: { companyId: company.id }, select: { station: true } }) as Promise<{ station: string }[]>,
+  ]);
 
   return res.json({
     ...company,
     reputation,
+    yards: yards.map((y) => y.station), // 2.1 : gares de triage (vue cabine, tournées de fret)
     // prix d'un point de réparation, pour que le bouton annonce le vrai montant
     repairCostPerPoint: repairCostPerPoint(staffFx),
     unlocked: {
@@ -250,6 +268,13 @@ export async function getMyCompany(req: AuthRequest, res: Response) {
       emblems: [...unlocked.emblems],
       titles: [...unlocked.titles],
       liveries: [...unlocked.liveries],
+      // 2.1 : l'atelier de prestige
+      trainPlates: [...unlocked.trainPlates],
+      sounds: [...unlocked.sounds],
+      stationSkins: [...unlocked.stationSkins],
+      uniforms: [...unlocked.uniforms],
+      posters: [...unlocked.posters],
+      museum: unlocked.museum,
     },
     nextDepotCost: depotQuote?.cost ?? depotExpansionCost(company.maxTrains, company.isPremium),
     nextDepotHours: depotQuote?.hours ?? depotBuildHours(company.maxTrains),
