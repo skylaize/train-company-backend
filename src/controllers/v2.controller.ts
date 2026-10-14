@@ -12,6 +12,7 @@ import {
   allianceOfCompany, allianceRanking, cleanName, invalidateAlliances, pruneMessages,
 } from "../services/alliance.service";
 import { allStationCounts } from "../services/hub.service";
+import { sendToCompany } from "../services/push.service";
 
 /* ============================================================
    2.0 : saisons, alliances et Grand Chantier, vus par le joueur.
@@ -221,7 +222,6 @@ export async function inviteToAlliance(req: AuthRequest, res: Response) {
     create: { allianceId: alliance.id, companyId: target.id },
     update: {},
   });
-  const { sendToCompany } = await import("../services/push.service");
   await sendToCompany(target.id, { title: "Invitation d'alliance", body: `${company.name} vous invite à rejoindre ${alliance.name}.`, url: "/dashboard", tag: "alliance" }).catch(() => {});
   res.json({ ok: true, name: target.name });
 }
@@ -380,7 +380,6 @@ export async function applyToAlliance(req: AuthRequest, res: Response) {
   const pending = await prisma.allianceApplication.count({ where: { companyId: company.id } });
   if (pending >= APPLY_MAX_PENDING) return err(res, 409, `${APPLY_MAX_PENDING} candidatures en attente au plus. Retirez-en une d'abord.`);
   await prisma.allianceApplication.create({ data: { allianceId: alliance.id, companyId: company.id, message } });
-  const { sendToCompany } = await import("../services/push.service");
   await sendToCompany(alliance.founderId, { title: "Nouvelle candidature", body: `${company.name} veut rejoindre ${alliance.name}.`, url: "/dashboard", tag: "alliance" }).catch(() => {});
   res.json({ ok: true });
 }
@@ -402,7 +401,6 @@ export async function answerApplication(req: AuthRequest, res: Response) {
   const app = await prisma.allianceApplication.findFirst({ where: { id: req.params.id, allianceId: alliance.id } });
   if (!app) return err(res, 404, "Candidature introuvable, peut-être retirée");
   const applicant = await prisma.company.findUnique({ where: { id: app.companyId }, select: { id: true, name: true } });
-  const { sendToCompany } = await import("../services/push.service");
   if (req.body?.accept !== true) {
     await prisma.allianceApplication.delete({ where: { id: app.id } });
     if (applicant) await sendToCompany(applicant.id, { title: "Candidature refusée", body: `${alliance.name} n'a pas retenu votre candidature.`, url: "/dashboard", tag: "alliance" }).catch(() => {});
