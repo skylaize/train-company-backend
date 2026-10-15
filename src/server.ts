@@ -40,6 +40,13 @@ import { responseCache } from "./middleware/responseCache";
 import { handleStripeWebhook } from "./controllers/billing.controller";
 import { startSimulationJob } from "./jobs/simulation.job";
 
+/* Une promesse rejetée sans .catch() arrête Node par défaut : le conteneur
+   redémarrait alors en boucle (une base injoignable suffisait). On la
+   journalise clairement et le serveur reste debout. */
+process.on("unhandledRejection", (err) => {
+  console.error("[serveur] erreur non interceptée :", err instanceof Error ? err.message : err);
+});
+
 const app = express();
 
 // CORS entièrement ouvert : reflète l'origine de la requête (équivalent à "*" mais

@@ -1,5 +1,5 @@
-import { ActivityType, Client, Events, GatewayIntentBits, GuildMember, Options, Partials } from "discord.js";
-import { attachModLog } from "./discord-modlog.service";
+import { ActivityType, Client, Events, GatewayIntentBits, Guild, GuildMember, Options, Partials } from "discord.js";
+import { attachModLog, logArrival } from "./discord-modlog.service";
 import { prisma } from "../prisma";
 import { BOT_TOKEN, botEnabled, BRAND_COLOR, channelId, CHANNELS, esc, GUILD_ID, managedRoleIds, NOTIFY_ROLES, ROLES } from "./discord.service";
 import { syncUser } from "./discord-roles.service";
@@ -96,6 +96,26 @@ async function welcome(member: GuildMember) {
   if (user) void syncUser(user.id).catch(() => undefined);
 }
 
+/* Au démarrage : les membres arrivés pendant que le bot était hors ligne
+   (redémarrage, déploiement, panne) reçoivent leur bienvenue avec un peu de
+   retard. Les arrivées déjà accueillies sont reconnues et sautées. */
+const CATCH_UP_MS = 12 * 3_600_000;
+async function catchUpArrivals(guild: Guild) {
+  if (!client?.options.intents.has(GatewayIntentBits.GuildMembers)) return;
+  const members = await guild.members.fetch();
+  const missed = [...members.values()]
+    .filter((m) => !m.user.bot && m.joinedTimestamp && Date.now() - m.joinedTimestamp < CATCH_UP_MS)
+    .sort((a, b) => (a.joinedTimestamp ?? 0) - (b.joinedTimestamp ?? 0));
+  let n = 0;
+  for (const m of missed) {
+    if (await prisma.discordPost.findUnique({ where: { key: `bienvenue:${m.id}:${m.joinedTimestamp}` } })) continue;
+    await welcome(m);
+    await logArrival(m, true);
+    n++;
+  }
+  if (n) console.log(`[discord] ${n} arrivée(s) manquée(s) pendant l'arrêt du bot, accueillie(s) maintenant`);
+}
+
 /* Au démarrage : ce que le bot trouve sur le serveur, en clair dans les
    journaux de Coolify. C'est là qu'il faut regarder si rien ne s'affiche. */
 async function diagnose() {
@@ -158,6 +178,7 @@ export function startDiscordGateway(level = 0) {
     await setPresence();
     setInterval(() => void setPresence(), 10 * 60_000).unref();
     await diagnose();
+    if (guild) await catchUpArrivals(guild).catch((err) => console.error("[discord] rattrapage des arrivées :", (err as Error).message));
   });
 
   client.on(Events.GuildMemberAdd, (member) => {

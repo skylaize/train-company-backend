@@ -79,20 +79,25 @@ const since = (ms: number | null | undefined) => {
   return d < 1 ? "moins d'un jour" : `${d} jour${d > 1 ? "s" : ""}`;
 };
 
+/* Une arrivée dans le journal. `late` : rattrapée au démarrage du bot,
+   parce qu'elle a eu lieu pendant qu'il était hors ligne. */
+export async function logArrival(m: GuildMember, late = false) {
+  const fresh = Date.now() - m.user.createdTimestamp < 7 * 86_400_000;
+  await log(`arrivee:${m.id}:${m.joinedTimestamp}`, {
+    color: fresh ? COLORS.avertissement : COLORS.arrivee,
+    author: { name: `${m.user.tag} est arrivé`, icon_url: m.user.displayAvatarURL({ size: 64 }) },
+    description: `<@${m.id}> · ${m.guild.memberCount}e membre${late && m.joinedTimestamp ? ` · arrivé ${ts(m.joinedTimestamp)}, pendant un redémarrage du bot` : ""}`,
+    fields: [{ name: "Compte Discord créé", value: `${ts(m.user.createdTimestamp)}${fresh ? " ⚠️ compte récent" : ""}`, inline: true }],
+    footer: { text: `ID ${m.id}` },
+  });
+}
+
 export function attachModLog(client: Client, guildId: string) {
   const onError = (what: string) => (err: unknown) => console.error(`[discord] journal (${what}) :`, (err as Error).message);
 
   client.on("guildMemberAdd", (m) => {
     if (m.guild.id !== guildId) return;
-    const age = Date.now() - m.user.createdTimestamp;
-    const fresh = age < 7 * 86_400_000;
-    void log(`arrivee:${m.id}:${m.joinedTimestamp}`, {
-      color: fresh ? COLORS.avertissement : COLORS.arrivee,
-      author: { name: `${m.user.tag} est arrivé`, icon_url: m.user.displayAvatarURL({ size: 64 }) },
-      description: `<@${m.id}> · ${m.guild.memberCount}e membre`,
-      fields: [{ name: "Compte Discord créé", value: `${ts(m.user.createdTimestamp)}${fresh ? " ⚠️ compte récent" : ""}`, inline: true }],
-      footer: { text: `ID ${m.id}` },
-    }).catch(onError("arrivée"));
+    void logArrival(m).catch(onError("arrivée"));
   });
 
   client.on("guildMemberRemove", (m: GuildMember | PartialGuildMember) => {
