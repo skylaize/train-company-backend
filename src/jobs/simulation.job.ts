@@ -22,6 +22,9 @@ import { allStationCounts, hubMultiplier } from "../services/hub.service";
 import { runTenders } from "../services/tender.service";
 import { runDecisions, activeDecisionEffects, decisionMultiplier } from "../services/decision.service";
 import { isInternational, INTL_REVENUE_BONUS, TOLL_RATE } from "../services/international.service";
+import { runCustomAlerts } from "../services/alert.service";
+import { TRAIN_MODELS } from "../controllers/train.controller";
+import { isNightIntl, NIGHT_INTL_FARE, NIGHT_INTL_DAY, NIGHT_INTL_TOLL } from "../services/night.service";
 import { isNightService, NIGHT_MULTIPLIER, DAY_COUCHETTES_MULTIPLIER } from "../services/time.service";
 import { peakFactor, PEAK_HOURS } from "../services/peak.service";
 import { allianceMap, alliesOf, allyMultiplier } from "../services/alliance.service";
@@ -247,6 +250,8 @@ async function runSimulationTick() {
   if (tickCount % 4 === 0) {
     await runPremiumAlerts((id, t, b) => premiumNotify(id, t, b, "alerte")).catch((err) => console.error("[alertes] échec :", (err as Error).message));
   }
+  // 2.1.1 (Premium) : les alertes personnalisées
+  await runCustomAlerts((id, t, b) => premiumNotify(id, t, b, "alerte"), (m) => TRAIN_MODELS[m]?.cost ?? 200).catch((err) => console.error("[alertes perso] échec :", (err as Error).message));
   await runDividends().catch((err) => console.error("[dividendes] échec :", (err as Error).message));
   await runWeeklyReports(async (companyId, title, body) => {
     await sendToCompany(companyId, { title, body, url: "/dashboard", tag: "rapport" });
@@ -340,14 +345,33 @@ async function getReputationByCompany(): Promise<Map<string, Map<string, number>
   return byCompany;
 }
 
+/* 2.1.1 : une rame sans horaires roule tout le temps ; sinon de serviceFrom
+   (inclus) à serviceTo (exclu), en heures de Paris, la plage pouvant passer minuit */
+export function inServiceWindow(t: { serviceFrom?: number | null; serviceTo?: number | null }, h = parisHour()) {
+  if (t.serviceFrom == null || t.serviceTo == null || t.serviceFrom === t.serviceTo) return true;
+  return t.serviceFrom < t.serviceTo ? h >= t.serviceFrom && h < t.serviceTo : h >= t.serviceFrom || h < t.serviceTo;
+}
+
 async function getPremiumCompanyIds(): Promise<Set<string>> {
   const rows = await prisma.company.findMany({ where: { isPremium: true }, select: { id: true } });
   return new Set(rows.map((r) => r.id));
 }
 
 export async function runLineTrains(weather: Map<string, StationWeather> = new Map()) {
+  /* 2.1.1 (Premium) : les rames garées hors de leurs horaires repartent dès
+     que leur plage de service commence (ou si la compagnie n'est plus Premium) */
+  const premiumIds = await getPremiumCompanyIds();
+  const parked = (await prisma.train.findMany({
+    where: { status: "EN_ROUTE", lineId: { not: null }, departedAt: null },
+    select: { id: true, companyId: true, serviceFrom: true, serviceTo: true },
+  })) as { id: string; companyId: string; serviceFrom: number | null; serviceTo: number | null }[];
+  for (const p of parked) {
+    if (!premiumIds.has(p.companyId) || inServiceWindow(p)) {
+      await prisma.train.updateMany({ where: { id: p.id, status: "EN_ROUTE", departedAt: null }, data: { departedAt: new Date(), progress: 0 } });
+    }
+  }
   const runningTrains = await prisma.train.findMany({
-    where: { status: "EN_ROUTE", lineId: { not: null } },
+    where: { status: "EN_ROUTE", lineId: { not: null }, departedAt: { not: null } },
     include: { line: true },
   });
   const staffEffects = await staffEffectsByCompany();
@@ -521,8 +545,14 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
       /* 1.6 — la rame couchettes : moins confortable qu'une voiture assise le
          jour, mais c'est elle que les voyageurs de nuit paient cher. */
       const couchettes = train.model === "COUCHETTES";
-      const nightTrip = couchettes && night;
-      const nightMultiplier = couchettes ? (night ? NIGHT_MULTIPLIER : DAY_COUCHETTES_MULTIPLIER) : 1;
+      // 2.1.1 : le train de nuit international, voitures-lits au billet plus cher
+      const nightIntl = isNightIntl(train.model);
+      const nightTrip = (couchettes || nightIntl) && night;
+      const nightMultiplier = couchettes
+        ? night ? NIGHT_MULTIPLIER : DAY_COUCHETTES_MULTIPLIER
+        : nightIntl
+        ? night ? NIGHT_MULTIPLIER * NIGHT_INTL_FARE : NIGHT_INTL_DAY
+        : 1;
       // 1.6 — une ligne qui passe la frontière rapporte plus, péage déduit à part
       const international = route.some(isInternational);
       const revenue = Math.round(
@@ -555,12 +585,21 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
       const platformFees = infra.fees.reduce((a, f) => a + f.amount, 0);
       for (const f of infra.fees) owe(f.station, "fees", f.amount);
       for (const sh of infra.shops) owe(sh.station, "shops", sh.amount);
-      const toll = international ? Math.round(revenue * TOLL_RATE) : 0;
+      // 2.1.1 : le sillon de nuit d'un train de nuit international coûte moitié moins
+      const toll = international ? Math.round(revenue * TOLL_RATE * (nightIntl && night ? NIGHT_INTL_TOLL : 1)) : 0;
       const ops: any[] = [
         prisma.train.updateMany({
           where: { id: train.id, status: "EN_ROUTE", workshopUntil: null },
           // 1.7 : la rame repart dans l'autre sens
-          data: { progress: 0, departedAt: new Date(), wear: newWear, direction: (trainX.direction ?? 0) === 0 ? 1 : 0, lastPassengers: load.passengers, lastSeats: load.seats },
+          // 2.1.1 : hors de ses horaires (Premium), la rame se gare au terminus au lieu de repartir
+          data: {
+            progress: 0,
+            departedAt: premiumIds.has(train.companyId) && !inServiceWindow(train as { serviceFrom?: number | null; serviceTo?: number | null }) ? null : new Date(),
+            wear: newWear,
+            direction: (trainX.direction ?? 0) === 0 ? 1 : 0,
+            lastPassengers: load.passengers,
+            lastSeats: load.seats,
+          },
         }),
         prisma.company.update({
           where: { id: train.companyId },

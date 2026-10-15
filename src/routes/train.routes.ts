@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth.middleware";
-import { buyTrain, assignTrainToLine, releaseTrain, renameTrain, repairTrain, listMyTrains, changeCars, setServicePlan, getParts, buyParts, sellTrain, setTrainPlate } from "../controllers/train.controller";
+import { buyTrain, assignTrainToLine, releaseTrain, renameTrain, repairTrain, listMyTrains, changeCars, setServicePlan, getParts, buyParts, sellTrain, setTrainPlate, trainResale, setTrainSchedule } from "../controllers/train.controller";
 
 export const trainRouter = Router();
 
@@ -17,3 +17,6 @@ trainRouter.post("/trains/service-plan", requireAuth, setServicePlan);
 trainRouter.get("/trains/parts", requireAuth, getParts);
 trainRouter.post("/trains/parts", requireAuth, buyParts);
 trainRouter.post("/trains/sell", requireAuth, sellTrain);
+// 2.1.1 (Premium)
+trainRouter.get("/trains/:id/resale", requireAuth, trainResale);
+trainRouter.post("/trains/schedule", requireAuth, setTrainSchedule);

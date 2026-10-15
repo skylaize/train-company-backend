@@ -178,14 +178,60 @@ export const RESALE_START = 0.65; // une rame neuve se revend 65 % de son prix
 export const RESALE_FLOOR = 0.3;
 export const RESALE_LOSS_PER_DAY = 0.01;
 
-export function resaleValue(t: { model: string; wear: number; cars?: string[] | null; purchasedAt: Date | string; brokenPart?: string | null }, modelCost: number) {
-  const ageDays = Math.max(0, (Date.now() - new Date(t.purchasedAt).getTime()) / 86_400_000);
+/* 2.1.1 : la cote de l'occasion. Le prix de reprise d'un modèle monte et
+   descend d'un jour à l'autre (de −15 % à +15 % environ) : une vague lente
+   propre à chaque modèle, plus un peu de bruit. Elle est calculée à partir
+   de la date, la même pour tout le monde, et se lit donc aussi bien hier que
+   demain : c'est ce qui permet au Premium de voir l'historique et le
+   meilleur jour pour revendre. */
+const DAY_MS = 86_400_000;
+const PARIS_OFFSET_MS = 2 * 3600_000; // un jour de cote commence vers minuit à Paris
+export const dayIndex = (at: Date) => Math.floor((at.getTime() + PARIS_OFFSET_MS) / DAY_MS);
+function hashStr(s: string) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
+  return h >>> 0;
+}
+export function resaleCote(model: string, at: Date = new Date()) {
+  const d = dayIndex(at);
+  const h = hashStr(model);
+  const period = 8 + (h % 6); // une vague de 8 à 13 jours
+  const phase = ((h >> 4) % 1000) / 1000;
+  const wave = Math.sin(2 * Math.PI * (d / period + phase)) * 0.11;
+  const noise = ((hashStr(model + ":" + d) % 1000) / 1000 - 0.5) * 0.08;
+  return Math.round((1 + wave + noise) * 1000) / 1000;
+}
+
+export function resaleValue(t: { model: string; wear: number; cars?: string[] | null; purchasedAt: Date | string; brokenPart?: string | null }, modelCost: number, at: Date = new Date()) {
+  const ageDays = Math.max(0, (at.getTime() - new Date(t.purchasedAt).getTime()) / 86_400_000);
   const share = Math.max(RESALE_FLOOR, RESALE_START - RESALE_LOSS_PER_DAY * ageDays);
   const condition = 1 - Math.min(100, t.wear) / 250; // une rame à 100 % perd encore 40 %
   const broken = t.brokenPart ? 0.85 : 1;
   // 2.1 : les wagons de fret se reprennent aussi à moitié prix
   const cars = (t.cars ?? []).reduce((n, c) => n + Math.floor((CARS[c]?.price ?? WAGONS[c as WagonId]?.price ?? 0) / 2), 0);
-  return Math.max(10, Math.round(modelCost * share * condition * broken) + cars);
+  return Math.max(10, Math.round(modelCost * share * condition * broken * resaleCote(t.model, at)) + cars);
+}
+
+/* 2.1.1 (Premium) : la valeur de reprise des 14 derniers jours et des 7
+   prochains, à usure égale, et le meilleur jour pour revendre. */
+export function resaleOutlook(t: Parameters<typeof resaleValue>[0], modelCost: number, now = new Date()) {
+  const day = (k: number) => new Date(now.getTime() + k * DAY_MS);
+  const point = (k: number) => ({ date: day(k).toISOString(), value: resaleValue(t, modelCost, day(k)), cote: resaleCote(t.model, day(k)) });
+  const history = Array.from({ length: 14 }, (_, i) => point(i - 13));
+  const forecast = Array.from({ length: 7 }, (_, i) => point(i + 1));
+  const today = history[history.length - 1];
+  const best = forecast.reduce((b, p) => (p.value > b.value ? p : b), today);
+  const high14 = Math.max(...history.map((p) => p.value));
+  return {
+    history,
+    forecast,
+    today: today.value,
+    cote: today.cote,
+    best: best === today ? null : { date: best.date, value: best.value, gain: best.value - today.value },
+    // aujourd'hui est le meilleur jour de la semaine qui vient, et au plus haut des 14 derniers jours
+    sellNow: best === today,
+    high14: today.value >= high14,
+  };
 }
 
 /* ---------- le passage régulier : sorties d'atelier et livraisons ---------- */

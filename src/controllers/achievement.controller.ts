@@ -192,6 +192,8 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     prisma.yard.count({ where: { companyId: company.id } }),
   ])) as [{ _count: { trains: number } }[], number];
   const doubled21 = doubledLines21.length;
+  // 2.1.1 : trains de nuit internationaux
+  const nightIntl211 = (await prisma.train.findMany({ where: { companyId: company.id, model: "NUIT_EUROPE" }, select: { lineId: true } })) as { lineId: string | null }[];
   const cadenced21 = doubledLines21.some((l) => l._count.trains >= 3);
   // 1.7 : itinéraires, composition, infrastructures, finances
   const [lines17, trains17, stationsOwned, electrified, workshopsOpen, loansRepaid, dividends] = (await Promise.all([
@@ -835,6 +837,9 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     { id: "voie-double", name: "Voie double", description: "Poser la deuxième voie sur une ligne", liveMet: doubled21 >= 1 },
     { id: "cadencement", name: "Cadencement", description: "Faire rouler trois rames sur une même ligne à double voie", liveMet: cadenced21 },
     { id: "bosse-de-triage", name: "Bosse de triage", description: "Ouvrir une gare de triage", liveMet: yards21 >= 1 },
+    // ---- 2.1.1 : trains de nuit internationaux ----
+    { id: "wagons-lits", name: "Wagons-lits", description: "Mettre en ligne un train de nuit international", liveMet: nightIntl211.some((t) => t.lineId) },
+    { id: "nuits-d-europe", name: "Nuits d'Europe", description: "Faire rouler trois trains de nuit internationaux", liveMet: nightIntl211.filter((t) => t.lineId).length >= 3 },
   ];
 
   /* 1.6 : « Premiers pas » récompense la liste de départ au complet. Chaque étape

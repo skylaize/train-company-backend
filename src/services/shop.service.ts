@@ -422,7 +422,7 @@ const ITEMS_171 = new Set(["coffret-belle-epoque", "coffret-grande-vitesse", "ca
 /* 2.1 : l'atelier de prestige (affiche, plaques, sons, gares, musée, tenues,
    coffret d'alliance) sort en 2.1.1, quand la vitrine saura le montrer.
    Passer PRESTIGE_OPEN à true pour l'ouvrir. */
-export const PRESTIGE_OPEN = false;
+export const PRESTIGE_OPEN = true;
 const PRESTIGE_KINDS = new Set(["AFFICHE", "PLAQUE_RAME", "SONS", "GARE", "MUSEE", "TENUES", "ALLIANCE"]);
 export const SHOP_ITEMS: ShopItem[] = [...ALL_ITEMS.filter((i) => (RELEASE_171 || !ITEMS_171.has(i.id)) && (PRESTIGE_OPEN || !PRESTIGE_KINDS.has(i.kind))), ...SINGLES];
 

@@ -1,4 +1,5 @@
 import { lineRidership, RidershipLine } from "../services/pricing.service";
+import { NIGHT_INTL_MODEL, nightIntlLineError } from "../services/night.service";
 import { activeStationEvents, competitionMap } from "../services/station.service";
 import { seasonalStationEvents } from "../services/season.service";
 import { Response } from "express";
@@ -153,6 +154,11 @@ export async function updateLine(req: AuthRequest, res: Response) {
   const couchettes = await prisma.train.count({ where: { lineId, model: "COUCHETTES" } });
   if (couchettes > 0 && nextDuration < NIGHT_MIN_DURATION) {
     return res.status(409).json({ error: `Une rame couchettes roule sur cette ligne : elle doit garder au moins ${NIGHT_MIN_DURATION} min de trajet` });
+  }
+  // 2.1.1 : un train de nuit international garde une ligne qui passe une frontière
+  if ((await prisma.train.count({ where: { lineId, model: NIGHT_INTL_MODEL } })) > 0) {
+    const why = nightIntlLineError(route, nextDuration, NIGHT_MIN_DURATION);
+    if (why) return res.status(409).json({ error: `Un train de nuit international roule sur cette ligne. ${why}` });
   }
 
   const updated = await prisma.line.update({

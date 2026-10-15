@@ -10,9 +10,11 @@ import { staffEffectsFor, repairCostPerPoint } from "../services/staff.service";
 import { buildLeaderRows } from "../services/leaderboard.service";
 import { RANK_DEFINITIONS } from "../services/career.service";
 import { DLC_MODELS, ownedDlcs, dlcById } from "../services/dlc.service";
+import { NIGHT_INTL_COST, NIGHT_INTL_MIN_GRADE, isNightIntl, nightIntlLineError } from "../services/night.service";
+import { routeOf } from "../services/route.service";
 import {
   ORGANS, Organ, PARTS, RepairMode, EXPRESS_MIN, SERVICE_DISCOUNT, SERVICE_THRESHOLDS,
-  freshBias, organWear, readStock, stockLimit, takeFromStock, partPrice, partDelayMs, serviceMinutes, backInService, resaleValue,
+  freshBias, organWear, readStock, stockLimit, takeFromStock, partPrice, partDelayMs, serviceMinutes, backInService, resaleValue, resaleOutlook,
 } from "../services/workshop.service";
 
 async function getOwnedCompanyOrFail(userId: string) {
@@ -32,6 +34,7 @@ export const TRAIN_MODELS: Record<string, { cost: number; minGradeId: number; dl
   FRET_RAPIDE: { cost: 900, minGradeId: 2 }, // Chef de réseau
   FRET_ELECTRIQUE: { cost: 1800, minGradeId: 4 }, // Magnat ferroviaire
   COUCHETTES: { cost: 900, minGradeId: 2 }, // Chef de réseau (1.6) : train de nuit
+  NUIT_EUROPE: { cost: NIGHT_INTL_COST, minGradeId: NIGHT_INTL_MIN_GRADE }, // 2.1.1 : train de nuit international (licence demandée)
   // 2.0 : le matériel des extensions (dlc.service)
   ...Object.fromEntries(Object.values(DLC_MODELS).map((m) => [m.id, { cost: m.cost, minGradeId: m.minGradeId, dlc: m.dlc }])),
 };
@@ -59,6 +62,11 @@ export async function buyTrain(req: AuthRequest, res: Response) {
   const company = await getOwnedCompanyOrFail(req.userId as string);
   if (!company) {
     return res.status(404).json({ error: "Créez d'abord votre compagnie" });
+  }
+
+  // 2.1.1 : le train de nuit international demande la licence internationale
+  if (isNightIntl(chosenModel) && !(company as { intlLicenceAt?: Date | null }).intlLicenceAt) {
+    return res.status(403).json({ error: "Le train de nuit international demande la licence internationale" });
   }
 
   if (dlc && !(await ownedDlcs(company.id)).has(dlc)) {
@@ -136,6 +144,10 @@ export async function assignTrainToLine(req: AuthRequest, res: Response) {
   }
   if (train.workshopUntil || train.partsEta) {
     return res.status(409).json({ error: "Cette rame est à l'atelier" });
+  }
+  if (isNightIntl(train.model)) {
+    const why = nightIntlLineError(routeOf(line as { departureStation: string; arrivalStation: string; stops?: string[] }), line.durationMinutes, NIGHT_MIN_DURATION);
+    if (why) return res.status(409).json({ error: why });
   }
   if (train.model === "COUCHETTES" && line.durationMinutes < NIGHT_MIN_DURATION) {
     return res.status(409).json({ error: `Une rame couchettes ne fait que les grandes lignes (${NIGHT_MIN_DURATION} min de trajet ou plus)` });
@@ -435,6 +447,17 @@ export async function sellTrain(req: AuthRequest, res: Response) {
   return res.json({ ok: true, value });
 }
 
+/* 2.1.1 (Premium) : la cote de la rame, ses 14 derniers jours et le meilleur jour de la semaine pour la revendre */
+export async function trainResale(req: AuthRequest, res: Response) {
+  const company = await getOwnedCompanyOrFail(req.userId as string);
+  if (!company) return res.status(404).json({ error: "Créez d'abord votre compagnie" });
+  if (!company.isPremium) return res.status(403).json({ error: "La cote de revente est réservée au Premium" });
+  const train = await prisma.train.findFirst({ where: { id: String(req.params.id), companyId: company.id } });
+  if (!train) return res.status(404).json({ error: "Train introuvable" });
+  if (heritageOf(train)) return res.json({ heritage: true, today: trainValue(train) });
+  return res.json(resaleOutlook(train, TRAIN_MODELS[train.model]?.cost ?? 200));
+}
+
 export async function renameTrain(req: AuthRequest, res: Response) {
   const { trainId, name } = req.body;
 
@@ -534,4 +557,24 @@ export async function setTrainPlate(req: AuthRequest, res: Response) {
   }
   await prisma.train.update({ where: { id: train.id }, data: { plateStyle: style } });
   res.json({ ok: true, plateStyle: style });
+}
+
+/* 2.1.1 (Premium) : les horaires d'une rame. Hors de sa plage, elle finit
+   son trajet et se gare au terminus ; elle repart à l'heure de reprise. */
+export async function setTrainSchedule(req: AuthRequest, res: Response) {
+  const { trainId, from, to } = req.body ?? {};
+  const company = await getOwnedCompanyOrFail(req.userId as string);
+  if (!company) return res.status(404).json({ error: "Créez d'abord votre compagnie" });
+  if (!company.isPremium) return res.status(403).json({ error: "Les horaires par rame sont réservés au Premium" });
+  const train = await prisma.train.findFirst({ where: { id: String(trainId ?? ""), companyId: company.id } });
+  if (!train) return res.status(404).json({ error: "Train introuvable" });
+  if (from === null || to === null) {
+    await prisma.train.update({ where: { id: train.id }, data: { serviceFrom: null, serviceTo: null } });
+    return res.json({ ok: true, serviceFrom: null, serviceTo: null });
+  }
+  const f = Number(from), t = Number(to);
+  if (!Number.isInteger(f) || !Number.isInteger(t) || f < 0 || f > 23 || t < 0 || t > 23) return res.status(400).json({ error: "Heures de 0 à 23" });
+  if (f === t) return res.status(400).json({ error: "L'heure de reprise et l'heure de fin doivent être différentes" });
+  await prisma.train.update({ where: { id: train.id }, data: { serviceFrom: f, serviceTo: t } });
+  return res.json({ ok: true, serviceFrom: f, serviceTo: t });
 }

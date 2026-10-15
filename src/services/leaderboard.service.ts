@@ -14,6 +14,7 @@ const TRAIN_VALUE: Record<string, number> = {
   FRET_RAPIDE: 900,
   FRET_ELECTRIQUE: 1800,
   COUCHETTES: 900,
+  NUIT_EUROPE: 2400,
   // 2.0 : extensions
   VAPEUR: 600,
   LUXE: 1600,

@@ -113,6 +113,7 @@ model Company {
   // 1.7 : infrastructures, emprunts, bourse
   stationsOwned StationOwnership[]
   workshops    Workshop[]
+  customAlerts CustomAlert[] // 2.1.1 (Premium)
   yards        Yard[]       // 2.1 : gares de triage
   loans        Loan[]
   holdings     Shareholding[] @relation("Holder")
@@ -349,6 +350,9 @@ enum TrainStatus {
 model Train {
   id           String      @id @default(uuid())
   name         String
+  // 2.1.1 (Premium) : horaires de service de la rame, en heures de Paris (de serviceFrom à serviceTo, minuit possible)
+  serviceFrom  Int?
+  serviceTo    Int?
   model        String      @default("STANDARD") // STANDARD | EXPRESS | FRET_LOURD | COUCHETTES (1.6)
   status       TrainStatus @default(IDLE)
 
@@ -658,6 +662,24 @@ model StationOwnership {
 
   company        Company  @relation(fields: [companyId], references: [id])
   companyId      String
+}
+
+// 2.1.1 (Premium) : alerte personnalisée — TRESORERIE, USURE, FRET, REVENTE, avec son seuil
+model CustomAlert {
+  id        String    @id @default(uuid())
+  kind      String
+  threshold Float
+  targetId  String?   // la rame visée (REVENTE)
+  active    Boolean   @default(false) // la condition est vraie en ce moment (déclenchement sur front montant)
+  lastKey   String?   // ce qui l'a déclenchée (rames, contrat) : un changement la redéclenche
+  firedAt   DateTime?
+  message   String?
+  createdAt DateTime  @default(now())
+
+  company   Company   @relation(fields: [companyId], references: [id])
+  companyId String
+
+  @@index([companyId])
 }
 
 // 2.1 : gare de triage — le fret qui en part ou y arrive est trié plus vite et payé un peu plus

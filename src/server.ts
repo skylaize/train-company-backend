@@ -30,6 +30,7 @@ import { reportRouter } from "./routes/report.routes";
 import { tenderRouter } from "./routes/tender.routes";
 import { decisionRouter } from "./routes/decision.routes";
 import { infrastructureRouter } from "./routes/infrastructure.routes";
+import { alertRouter } from "./routes/alert.routes"; // 2.1.1
 import { financeRouter } from "./routes/finance.routes";
 import { v2Router } from "./routes/v2.routes";
 import { discordRouter } from "./routes/discord.routes";
@@ -82,6 +83,7 @@ app.use("/api", pushRouter);
 app.use("/api", shopRouter);
 app.use("/api", reportRouter);
 app.use("/api", infrastructureRouter);
+app.use("/api", alertRouter);
 app.use("/api", financeRouter);
 app.use("/api", v2Router);
 app.use("/api", discordRouter);
