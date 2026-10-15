@@ -437,7 +437,9 @@ export const SHOP_ITEMS: ShopItem[] = [...ALL_ITEMS.filter((i) => (RELEASE_171 |
    billet sans pub, et les éditions limitées pendant leur temps fort.
    ============================================================ */
 const BIG_KINDS = new Set(["COFFRET", "CABINE", "THEME", "PLAQUE", "EMBLEMES"]);
-export const ROTATING = SHOP_ITEMS.filter((i) => i.kind !== "DLC" && i.kind !== "SAISON");
+/* 2.1.1 : l'atelier de prestige ne tourne pas : il reste en vente tout le temps,
+   dans sa propre section (sinon on ne le voyait qu'un jour de temps en temps) */
+export const ROTATING = SHOP_ITEMS.filter((i) => i.kind !== "DLC" && i.kind !== "SAISON" && !PRESTIGE_KINDS.has(i.kind));
 const FEATURED_POOL = ROTATING.filter((i) => BIG_KINDS.has(i.kind) || (i.liveries?.length ?? 0) > 1 || (i.titles?.length ?? 0) > 1);
 export const FEATURED_COUNT = 2;
 export const DAILY_COUNT = 6;
