@@ -514,6 +514,49 @@ export async function hasAdFree(companyId: string) {
   return Boolean(row);
 }
 
+/* ============================================================
+   2.1 — Les exclusivités Discord.
+
+   Jamais en vente, jamais dans la boutique du jour, impossibles à offrir par
+   Stripe : seul le staff les accorde, avec /donner ou un /giveaway sur le
+   serveur Discord. Leur rareté fait leur valeur, et elles ne coûtent aucune
+   vente. Elles sont enregistrées comme un achat à 0 € (ShopPurchase), ce qui
+   leur donne le déballage et la vérification serveur des autres objets.
+   ============================================================ */
+export const DISCORD_LIVERY = "#5865f2";
+export const DISCORD_ITEMS: ShopItem[] = [
+  {
+    id: "discord-livree",
+    kind: "LIVREES",
+    name: "Livrée « Salon Discord »",
+    description: "Exclusivité Discord : une livrée bleu salon pour toutes vos rames. Jamais vendue en boutique.",
+    priceCents: 0,
+    liveries: [DISCORD_LIVERY],
+  },
+  {
+    id: "discord-titre",
+    kind: "TITRES",
+    name: "Titre « Ambassadeur du réseau »",
+    description: "Exclusivité Discord : un titre à afficher au classement. Jamais vendu en boutique.",
+    priceCents: 0,
+    titles: ["Ambassadeur du réseau"],
+  },
+  {
+    id: "discord-embleme",
+    kind: "EMBLEMES",
+    name: "Emblème « Porte-voix »",
+    description: "Exclusivité Discord : le porte-voix du chef de quai, devant le nom de votre compagnie. Jamais vendu en boutique.",
+    priceCents: 0,
+    emblems: ["porte-voix"],
+  },
+];
+export const findDiscordItem = (id: string) => DISCORD_ITEMS.find((i) => i.id === id) ?? null;
+
+/* Tout objet connu, exclusivités comprises : pour le déballage, jamais pour un paiement. */
+export function findAnyItem(id: string) {
+  return findItem(id) ?? findDiscordItem(id);
+}
+
 export function findItem(id: string) {
   if (id === AD_FREE_ITEM_ID) return RELEASE_171 ? AD_FREE_ITEM : null;
   // 2.0 : un pass de saison (sa saison est vérifiée au moment du paiement)
@@ -562,7 +605,7 @@ export async function unlockedFor(companyId: string) {
 
   // 2.0 : une extension incluse dans le Premium débloque aussi ses objets
   const dlcs = await ownedDlcs(companyId);
-  for (const item of SHOP_ITEMS) {
+  for (const item of [...SHOP_ITEMS, ...DISCORD_ITEMS]) {
     if (!owned.has(item.id) && !dlcs.has(item.id)) continue;
     item.liveries?.forEach((c) => liveries.add(c.toLowerCase()));
     item.emblems?.forEach((e) => emblems.add(e));

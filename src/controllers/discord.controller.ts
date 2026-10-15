@@ -5,7 +5,9 @@ import { prisma } from "../prisma";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { APP_ID, botEnabled, BRAND_COLOR, Embed, esc, fmt, GUILD_ID, PUBLIC_KEY, rest } from "../services/discord.service";
 import { clearRoles, syncUser } from "../services/discord-roles.service";
-import { logAccount } from "../services/discord-modlog.service";
+import { logAccount, logStaff } from "../services/discord-modlog.service";
+import { companyForDiscord, grantPrize, MAX_GIFT_COINS, parsePrize, PRIZE_CHOICES } from "../services/gift.service";
+import { createGiveaway, findGiveaway, finishGiveaway, MAX_DURATION_MS, MAX_WINNERS, MIN_DURATION_MS, parseDuration, rerollGiveaway, toggleEntry } from "../services/giveaway.service";
 import { BOARDS, BoardId, buildLeaderRows, rankRows } from "../services/leaderboard.service";
 import { allianceRanking, ALLIANCE_MAX } from "../services/alliance.service";
 import { currentSeason, DIVISIONS } from "../services/saison.service";
@@ -125,6 +127,20 @@ export async function forgetDiscord(userId: string) {
 
 /* ---------------- commandes slash ---------------- */
 
+/* Le staff : Administrateur, ou « Exclure temporairement des membres » (le
+   rôle 🛡️ Modérateur du script de mise en place l'a). */
+const PERM_ADMIN = 1n << 3n;
+const PERM_MODERATE = 1n << 40n;
+const STAFF_PERMISSION = String(PERM_MODERATE);
+function isStaff(permissions: string | undefined) {
+  try {
+    const p = BigInt(permissions ?? "0");
+    return (p & PERM_ADMIN) !== 0n || (p & PERM_MODERATE) !== 0n;
+  } catch {
+    return false;
+  }
+}
+
 const BOARD_CHOICES = [
   ...BOARDS.map((b) => ({ name: b.label, value: b.id })),
   { name: "Saison", value: "saison" },
@@ -148,6 +164,51 @@ export const COMMANDS = [
     options: [{ type: 3, name: "nom", description: "Le nom de l'alliance (la vôtre par défaut)", required: false }],
   },
   { name: "lier", description: "Lier votre compte Réseau à Discord pour recevoir vos rôles" },
+  // 2.1 : réservées au staff (Discord les masque aux autres ; vérifié aussi ici)
+  {
+    name: "donner",
+    description: "Staff : offrir des pièces ou une exclusivité Discord à un joueur",
+    default_member_permissions: STAFF_PERMISSION,
+    dm_permission: false,
+    options: [
+      { type: 6, name: "joueur", description: "Le joueur (compte Réseau lié)", required: true },
+      { type: 3, name: "lot", description: "Ce qui est offert", required: true, choices: PRIZE_CHOICES },
+      { type: 4, name: "montant", description: "Nombre de pièces (si le lot est « Pièces »)", required: false, min_value: 1, max_value: MAX_GIFT_COINS },
+      { type: 3, name: "raison", description: "Affichée au joueur et dans #logs", required: false, max_length: 100 },
+    ],
+  },
+  {
+    name: "giveaway",
+    description: "Staff : lancer et gérer les giveaways",
+    default_member_permissions: STAFF_PERMISSION,
+    dm_permission: false,
+    options: [
+      {
+        type: 1,
+        name: "lancer",
+        description: "Lancer un giveaway avec un bouton Participer",
+        options: [
+          { type: 3, name: "lot", description: "Ce qui est à gagner", required: true, choices: PRIZE_CHOICES },
+          { type: 3, name: "duree", description: "Durée : 30m, 12h, 2j, 1semaine…", required: true },
+          { type: 4, name: "gagnants", description: "Nombre de gagnants (1 par défaut)", required: false, min_value: 1, max_value: MAX_WINNERS },
+          { type: 4, name: "montant", description: "Pièces par gagnant (si le lot est « Pièces »)", required: false, min_value: 1, max_value: MAX_GIFT_COINS },
+          { type: 7, name: "salon", description: "Où le poster (ce salon par défaut)", required: false, channel_types: [0, 5] },
+        ],
+      },
+      {
+        type: 1,
+        name: "terminer",
+        description: "Tirer au sort tout de suite",
+        options: [{ type: 3, name: "giveaway", description: "Code du giveaway (pied du message) ou lien du message ; le dernier par défaut", required: false }],
+      },
+      {
+        type: 1,
+        name: "relancer",
+        description: "Tirer un gagnant de plus (si un gagnant ne répond pas)",
+        options: [{ type: 3, name: "giveaway", description: "Code du giveaway (pied du message) ou lien du message ; le dernier par défaut", required: false }],
+      },
+    ],
+  },
 ];
 
 /* Au démarrage : déclare les commandes sur le serveur (remplace l'ancienne
@@ -185,11 +246,18 @@ export function verifyDiscordSignature(body: Buffer, signature: string, timestam
   }
 }
 
+type InteractionOption = { name: string; type?: number; value?: string | number; options?: InteractionOption[] };
 type Interaction = {
   type: number;
   token: string;
-  data?: { name: string; options?: { name: string; value: string }[]; resolved?: { users?: Record<string, { username: string; global_name?: string | null }> } };
-  member?: { user: { id: string } };
+  channel_id?: string;
+  data?: {
+    name: string;
+    custom_id?: string;
+    options?: InteractionOption[];
+    resolved?: { users?: Record<string, { username: string; global_name?: string | null }> };
+  };
+  member?: { user: { id: string }; permissions?: string };
   user?: { id: string };
 };
 
@@ -202,9 +270,42 @@ export async function discordInteractions(req: Request, res: Response) {
   const i = JSON.parse(body.toString("utf8")) as Interaction;
   if (i.type === 1) return res.json({ type: 1 }); // PING de vérification
 
-  if (i.type !== 2 || !i.data) return res.status(400).end();
   const callerId = i.member?.user.id ?? i.user?.id ?? "";
-  const opt = (name: string) => i.data?.options?.find((o) => o.name === name)?.value;
+
+  // 2.1 : bouton « Participer » d'un giveaway
+  if (i.type === 3 && i.data?.custom_id?.startsWith("giveaway:")) {
+    const content = await toggleEntry(i.data.custom_id.slice("giveaway:".length), callerId).catch((err) => {
+      console.error("[giveaway] participation :", (err as Error).message);
+      return "Le réseau ne répond pas, réessaie dans un instant.";
+    });
+    return res.json({ type: 4, data: { flags: 64, content } });
+  }
+
+  if (i.type !== 2 || !i.data) return res.status(400).end();
+  // une sous-commande (/giveaway lancer) porte ses propres options
+  const sub = i.data.options?.find((o) => o.type === 1);
+  const opts = sub ? sub.options ?? [] : i.data.options ?? [];
+  const opt = (name: string) => {
+    const v = opts.find((o) => o.name === name)?.value;
+    return v === undefined ? undefined : String(v);
+  };
+
+  // 2.1 : commandes du staff, réponse visible par lui seul
+  if (i.data.name === "donner" || i.data.name === "giveaway") {
+    if (!isStaff(i.member?.permissions)) {
+      return res.json({ type: 4, data: { flags: 64, content: "Cette commande est réservée au staff." } });
+    }
+    res.json({ type: 5, data: { flags: 64 } });
+    let content: string;
+    try {
+      content = i.data.name === "donner" ? await giveCommand(opt, callerId) : await giveawayCommand(sub?.name ?? "", opt, i.channel_id ?? "", callerId);
+    } catch (err) {
+      console.error("[discord]", i.data.name, ":", (err as Error).message);
+      content = `Échec : ${(err as Error).message.slice(0, 300)}`;
+    }
+    await rest("PATCH", `/webhooks/${APP_ID}/${i.token}/messages/@original`, { bot: false, body: { content, allowed_mentions: { parse: [] } } }).catch(() => undefined);
+    return;
+  }
 
   if (i.data.name === "lier") {
     return res.json({
@@ -231,6 +332,46 @@ export async function discordInteractions(req: Request, res: Response) {
     console.error("[discord] commande", i.data.name, ":", (err as Error).message);
     await rest("PATCH", `/webhooks/${APP_ID}/${i.token}/messages/@original`, { bot: false, body: { content: "Le réseau ne répond pas, réessayez dans un instant." } }).catch(() => undefined);
   }
+}
+
+/* ---------------- 2.1 : commandes du staff ---------------- */
+
+type Opt = (name: string) => string | undefined;
+
+async function giveCommand(opt: Opt, staffId: string) {
+  const target = opt("joueur") ?? "";
+  const prize = parsePrize(opt("lot"), opt("montant") === undefined ? undefined : Number(opt("montant")));
+  if (typeof prize === "string") return prize;
+  const who = await companyForDiscord(target);
+  if ("error" in who) return `<@${target}> ${who.error} : rien n'a été envoyé.`;
+  const reason = (opt("raison") ?? "").trim() || "cadeau du staff";
+  const res = await grantPrize(who.company.id, prize, reason);
+  if (!res.ok) return `Rien n'a été envoyé : la compagnie ${res.reason}.`;
+  void logStaff(`🎁 <@${staffId}> offre **${res.label}** à <@${target}> (**${esc(who.company.name)}**) · ${esc(reason)}`);
+  return `✅ **${res.label}** livré à **${who.company.name}** (<@${target}>). Le joueur est prévenu${prize.kind === "objet" ? " et le déballera à sa prochaine visite" : ""}.`;
+}
+
+async function giveawayCommand(subcommand: string, opt: Opt, channelHere: string, staffId: string) {
+  if (subcommand === "lancer") {
+    const prize = parsePrize(opt("lot"), opt("montant") === undefined ? undefined : Number(opt("montant")));
+    if (typeof prize === "string") return prize;
+    const ms = parseDuration(opt("duree"));
+    if (!ms) return "Durée illisible. Exemples : `30m`, `12h`, `2j`, `1j12h`, `1semaine`.";
+    if (ms < MIN_DURATION_MS || ms > MAX_DURATION_MS) return "La durée va de 5 minutes à 30 jours.";
+    const winners = Math.min(MAX_WINNERS, Math.max(1, Number(opt("gagnants") ?? 1)));
+    const channel = opt("salon") ?? channelHere;
+    const g = await createGiveaway({ channelId: channel, prize, winners, durationMs: ms, createdBy: staffId });
+    return `✅ Giveaway lancé dans <#${channel}> (code \`${g.id.slice(0, 8)}\`). Tirage automatique <t:${Math.floor(g.endsAt.getTime() / 1000)}:R>.`;
+  }
+  const g = await findGiveaway(opt("giveaway"));
+  if (!g) return "Giveaway introuvable. Donne le code affiché en pied du message, ou le lien du message.";
+  if (subcommand === "terminer") {
+    if (g.endedAt) return "Ce giveaway est déjà terminé. Pour un gagnant de plus : `/giveaway relancer`.";
+    await finishGiveaway(g.id);
+    return `✅ Tirage fait pour le giveaway \`${g.id.slice(0, 8)}\`.`;
+  }
+  if (subcommand === "relancer") return rerollGiveaway(g.id);
+  return "Sous-commande inconnue.";
 }
 
 async function companyOfDiscord(discordId: string) {

@@ -2,7 +2,7 @@ import { Response } from "express";
 import Stripe from "stripe";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
-import { SHOP_ITEMS, findItem, unlockedFor, dailyRotation, inShopToday } from "../services/shop.service";
+import { SHOP_ITEMS, findItem, findAnyItem, unlockedFor, dailyRotation, inShopToday } from "../services/shop.service";
 import { activeSeasonalEvent, nextEdition, seasonalEventById, seasonOpen } from "../services/season.service";
 import { currentPassItem, passSeasonNumber } from "../services/pass.service";
 import { sendToCompany } from "../services/push.service";
@@ -229,7 +229,7 @@ export async function getReveals(req: AuthRequest, res: Response) {
   });
   const items = rows
     .map((r) => {
-      const item = findItem(r.itemId);
+      const item = findAnyItem(r.itemId);
       return item ? { purchaseId: r.id, giftFrom: r.giftFrom, item: { ...item, owned: true } } : null;
     })
     .filter(Boolean);

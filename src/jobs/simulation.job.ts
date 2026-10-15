@@ -32,6 +32,7 @@ import { contribute, flushWorld, TUNNEL_NAME, TUNNEL_STATIONS } from "../service
 import { addSeasonPoints, seasonEvent, flushSeason, runSeasons, reconcileObjectives, notifySeasonEnd, POINTS } from "../services/saison.service";
 import { runDiscordFeed, announceSeasonEnd } from "../services/discord-feed.service";
 import { syncAllRoles } from "../services/discord-roles.service";
+import { runGiveaways } from "../services/giveaway.service";
 import { parisHour } from "../services/time.service";
 let lastPricingHour = -1;
 import { checkPriceAlerts, runStandingOrders } from "../controllers/market.controller";
@@ -262,6 +263,8 @@ async function runSimulationTick() {
   /* 2.1 : Discord, toutes les cinq minutes. Sans bloquer le tour : une API
      Discord lente ne doit jamais retarder la simulation. Le bail garantit
      qu'un seul serveur publie, même pendant un déploiement. */
+  // 2.1 : giveaways arrivés à échéance (tirage), compteurs de participants
+  void runGiveaways().catch((err) => console.error("[giveaway] :", (err as Error).message));
   if (tickCount % 10 === 6) {
     void runDiscordFeed().catch((err) => console.error("[discord] annonces :", (err as Error).message));
     void syncAllRoles().catch((err) => console.error("[discord] rôles :", (err as Error).message));

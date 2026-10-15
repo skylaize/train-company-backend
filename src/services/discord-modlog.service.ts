@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import { AuditLogEvent, Client, Guild, GuildMember, Message, PartialGuildMember, PartialMessage } from "discord.js";
 import { prisma } from "../prisma";
 import { botEnabled, channelId, Embed, rest } from "./discord.service";
@@ -49,6 +50,13 @@ async function log(key: string, embed: Embed) {
 /* Pour les événements venus du jeu (liaison de compte), appelés une seule fois. */
 export async function logAccount(text: string, discordId: string) {
   await log(`compte:${discordId}:${Date.now()}`, { color: COLORS.compte, description: `🔗 <@${discordId}> ${text}` }).catch((err) =>
+    console.error("[discord] journal :", (err as Error).message)
+  );
+}
+
+/* Une ligne libre dans #logs : actions du staff (cadeaux, giveaways). */
+export async function logStaff(text: string) {
+  await log(`staff:${crypto.randomUUID()}`, { color: COLORS.compte, description: text }).catch((err) =>
     console.error("[discord] journal :", (err as Error).message)
   );
 }

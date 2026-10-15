@@ -963,3 +963,30 @@ model DiscordPost {
   messageId String
   createdAt DateTime @default(now())
 }
+
+// 2.1 : giveaways du serveur Discord (commande /giveaway). Le lot est livré
+// dans le jeu au tirage : des pièces ou une exclusivité Discord.
+model Giveaway {
+  id         String    @id @default(uuid())
+  channelId  String
+  messageId  String    @default("")
+  prizeKind  String    // pieces | objet
+  prizeValue String    // montant, ou identifiant de l'objet
+  winners    Int       @default(1)
+  endsAt     DateTime
+  endedAt    DateTime?
+  createdBy  String    // identifiant Discord du membre du staff
+  winnerIds  String[]  @default([])
+  createdAt  DateTime  @default(now())
+
+  @@index([endedAt, endsAt])
+}
+
+model GiveawayEntry {
+  id         String   @id @default(uuid())
+  giveawayId String
+  discordId  String
+  createdAt  DateTime @default(now())
+
+  @@unique([giveawayId, discordId])
+}
