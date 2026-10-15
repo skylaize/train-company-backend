@@ -105,7 +105,7 @@ export async function createCompany(req: AuthRequest, res: Response) {
 /* Livrées. La palette réservée doit être vérifiée ici : l'interface grise les
    boutons, mais rien n'empêche d'envoyer la couleur directement à l'API. */
 const LIVERY_FREE = ["#c99a3e", "#4f7fa3", "#5c8a68", "#a8483a", "#8a6ba3", "#c97a3e", "#f2a900"];
-const LIVERY_PREMIUM = ["#0f766e", "#b91c1c", "#1e3a8a", "#7c2d12", "#4c1d95", "#065f46", "#9d174d", "#334155"];
+export const LIVERY_PREMIUM = ["#0f766e", "#b91c1c", "#1e3a8a", "#7c2d12", "#4c1d95", "#065f46", "#9d174d", "#334155"];
 
 function liveryAllowed(color: string, isPremium: boolean, fromShop: Set<string>) {
   const c = String(color).toLowerCase();

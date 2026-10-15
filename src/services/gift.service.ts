@@ -2,6 +2,7 @@ import crypto from "crypto";
 import { prisma } from "../prisma";
 import { DISCORD_ITEMS, findDiscordItem } from "./shop.service";
 import { sendToCompany } from "./push.service";
+import { grantTrial, MAX_TRIAL_DAYS } from "./trial.service";
 
 /* ============================================================
    Cadeaux du staff (2.1) : ce que /donner et /giveaway livrent dans le jeu.
@@ -18,15 +19,21 @@ import { sendToCompany } from "./push.service";
 export const GIFT_FROM = "l'équipe de Réseau";
 export const MAX_GIFT_COINS = 10_000;
 
-export type Prize = { kind: "pieces"; amount: number } | { kind: "objet"; itemId: string };
+export type Prize = { kind: "pieces"; amount: number } | { kind: "objet"; itemId: string } | { kind: "essai"; days: number };
 
 /* Les lots proposés dans les commandes Discord. */
 export const PRIZE_CHOICES = [
   { name: "Pièces (préciser le montant)", value: "pieces" },
+  { name: "Premium d'essai (préciser les jours)", value: "essai" },
   ...DISCORD_ITEMS.map((i) => ({ name: i.name.replace(/«\s|\s»/g, '"'), value: i.id })),
 ];
 
-export function parsePrize(lot: string | undefined, amount: number | undefined): Prize | string {
+export function parsePrize(lot: string | undefined, amount: number | undefined, days?: number): Prize | string {
+  if (lot === "essai") {
+    const d = Math.round(Number(days ?? 7));
+    if (!Number.isFinite(d) || d < 1 || d > MAX_TRIAL_DAYS) return `Un essai dure de 1 à ${MAX_TRIAL_DAYS} jours (option « jours »).`;
+    return { kind: "essai", days: d };
+  }
   if (lot === "pieces") {
     const n = Math.round(Number(amount));
     if (!Number.isFinite(n) || n < 1) return "Précisez le montant de pièces avec l'option « montant ».";
@@ -38,7 +45,9 @@ export function parsePrize(lot: string | undefined, amount: number | undefined):
 }
 
 export function prizeLabel(p: Prize) {
-  return p.kind === "pieces" ? `${p.amount.toLocaleString("fr-FR")} pi.` : findDiscordItem(p.itemId)?.name ?? p.itemId;
+  if (p.kind === "pieces") return `${p.amount.toLocaleString("fr-FR")} pi.`;
+  if (p.kind === "essai") return `${p.days} jour${p.days > 1 ? "s" : ""} de Premium d'essai`;
+  return findDiscordItem(p.itemId)?.name ?? p.itemId;
 }
 
 export type GiftResult = { ok: true; label: string } | { ok: false; reason: string };
@@ -60,6 +69,15 @@ export async function grantPrize(companyId: string, prize: Prize, reason: string
     ]);
     void sendToCompany(companyId, { title: "Vous avez reçu un cadeau", body: `L'équipe de Réseau vous offre ${prizeLabel(prize)} (${reason}).`, url: "/dashboard", tag: "cadeau" });
     return { ok: true, label: prizeLabel(prize) };
+  }
+
+  if (prize.kind === "essai") {
+    const t = await grantTrial(companyId, prize.days);
+    if (!t.ok) return { ok: false, reason: t.reason };
+    await prisma.transaction.create({ data: { companyId, type: "PREMIUM", amount: 0, description: `Cadeau de ${GIFT_FROM} : ${prizeLabel(prize)} (${reason})` } });
+    const end = new Intl.DateTimeFormat("fr-FR", { timeZone: "Europe/Paris", day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" }).format(t.until);
+    void sendToCompany(companyId, { title: "Premium offert !", body: `L'équipe de Réseau vous offre le Premium jusqu'au ${end}. Vue cabine, veille concurrentielle, bilans… tout est ouvert.`, url: "/dashboard", tag: "cadeau" });
+    return { ok: true, label: `${prizeLabel(prize)} (jusqu'au ${end})` };
   }
 
   const item = findDiscordItem(prize.itemId);

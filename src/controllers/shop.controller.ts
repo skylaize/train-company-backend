@@ -13,7 +13,7 @@ export async function findRecipient(name: unknown) {
   if (!clean) return null;
   return prisma.company.findFirst({
     where: { name: { equals: clean, mode: "insensitive" } },
-    select: { id: true, name: true, isPremium: true },
+    select: { id: true, name: true, isPremium: true, premiumTrialUntil: true },
   });
 }
 

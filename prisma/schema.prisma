@@ -52,6 +52,10 @@ model Company {
   balance      Int      @default(500) // trésorerie, en pièces
   maxTrains    Int      @default(2) // capacité du dépôt, extensible contre paiement
   isPremium    Boolean  @default(false) // débloque les modèles de trains exclusifs
+  // 2.1 : Premium d'essai offert par le staff (/donner, /giveaway). Pendant
+  // l'essai isPremium vaut true ; à cette date il repasse à false, sauf achat.
+  premiumTrialUntil   DateTime?
+  premiumTrialEndedAt DateTime? // fin du dernier essai : le jeu propose alors de garder le Premium
   premiumReveal String? // 2.0 : animation Premium à montrer ("" = acheté soi-même, sinon nom de qui l'offre)
   tutorialSeen Boolean  @default(false) // mémorisé côté compte, pas par navigateur
   tutorialRewards String[] @default([]) // 2.0.3 : primes de stage déjà versées (ligne, service, carte, prix)

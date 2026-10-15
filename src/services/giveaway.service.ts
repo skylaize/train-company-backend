@@ -45,7 +45,11 @@ export function parseDuration(raw: string | undefined): number | null {
 }
 
 const prizeOf = (g: Pick<GiveawayRow, "prizeKind" | "prizeValue">): Prize =>
-  g.prizeKind === "pieces" ? { kind: "pieces", amount: Number(g.prizeValue) } : { kind: "objet", itemId: g.prizeValue };
+  g.prizeKind === "pieces"
+    ? { kind: "pieces", amount: Number(g.prizeValue) }
+    : g.prizeKind === "essai"
+      ? { kind: "essai", days: Number(g.prizeValue) }
+      : { kind: "objet", itemId: g.prizeValue };
 
 const ts = (d: Date, style = "R") => `<t:${Math.floor(d.getTime() / 1000)}:${style}>`;
 
@@ -100,7 +104,7 @@ export async function createGiveaway(input: { channelId: string; prize: Prize; w
     data: {
       channelId: input.channelId,
       prizeKind: input.prize.kind,
-      prizeValue: input.prize.kind === "pieces" ? String(input.prize.amount) : input.prize.itemId,
+      prizeValue: input.prize.kind === "pieces" ? String(input.prize.amount) : input.prize.kind === "essai" ? String(input.prize.days) : input.prize.itemId,
       winners: input.winners,
       endsAt: new Date(Date.now() + input.durationMs),
       createdBy: input.createdBy,

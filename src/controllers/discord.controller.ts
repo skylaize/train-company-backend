@@ -7,6 +7,8 @@ import { APP_ID, botEnabled, BRAND_COLOR, Embed, esc, fmt, GUILD_ID, PUBLIC_KEY,
 import { clearRoles, syncUser } from "../services/discord-roles.service";
 import { logAccount, logStaff } from "../services/discord-modlog.service";
 import { companyForDiscord, grantPrize, MAX_GIFT_COINS, parsePrize, PRIZE_CHOICES } from "../services/gift.service";
+import { MAX_TRIAL_DAYS } from "../services/trial.service";
+import { staffStats } from "../services/stats.service";
 import { createGiveaway, findGiveaway, finishGiveaway, MAX_DURATION_MS, MAX_WINNERS, MIN_DURATION_MS, parseDuration, rerollGiveaway, toggleEntry } from "../services/giveaway.service";
 import { BOARDS, BoardId, buildLeaderRows, rankRows } from "../services/leaderboard.service";
 import { allianceRanking, ALLIANCE_MAX } from "../services/alliance.service";
@@ -174,8 +176,15 @@ export const COMMANDS = [
       { type: 6, name: "joueur", description: "Le joueur (compte Réseau lié)", required: true },
       { type: 3, name: "lot", description: "Ce qui est offert", required: true, choices: PRIZE_CHOICES },
       { type: 4, name: "montant", description: "Nombre de pièces (si le lot est « Pièces »)", required: false, min_value: 1, max_value: MAX_GIFT_COINS },
+      { type: 4, name: "jours", description: "Durée du Premium d'essai (si le lot est « Premium d'essai »)", required: false, min_value: 1, max_value: MAX_TRIAL_DAYS },
       { type: 3, name: "raison", description: "Affichée au joueur et dans #logs", required: false, max_length: 100 },
     ],
+  },
+  {
+    name: "stats",
+    description: "Staff : le tableau de bord du jeu (joueurs, Premium, ventes, Discord)",
+    default_member_permissions: STAFF_PERMISSION,
+    dm_permission: false,
   },
   {
     name: "giveaway",
@@ -192,6 +201,7 @@ export const COMMANDS = [
           { type: 3, name: "duree", description: "Durée : 30m, 12h, 2j, 1semaine…", required: true },
           { type: 4, name: "gagnants", description: "Nombre de gagnants (1 par défaut)", required: false, min_value: 1, max_value: MAX_WINNERS },
           { type: 4, name: "montant", description: "Pièces par gagnant (si le lot est « Pièces »)", required: false, min_value: 1, max_value: MAX_GIFT_COINS },
+          { type: 4, name: "jours", description: "Durée du Premium d'essai (si le lot est « Premium d'essai »)", required: false, min_value: 1, max_value: MAX_TRIAL_DAYS },
           { type: 7, name: "salon", description: "Où le poster (ce salon par défaut)", required: false, channel_types: [0, 5] },
         ],
       },
@@ -291,11 +301,18 @@ export async function discordInteractions(req: Request, res: Response) {
   };
 
   // 2.1 : commandes du staff, réponse visible par lui seul
-  if (i.data.name === "donner" || i.data.name === "giveaway") {
+  if (i.data.name === "donner" || i.data.name === "giveaway" || i.data.name === "stats") {
     if (!isStaff(i.member?.permissions)) {
       return res.json({ type: 4, data: { flags: 64, content: "Cette commande est réservée au staff." } });
     }
     res.json({ type: 5, data: { flags: 64 } });
+    if (i.data.name === "stats") {
+      const body = await staffStats()
+        .then((embed) => ({ embeds: [embed] }))
+        .catch((err) => ({ content: `Échec : ${(err as Error).message.slice(0, 300)}` }));
+      await rest("PATCH", `/webhooks/${APP_ID}/${i.token}/messages/@original`, { bot: false, body: { ...body, allowed_mentions: { parse: [] } } }).catch(() => undefined);
+      return;
+    }
     let content: string;
     try {
       content = i.data.name === "donner" ? await giveCommand(opt, callerId) : await giveawayCommand(sub?.name ?? "", opt, i.channel_id ?? "", callerId);
@@ -340,7 +357,7 @@ type Opt = (name: string) => string | undefined;
 
 async function giveCommand(opt: Opt, staffId: string) {
   const target = opt("joueur") ?? "";
-  const prize = parsePrize(opt("lot"), opt("montant") === undefined ? undefined : Number(opt("montant")));
+  const prize = parsePrize(opt("lot"), opt("montant") === undefined ? undefined : Number(opt("montant")), opt("jours") === undefined ? undefined : Number(opt("jours")));
   if (typeof prize === "string") return prize;
   const who = await companyForDiscord(target);
   if ("error" in who) return `<@${target}> ${who.error} : rien n'a été envoyé.`;
@@ -353,7 +370,7 @@ async function giveCommand(opt: Opt, staffId: string) {
 
 async function giveawayCommand(subcommand: string, opt: Opt, channelHere: string, staffId: string) {
   if (subcommand === "lancer") {
-    const prize = parsePrize(opt("lot"), opt("montant") === undefined ? undefined : Number(opt("montant")));
+    const prize = parsePrize(opt("lot"), opt("montant") === undefined ? undefined : Number(opt("montant")), opt("jours") === undefined ? undefined : Number(opt("jours")));
     if (typeof prize === "string") return prize;
     const ms = parseDuration(opt("duree"));
     if (!ms) return "Durée illisible. Exemples : `30m`, `12h`, `2j`, `1j12h`, `1semaine`.";

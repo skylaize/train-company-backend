@@ -65,7 +65,7 @@ export async function createCheckoutSession(req: AuthRequest, res: Response) {
 
   const company = await prisma.company.findUnique({
     where: { ownerId: req.userId as string },
-    select: { id: true, isPremium: true, name: true },
+    select: { id: true, isPremium: true, name: true, premiumTrialUntil: true },
   });
   if (!company) {
     return res.status(404).json({ error: "Créez d'abord votre compagnie" });
@@ -74,8 +74,9 @@ export async function createCheckoutSession(req: AuthRequest, res: Response) {
   const giftTo = req.body?.giftTo ? await findRecipient(req.body.giftTo) : null;
   if (req.body?.giftTo && !giftTo) return res.status(404).json({ error: "Aucune compagnie ne porte ce nom" });
   if (giftTo && giftTo.id === company.id) return res.status(409).json({ error: "Pour vous-même, achetez sans l'offrir" });
-  if (giftTo?.isPremium) return res.status(409).json({ error: `${giftTo.name} est déjà Premium` });
-  if (!giftTo && company.isPremium) {
+  // 2.1 : un Premium d'essai peut être acheté (pour soi ou en cadeau) : il devient définitif
+  if (giftTo?.isPremium && !giftTo.premiumTrialUntil) return res.status(409).json({ error: `${giftTo.name} est déjà Premium` });
+  if (!giftTo && company.isPremium && !company.premiumTrialUntil) {
     return res.status(409).json({ error: "Votre compagnie est déjà Premium" });
   }
   const target = giftTo ?? company;
@@ -173,14 +174,15 @@ export async function processCheckoutSession(session: Stripe.Checkout.Session) {
 
   const companyId = session.client_reference_id ?? session.metadata?.companyId;
   if (!companyId) return { done: false as const, reason: "compagnie inconnue" };
-  const company = await prisma.company.findUnique({ where: { id: companyId }, select: { id: true, isPremium: true } });
+  const company = await prisma.company.findUnique({ where: { id: companyId }, select: { id: true, isPremium: true, premiumTrialUntil: true } });
   if (!company) return { done: false as const, reason: "compagnie introuvable" };
-  if (company.isPremium) return { done: true as const, kind: "premium" as const };
+  if (company.isPremium && !company.premiumTrialUntil) return { done: true as const, kind: "premium" as const };
 
-  // la ligne n'est prise qu'une fois, même si le webhook et le rattrapage passent en même temps
+  // la ligne n'est prise qu'une fois, même si le webhook et le rattrapage passent en même temps.
+  // 2.1 : une compagnie en essai est aussi prise, et son essai devient un Premium définitif
   const granted = await prisma.company.updateMany({
-    where: { id: company.id, isPremium: false },
-    data: { isPremium: true, premiumReveal: session.metadata?.giftFrom ?? "" },
+    where: { id: company.id, OR: [{ isPremium: false }, { premiumTrialUntil: { not: null } }] },
+    data: { isPremium: true, premiumTrialUntil: null, premiumReveal: session.metadata?.giftFrom ?? "" },
   });
   if (granted.count) {
     await prisma.transaction.create({
@@ -258,7 +260,7 @@ async function alreadyDelivered(session: Stripe.Checkout.Session) {
   }
   const companyId = session.client_reference_id ?? session.metadata?.companyId;
   if (!companyId) return true;
-  const c = await prisma.company.findUnique({ where: { id: companyId }, select: { isPremium: true } });
-  return !c || c.isPremium;
+  const c = await prisma.company.findUnique({ where: { id: companyId }, select: { isPremium: true, premiumTrialUntil: true } });
+  return !c || (c.isPremium && !c.premiumTrialUntil);
 }
 
