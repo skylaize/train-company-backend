@@ -87,6 +87,8 @@ model Company {
   absenceFromBalance Int?
   absenceToBalance   Int?
   lastDigestOn       String? // jour (AAAA-MM-JJ, heure de Paris) du dernier bilan du matin envoyé
+  // 2.1.2 : numéro de pionnier, figé à la migration (les 200 premières compagnies)
+  pioneerNumber Int?    @unique
   createdAt    DateTime @default(now())
 
   owner        User     @relation(fields: [ownerId], references: [id])
@@ -993,4 +995,28 @@ model GiveawayEntry {
   createdAt  DateTime @default(now())
 
   @@unique([giveawayId, discordId])
+}
+
+// 2.1.2 : le Train des 200. Un trajet unique de 48 h par toutes les gares
+// desservies ; chaque compagnie chez qui il passe touche une prime et son
+// nom est peint sur ses voitures.
+model SpecialTrain {
+  id        String   @id
+  startsAt  DateTime
+  endsAt    DateTime
+  route     Json // [{ station, at }]
+  lastStop  Int      @default(-1)
+  createdAt DateTime @default(now())
+}
+
+model SpecialTrainVisit {
+  id        String   @id @default(uuid())
+  trainId   String
+  companyId String
+  station   String
+  reward    Int
+  at        DateTime @default(now())
+
+  @@unique([trainId, companyId])
+  @@index([trainId, at])
 }

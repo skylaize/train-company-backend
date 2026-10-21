@@ -7,7 +7,7 @@
    recalculée ici à chaque création ou modification de ligne. */
 
 // mêmes positions que la carte du tableau de bord
-const STATION_COORDS: Record<string, { x: number; y: number }> = {
+export const STATION_COORDS: Record<string, { x: number; y: number }> = {
   "Lille": { x: 190, y: 20 },
   "Le Havre": { x: 108.13, y: 71 },
   "Rouen": { x: 131.9, y: 71 },

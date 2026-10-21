@@ -28,6 +28,9 @@ const RULES: { path: RegExp; ttl: number; shared?: boolean }[] = [
   { path: /^\/api\/weather\/stations$/, ttl: 120_000, shared: true },
   { path: /^\/api\/gazette$/, ttl: 120_000, shared: true },
   { path: /^\/api\/network\/stats$/, ttl: 15_000, shared: true },
+  // 2.1.2 : la grande carte des 200, la même pour tous
+  { path: /^\/api\/pioneers\/map$/, ttl: 300_000, shared: true },
+  { path: /^\/api\/celebration$/, ttl: 30_000, shared: true },
 ];
 
 type Entry = { at: number; ttl: number; owner: string; status: number; body: unknown };
