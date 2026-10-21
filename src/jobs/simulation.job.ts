@@ -17,6 +17,7 @@ import { runLoanPayments, runSharePrices, runDividends, runWeeklyReports, runSto
 import { runAutoPricing } from "../services/pricing.service";
 import { isFreightModel, modelBonus } from "../services/freight.service";
 import { sendToCompany } from "../services/push.service";
+import { runTrain200 } from "../services/train200.service";
 import { seasonalStationEvents } from "../services/season.service";
 import { allStationCounts, hubMultiplier } from "../services/hub.service";
 import { runTenders } from "../services/tender.service";
@@ -202,6 +203,10 @@ async function runSimulationTick() {
       )
       .catch((err) => console.error("[concurrence] échec :", (err as Error).message));
   }
+  // 2.1.2 : le Train des 200, gare après gare
+  await runTrain200(async (companyId, title, body) => {
+    await sendToCompany(companyId, { title, body, url: "/dashboard", tag: "train200" });
+  }).catch((err) => console.error("[train des 200] échec :", (err as Error).message));
   // décisions du directeur (1.6) : échéances, promesses, nouvelles situations
   if (tickCount % 10 === 0) {
     await runDecisions(async (companyId, title, body) => {
