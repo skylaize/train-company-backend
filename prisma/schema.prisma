@@ -488,6 +488,10 @@ model Transaction {
   createdAt   DateTime @default(now())
 
   @@index([companyId, createdAt])
+  // 2.1.2 : la table grandit à chaque arrivée ; succès, défis, résumé et
+  // statistiques filtrent par type, et la lisaient en entier
+  @@index([companyId, type, createdAt])
+  @@index([type, createdAt])
 }
 
 model DailyChallenge {
