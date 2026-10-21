@@ -5,6 +5,7 @@ import { allianceRanking } from "./alliance.service";
 import { currentSeason, DIVISIONS } from "./saison.service";
 import { ensureProject, TUNNEL_NAME, TUNNEL_STATIONS } from "./world.service";
 import { pruneLogKeys } from "./discord-modlog.service";
+import { Stop, TRAIN200_ID, TRAIN200_REWARD } from "./train200.service";
 
 /* ============================================================
    Ce que le jeu publie tout seul sur Discord (2.1).
@@ -243,6 +244,114 @@ async function updateWorldPost() {
   });
 }
 
+/* ---------------- 2.1.2 : la fête des 200 ---------------- */
+
+const parisTime = (d: Date) =>
+  new Intl.DateTimeFormat("fr-FR", { timeZone: "Europe/Paris", weekday: "long", day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" }).format(d).replace(":", " h ");
+const parisHour = (d: Date) => new Intl.DateTimeFormat("fr-FR", { timeZone: "Europe/Paris", weekday: "short", hour: "2-digit", minute: "2-digit" }).format(d).replace(":", " h ");
+
+/* Trois messages dans #annonces, chacun une seule fois :
+   - à la mise en ligne de la 2.1.2 : l'événement, avec l'heure de départ ;
+   - au départ du train : l'horaire complet, gare par gare ;
+   - au terminus : les compagnies peintes sur ses voitures. */
+async function checkTrain200() {
+  const [train, taken] = await Promise.all([
+    prisma.specialTrain.findUnique({ where: { id: TRAIN200_ID } }),
+    prisma.company.count({ where: { pioneerNumber: { not: null } } }),
+  ]);
+  const envStart = process.env.TRAIN200_START ? new Date(process.env.TRAIN200_START) : null;
+  const start = train?.startsAt ?? (envStart && !Number.isNaN(envStart.getTime()) ? envStart : null);
+  const site = SITE_URL || undefined;
+
+  await postOnce("fete-200:annonce", "ANNONCES", [
+    {
+      embeds: [
+        {
+          title: "🎉 200 compagnies sur le réseau !",
+          url: site,
+          description: [
+            "Vous êtes plus de 200 à faire rouler des trains sur Réseau. **Merci.** Pour fêter ça, la **2.1.2** arrive avec trois cadeaux :",
+            "",
+            `🚆 **Le Train des 200** — un train spécial fait le tour de France en **48 heures**, par toutes les gares du réseau. Suivez-le en direct sur la carte. Quand il passe par une de vos gares, vous touchez **${TRAIN200_REWARD} pi.** et le nom de votre compagnie est peint sur ses voitures.`,
+            start ? `Départ de Paris **${parisTime(start)}**.` : "Il part dans quelques minutes : ouvrez la carte !",
+            "",
+            `🎟️ **Les billets de pionnier** — les ${taken > 0 ? taken : 200} premières compagnies reçoivent un billet numéroté dans l'ordre de leur fondation. Ce numéro ne changera jamais.`,
+            "",
+            "🗺️ **La grande carte des 200** — tous les réseaux superposés sur une seule carte de France, chacun à sa livrée, avec tous les noms. À télécharger, imprimer et partager.",
+            "",
+            "Tout est dans la flotte, ou dans Paramètres. Partagez votre billet ici, on veut les voir !",
+          ].join("\n"),
+          color: 0xd4a017,
+          image: site ? { url: `${site}/og-image.png?v=5` } : undefined,
+          footer: { text: "Réseau 2.1.2 · octobre 2026" },
+        },
+      ],
+    },
+  ], { crosspost: true, ping: "EVENEMENTS" });
+
+  if (!train) return;
+  const route = train.route as unknown as Stop[];
+  const now = Date.now();
+
+  if (now >= train.startsAt.getTime()) {
+    // l'horaire, par blocs de 14 gares (un champ d'embed tient 1 024 caractères)
+    const lines = route.map((s) => `\`${parisHour(new Date(s.at))}\` ${esc(s.station)}`);
+    const fields: Embed["fields"] = [];
+    for (let i = 0; i < lines.length && fields.length < 6; i += 14) {
+      fields.push({ name: i === 0 ? "L'horaire" : "\u200b", value: lines.slice(i, i + 14).join("\n"), inline: true });
+    }
+    await postOnce("fete-200:depart", "ANNONCES", [
+      {
+        embeds: [
+          {
+            title: "🚆 Le Train des 200 est parti !",
+            url: site ? `${site}/dashboard` : undefined,
+            description: [
+              `Il a quitté ${esc(route[0].station)} pour **${route.length} gares** en 48 heures. Arrivée à ${esc(route[route.length - 1].station)} ${parisTime(train.endsAt)}.`,
+              `Chaque compagnie qui dessert une gare de son trajet touche **${TRAIN200_REWARD} pi.** à son passage, et son nom rejoint ses voitures.`,
+              "Pas de gare sur son trajet ? Il est encore temps d'ouvrir une ligne.",
+            ].join("\n"),
+            color: 0xd4a017,
+            fields,
+          },
+        ],
+      },
+    ], { crosspost: true, ping: "EVENEMENTS" });
+  }
+
+  if (now >= train.endsAt.getTime() && train.lastStop >= route.length - 1) {
+    const visits = (await prisma.specialTrainVisit.findMany({ where: { trainId: TRAIN200_ID }, orderBy: { at: "asc" }, select: { companyId: true } })) as { companyId: string }[];
+    const names = (await prisma.company.findMany({ where: { id: { in: visits.map((v) => v.companyId) } }, select: { id: true, name: true } })) as { id: string; name: string }[];
+    const byId = new Map(names.map((c) => [c.id, c.name]));
+    let list = "";
+    let shown = 0;
+    for (const v of visits) {
+      const n = byId.get(v.companyId);
+      if (!n) continue;
+      const piece = `${list ? " · " : ""}${esc(n)}`;
+      if (list.length + piece.length > 3200) break;
+      list += piece;
+      shown++;
+    }
+    await postOnce("fete-200:arrivee", "ANNONCES", [
+      {
+        embeds: [
+          {
+            title: "🏁 Terminus pour le Train des 200",
+            url: site ? `${site}/dashboard` : undefined,
+            description: [
+              `Après 48 heures et ${route.length} gares, il est arrivé à ${esc(route[route.length - 1].station)} avec **${visits.length} compagnies** peintes sur ses voitures. Merci à toutes !`,
+              "",
+              list + (visits.length > shown ? ` · et ${visits.length - shown} autres` : ""),
+            ].join("\n"),
+            color: 0xd4a017,
+          },
+        ],
+      },
+    ], { crosspost: true });
+  }
+}
+
 /* ---------------- un passage, toutes les cinq minutes ---------------- */
 
 export async function runDiscordFeed() {
@@ -253,6 +362,7 @@ export async function runDiscordFeed() {
     ["saison", checkSeasonStart],
     ["chantier", updateWorldPost],
     ["chantier, paliers", checkWorld],
+    ["fête des 200", checkTrain200],
     ["ménage du journal", pruneLogKeys],
   ];
   for (const [label, fn] of steps) {

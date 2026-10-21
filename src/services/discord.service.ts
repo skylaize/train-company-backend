@@ -151,6 +151,7 @@ export type Embed = {
   fields?: { name: string; value: string; inline?: boolean }[];
   author?: { name: string; icon_url?: string };
   thumbnail?: { url: string };
+  image?: { url: string }; // 2.1.2 : la grande image de l'annonce des 200
   footer?: { text: string };
   timestamp?: string;
 };
