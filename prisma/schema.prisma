@@ -87,6 +87,8 @@ model Company {
   absenceFromBalance Int?
   absenceToBalance   Int?
   lastDigestOn       String? // jour (AAAA-MM-JJ, heure de Paris) du dernier bilan du matin envoyé
+  // 2.1.2 : numéro de pionnier, figé à la migration (les 200 premières compagnies)
+  pioneerNumber Int?    @unique
   createdAt    DateTime @default(now())
 
   owner        User     @relation(fields: [ownerId], references: [id])

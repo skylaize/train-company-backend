@@ -2,6 +2,7 @@ import { AD_FREE_ITEM_ID } from "../services/shop.service";
 import { Response } from "express";
 import { Prisma } from "@prisma/client";
 import { AuthRequest } from "../middleware/auth.middleware";
+import { claimPioneerNumber } from "./pioneer.controller";
 import { prisma } from "../prisma";
 import { computeReputation } from "../services/reputation.service";
 import { depotExpansionCost, upkeepPerTick } from "../services/upkeep.service";
@@ -97,6 +98,8 @@ export async function createCompany(req: AuthRequest, res: Response) {
   }
 
   await prisma.$transaction(foundationTransactions);
+  // 2.1.2 : tant qu'il reste des places, la nouvelle compagnie est un pionnier
+  await claimPioneerNumber(company.id).catch(() => undefined);
 
   const finalCompany = await prisma.company.findUnique({ where: { id: company.id } });
   return res.status(201).json(finalCompany);

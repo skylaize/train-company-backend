@@ -34,6 +34,7 @@ import { alertRouter } from "./routes/alert.routes"; // 2.1.1
 import { financeRouter } from "./routes/finance.routes";
 import { v2Router } from "./routes/v2.routes";
 import { discordRouter } from "./routes/discord.routes";
+import { pioneerRouter } from "./routes/pioneer.routes"; // 2.1.2
 import { discordInteractions, registerDiscordCommands } from "./controllers/discord.controller";
 import { startDiscordGateway } from "./services/discord-gateway.service";
 import { responseCache } from "./middleware/responseCache";
@@ -108,6 +109,7 @@ app.use("/api", networkRouter);
 app.use("/api", careerRouter);
 app.use("/api", referralRouter);
 app.use("/api", adsRouter);
+app.use("/api", pioneerRouter);
 
 const PORT = process.env.PORT || 4000;
 
