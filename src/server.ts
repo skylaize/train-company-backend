@@ -1,5 +1,10 @@
 import "dotenv/config";
-import express from "express";
+import express, { NextFunction, Request, Response } from "express";
+/* 2.1.2 : Express 4 ne voit pas les erreurs des routes async. Une route qui
+   plantait (base lente, colonne absente…) ne répondait jamais : la requête
+   restait pendante et le jeu chargeait à l'infini. Ce module les renvoie au
+   gestionnaire d'erreurs plus bas. */
+import "express-async-errors";
 import cors from "cors";
 import { authRouter } from "./routes/auth.routes";
 import { userRouter } from "./routes/user.routes";
@@ -108,6 +113,16 @@ app.use("/api", networkRouter);
 app.use("/api", careerRouter);
 app.use("/api", referralRouter);
 app.use("/api", adsRouter);
+
+/* 2.1.2 : toute erreur de route finit ici, avec une vraie réponse 500 et
+   une ligne lisible dans les journaux de Coolify. */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
+  const e = err as { message?: string; code?: string };
+  console.error(`[route] ${req.method} ${req.originalUrl} :`, e?.code ? `${e.code} ` : "", e?.message ?? err);
+  if (res.headersSent) return;
+  res.status(500).json({ error: "Erreur serveur, réessayez dans un instant" });
+});
 
 const PORT = process.env.PORT || 4000;
 
