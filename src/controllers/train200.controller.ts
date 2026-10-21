@@ -42,3 +42,17 @@ export async function getTrain200(req: AuthRequest, res: Response) {
     nextForMe,
   });
 }
+
+/* 2.1.2 : pour la page d'accueil, sans compte — où en est le Train des 200,
+   et combien de places de pionniers sont prises. */
+export async function getCelebration(_req: AuthRequest, res: Response) {
+  const [taken, train, painted] = await Promise.all([
+    prisma.company.count({ where: { pioneerNumber: { not: null } } }),
+    prisma.specialTrain.findUnique({ where: { id: TRAIN200_ID } }),
+    prisma.specialTrainVisit.count({ where: { trainId: TRAIN200_ID } }),
+  ]);
+  return res.json({
+    pioneers: { taken, total: 200 },
+    train: train ? { startsAt: train.startsAt, endsAt: train.endsAt, route: train.route as unknown as Stop[], painted } : null,
+  });
+}
