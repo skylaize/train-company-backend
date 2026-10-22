@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth.middleware";
-import { getInfrastructure, electrifyLine, buyStation, upgradeStation, sellStation, openWorkshop, closeWorkshop, doubleLine, openYard, closeYard } from "../controllers/infrastructure.controller";
+import { getInfrastructure, electrifyLine, buyStation, upgradeStation, sellStation, openWorkshop, closeWorkshop, doubleLine, openYard, closeYard, buildHighSpeed } from "../controllers/infrastructure.controller";
 
 export const infrastructureRouter = Router();
 
@@ -15,3 +15,5 @@ infrastructureRouter.post("/infrastructure/workshops/close", requireAuth, closeW
 infrastructureRouter.post("/infrastructure/double", requireAuth, doubleLine);
 infrastructureRouter.post("/infrastructure/yards", requireAuth, openYard);
 infrastructureRouter.post("/infrastructure/yards/close", requireAuth, closeYard);
+// 2.2
+infrastructureRouter.post("/infrastructure/high-speed", requireAuth, buildHighSpeed);

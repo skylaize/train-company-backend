@@ -12,6 +12,7 @@ import { RANK_DEFINITIONS } from "../services/career.service";
 import { DLC_MODELS, ownedDlcs, dlcById } from "../services/dlc.service";
 import { NIGHT_INTL_COST, NIGHT_INTL_MIN_GRADE, isNightIntl, nightIntlLineError } from "../services/night.service";
 import { routeOf } from "../services/route.service";
+import { TGV_MODEL, TGV_COST, TGV_MIN_GRADE, hslOpen, hslBuilding } from "../services/highspeed.service";
 import {
   ORGANS, Organ, PARTS, RepairMode, EXPRESS_MIN, SERVICE_DISCOUNT, SERVICE_THRESHOLDS,
   freshBias, organWear, readStock, stockLimit, takeFromStock, partPrice, partDelayMs, serviceMinutes, backInService, resaleValue, resaleOutlook,
@@ -35,6 +36,7 @@ export const TRAIN_MODELS: Record<string, { cost: number; minGradeId: number; dl
   FRET_ELECTRIQUE: { cost: 1800, minGradeId: 4 }, // Magnat ferroviaire
   COUCHETTES: { cost: 900, minGradeId: 2 }, // Chef de réseau (1.6) : train de nuit
   NUIT_EUROPE: { cost: NIGHT_INTL_COST, minGradeId: NIGHT_INTL_MIN_GRADE }, // 2.1.1 : train de nuit international (licence demandée)
+  [TGV_MODEL]: { cost: TGV_COST, minGradeId: TGV_MIN_GRADE }, // 2.2 : la grande vitesse, sur LGV seulement
   // 2.0 : le matériel des extensions (dlc.service)
   ...Object.fromEntries(Object.values(DLC_MODELS).map((m) => [m.id, { cost: m.cost, minGradeId: m.minGradeId, dlc: m.dlc }])),
 };
@@ -44,7 +46,7 @@ export const NIGHT_MIN_DURATION = 10;
 
 /* 2.0 : une rame de collection ne se déprécie pas avec l'âge : elle se
    reprend à 90 % de ce qu'elle a coûté (rachat et pièces), selon son état. */
-function trainValue(t: Parameters<typeof resaleValue>[0] & { heritage?: unknown }) {
+export function trainValue(t: Parameters<typeof resaleValue>[0] & { heritage?: unknown }) {
   const h = heritageOf(t);
   if (h) return Math.max(10, Math.round(h.value * 0.9 * (1 - Math.min(100, t.wear) / 250)));
   return resaleValue(t, TRAIN_MODELS[t.model]?.cost ?? 200);
@@ -149,6 +151,14 @@ export async function assignTrainToLine(req: AuthRequest, res: Response) {
     const why = nightIntlLineError(routeOf(line as { departureStation: string; arrivalStation: string; stops?: string[] }), line.durationMinutes, NIGHT_MIN_DURATION);
     if (why) return res.status(409).json({ error: why });
   }
+  // 2.2 : la rame TGV ne roule que sur une LGV ouverte
+  if (train.model === TGV_MODEL && !hslOpen(line as { highSpeedAt?: Date | null })) {
+    return res.status(409).json({
+      error: hslBuilding(line as { highSpeedAt?: Date | null })
+        ? "La LGV de cette ligne est encore en chantier : la rame TGV attendra son ouverture"
+        : "Une rame TGV ne roule que sur une ligne à grande vitesse (Infrastructures → LGV)",
+    });
+  }
   if (train.model === "COUCHETTES" && line.durationMinutes < NIGHT_MIN_DURATION) {
     return res.status(409).json({ error: `Une rame couchettes ne fait que les grandes lignes (${NIGHT_MIN_DURATION} min de trajet ou plus)` });
   }
@@ -186,6 +196,8 @@ export async function changeCars(req: AuthRequest, res: Response) {
   const cars = [...((train as { cars?: string[] }).cars ?? [])];
 
   if (action === "add") {
+    // 2.2 : une rame TGV est une rame articulée, on n'y attelle rien
+    if (train.model === TGV_MODEL) return res.status(409).json({ error: "Une rame TGV est indéformable : on n'y ajoute ni voiture ni wagon" });
     if (wagon) {
       const fm = FREIGHT_MODELS[train.model];
       if (!fm) return res.status(409).json({ error: "Les wagons s'attellent à une rame de fret" });

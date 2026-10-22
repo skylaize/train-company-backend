@@ -6,6 +6,7 @@ import { currentSeason, DIVISIONS } from "./saison.service";
 import { ensureProject, TUNNEL_NAME, TUNNEL_STATIONS } from "./world.service";
 import { pruneLogKeys } from "./discord-modlog.service";
 import { Stop, TRAIN200_ID, TRAIN200_REWARD } from "./train200.service";
+import { currentEdition, HAUNT_MINUTES, HAUNT_DEMAND, TIERS, topHunters, hauntSchedule, NIGHT_SOULS_FROM, NIGHT_SOULS_TO } from "./halloween.service";
 
 /* ============================================================
    Ce que le jeu publie tout seul sur Discord (2.1).
@@ -352,6 +353,65 @@ async function checkTrain200() {
   }
 }
 
+/* ---------------- 2.2 : Halloween ---------------- */
+
+const HALLOWEEN_COLOR = 0x6b4c9a;
+
+async function checkHalloween() {
+  const ed = currentEdition();
+  const now = Date.now();
+  const site = SITE_URL || undefined;
+  if (now >= ed.start.getTime() && now < ed.end.getTime()) {
+    const route = await hauntSchedule();
+    const first = route.filter((h) => new Date(h.at).getTime() >= now - HAUNT_MINUTES * 60_000).slice(0, 4);
+    await postOnce(`halloween:${ed.year}:debut`, "ANNONCES", [
+      {
+        embeds: [
+          {
+            title: "🎃 Le Train fantôme hante le réseau",
+            url: site ? `${site}/dashboard` : undefined,
+            description: [
+              `Jusqu'au ${parisDay(new Date(ed.end.getTime() - 1))}, il s'installe toutes les ${HAUNT_MINUTES} minutes dans une gare du réseau. Les curieux s'y pressent (voyageurs ×${String(HAUNT_DEMAND).replace(".", ",")}).`,
+              `Chaque trajet qui passe par la gare hantée récolte **une âme**, deux de ${NIGHT_SOULS_FROM} h à ${NIGHT_SOULS_TO} h. L'horaire est dans le jeu : envoyez vos rames là où il va.`,
+              "",
+              TIERS.map((t) => `**${t.souls} âmes** · ${t.label.toLowerCase()}`).join("\n"),
+              "",
+              "Gardés pour toujours. Et un classement des chasseurs toute la semaine.",
+            ].join("\n"),
+            color: HALLOWEEN_COLOR,
+            fields: first.length
+              ? [{ name: "Ses prochaines gares", value: first.map((h) => `\`${new Intl.DateTimeFormat("fr-FR", { timeZone: "Europe/Paris", hour: "2-digit", minute: "2-digit" }).format(new Date(h.at))}\` ${esc(h.station)}`).join("\n") }]
+              : undefined,
+          },
+        ],
+      },
+    ], { crosspost: true, ping: "EVENEMENTS" });
+  }
+  // la fin, avec les meilleurs chasseurs, dans les trois jours qui suivent
+  if (now >= ed.end.getTime() && now < ed.end.getTime() + 3 * 86_400_000) {
+    const top = await topHunters(ed.year, 5);
+    const hunters = await prisma.halloweenSoul.count({ where: { year: ed.year, souls: { gt: 0 } } });
+    await postOnce(`halloween:${ed.year}:fin`, "ANNONCES", [
+      {
+        embeds: [
+          {
+            title: "🕯️ Le Train fantôme est reparti",
+            url: site ? `${site}/dashboard` : undefined,
+            description: [
+              `${hunters} compagnie${hunters > 1 ? "s ont" : " a"} récolté des âmes cette semaine. Les meilleurs chasseurs :`,
+              "",
+              top.length ? top.map((t, i) => `${medal(i)} ${esc(t.name)} · **${fmt(t.souls)}** âmes`).join("\n") : "Personne cette fois.",
+              "",
+              "Ce que vous avez débloqué est gardé pour toujours. Rendez-vous l'an prochain.",
+            ].join("\n"),
+            color: HALLOWEEN_COLOR,
+          },
+        ],
+      },
+    ], { crosspost: true });
+  }
+}
+
 /* ---------------- un passage, toutes les cinq minutes ---------------- */
 
 export async function runDiscordFeed() {
@@ -363,6 +423,7 @@ export async function runDiscordFeed() {
     ["chantier", updateWorldPost],
     ["chantier, paliers", checkWorld],
     ["fête des 200", checkTrain200],
+    ["halloween", checkHalloween],
     ["ménage du journal", pruneLogKeys],
   ];
   for (const [label, fn] of steps) {

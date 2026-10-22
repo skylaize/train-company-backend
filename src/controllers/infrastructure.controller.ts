@@ -38,6 +38,11 @@ import {
   YARD_PAY,
   YARD_TIME,
 } from "../services/infrastructure.service";
+import {
+  hslCost, hslDays, hslLineError, hslOpen, hslBuilding, hslReadyAt,
+  HSL_MIN_KM, HSL_PER_KM, HSL_MIN_COST, HSL_MIN_GRADE, HSL_KM_PER_DAY, HSL_MIN_DAYS, HSL_MAX_DAYS,
+  TGV_COST, TGV_SEATS, TGV_SPEED, TGV_FARE, TGV_WEAR, TGV_MIN_GRADE,
+} from "../services/highspeed.service";
 
 /* 2.1 : le plafond de gares suit la carrière. Les derniers grades demandent
    6 puis 10 gares alors qu'on en possédait 4 au plus : on ne pouvait pas les
@@ -79,13 +84,13 @@ export async function getInfrastructure(req: AuthRequest, res: Response) {
   const [owned, workshops, lines, allOwners, yards] = (await Promise.all([
     prisma.stationOwnership.findMany({ where: { companyId: company.id }, orderBy: { boughtAt: "asc" } }),
     prisma.workshop.findMany({ where: { companyId: company.id }, orderBy: { createdAt: "asc" } }),
-    prisma.line.findMany({ where: { companyId: company.id }, select: { id: true, departureStation: true, arrivalStation: true, stops: true, electrified: true, doubleTrack: true, _count: { select: { trains: true } } }, orderBy: { createdAt: "asc" } }),
+    prisma.line.findMany({ where: { companyId: company.id }, select: { id: true, departureStation: true, arrivalStation: true, stops: true, electrified: true, doubleTrack: true, highSpeedAt: true, highSpeedCost: true, _count: { select: { trains: true } } }, orderBy: { createdAt: "asc" } }),
     prisma.stationOwnership.findMany({ select: { station: true, companyId: true, level: true, invested: true, protectedUntil: true, company: { select: { name: true, emblem: true, liveryColor: true } } } }),
     prisma.yard.findMany({ where: { companyId: company.id }, orderBy: { createdAt: "asc" } }),
   ])) as [
     { station: string; level: number; invested: number; protectedUntil: Date; totalFees: number; totalShops: number; pendingFees: number; pendingShops: number; boughtAt: Date }[],
     { id: string; station: string; createdAt: Date }[],
-    { id: string; departureStation: string; arrivalStation: string; stops: string[]; electrified: boolean; doubleTrack: boolean; _count: { trains: number } }[],
+    { id: string; departureStation: string; arrivalStation: string; stops: string[]; electrified: boolean; doubleTrack: boolean; highSpeedAt: Date | null; highSpeedCost: number; _count: { trains: number } }[],
     { station: string; companyId: string; level: number; invested: number; protectedUntil: Date; company: { name: string; emblem: string | null; liveryColor: string } }[],
     { id: string; station: string; createdAt: Date }[]
   ];
@@ -108,6 +113,9 @@ export async function getInfrastructure(req: AuthRequest, res: Response) {
   const now = Date.now();
 
   const cap = await stationCap(company.id);
+  // 2.2 : grade, et chantier de LGV déjà en cours
+  const career = await computeCareerStatus(company.id);
+  const hslSite = lines.find((l) => hslBuilding(l));
   return res.json({
     rules: {
       maxStations: cap.max,
@@ -136,6 +144,13 @@ export async function getInfrastructure(req: AuthRequest, res: Response) {
       maxYards: MAX_YARDS,
       yardPay: YARD_PAY,
       yardTime: YARD_TIME,
+      // 2.2 : grande vitesse
+      hsl: {
+        minKm: HSL_MIN_KM, perKm: HSL_PER_KM, minCost: HSL_MIN_COST, kmPerDay: HSL_KM_PER_DAY, minDays: HSL_MIN_DAYS, maxDays: HSL_MAX_DAYS,
+        minGrade: HSL_MIN_GRADE, minGradeName: RANK_DEFINITIONS[HSL_MIN_GRADE]?.name ?? "", gradeOk: career.currentRank.id >= HSL_MIN_GRADE,
+        building: hslSite ? { lineId: hslSite.id, route: routeOf(hslSite), openAt: hslSite.highSpeedAt } : null,
+        tgv: { cost: TGV_COST, seats: TGV_SEATS, speed: TGV_SPEED, fare: TGV_FARE, wear: TGV_WEAR, minGrade: TGV_MIN_GRADE },
+      },
     },
     stations: owned.map((o) => ({
       station: o.station,
@@ -176,7 +191,17 @@ export async function getInfrastructure(req: AuthRequest, res: Response) {
     workshops: workshops.map((w) => ({ id: w.id, station: w.station, createdAt: w.createdAt, lines: lines.filter((l) => routeOf(l).includes(w.station)).length })),
     lines: lines.map((l) => {
       const route = routeOf(l);
-      return { id: l.id, route, km: routeKmOf(route), electrified: l.electrified, cost: electrifyCost(route), doubleTrack: l.doubleTrack, doubleCost: doubleTrackCost(route), trains: l._count.trains };
+      return {
+        id: l.id, route, km: routeKmOf(route), electrified: l.electrified, cost: electrifyCost(route), doubleTrack: l.doubleTrack, doubleCost: doubleTrackCost(route), trains: l._count.trains,
+        // 2.2 : la LGV de la ligne, ouverte, en chantier, ou ce qu'elle coûterait
+        hsl: {
+          state: hslOpen(l) ? "ouverte" : hslBuilding(l) ? "chantier" : "aucune",
+          openAt: l.highSpeedAt,
+          cost: l.highSpeedAt ? l.highSpeedCost : hslCost(route),
+          days: hslDays(route),
+          blocker: l.highSpeedAt ? null : hslLineError(l, route),
+        },
+      };
     }),
   });
 }
@@ -225,6 +250,37 @@ export async function doubleLine(req: AuthRequest, res: Response) {
     data: { companyId: company.id, type: "DOUBLE_VOIE", amount: -cost, lineId: line.id, description: `Double voie : ${route.join(" – ")} (${routeKmOf(route)} km)` },
   });
   return res.json({ ok: true, cost });
+}
+
+/* ---------------- 2.2 : ligne à grande vitesse ---------------- */
+
+export async function buildHighSpeed(req: AuthRequest, res: Response) {
+  const company = await companyOf(req);
+  if (!company) return res.status(404).json({ error: "Créez d'abord votre compagnie" });
+  const line = (await prisma.line.findFirst({ where: { id: req.body?.lineId, companyId: company.id } })) as
+    | { id: string; departureStation: string; arrivalStation: string; stops: string[]; electrified: boolean; doubleTrack: boolean; highSpeedAt: Date | null }
+    | null;
+  if (!line) return res.status(404).json({ error: "Ligne introuvable" });
+  const route = routeOf(line);
+  const why = hslLineError(line, route);
+  if (why) return res.status(409).json({ error: why });
+  const { currentRank } = await computeCareerStatus(company.id);
+  if (currentRank.id < HSL_MIN_GRADE) return res.status(403).json({ error: `Une LGV demande le grade « ${RANK_DEFINITIONS[HSL_MIN_GRADE]?.name} »` });
+  const site = await prisma.line.findFirst({ where: { companyId: company.id, highSpeedAt: { gt: new Date() } }, select: { departureStation: true, arrivalStation: true } });
+  if (site) return res.status(409).json({ error: `Un chantier de LGV est déjà en cours (${site.departureStation} – ${site.arrivalStation}) : un seul à la fois` });
+  const cost = hslCost(route);
+  if (!(await debit(company.id, cost))) return res.status(409).json({ error: `Trésorerie insuffisante (${cost.toLocaleString("fr-FR")} pi.)` });
+  const openAt = hslReadyAt(route);
+  // écriture conditionnelle : deux clics simultanés ne lancent pas deux chantiers
+  const done = await prisma.line.updateMany({ where: { id: line.id, highSpeedAt: null }, data: { highSpeedAt: openAt, highSpeedCost: cost, highSpeedNotified: false } });
+  if (done.count === 0) {
+    await prisma.company.update({ where: { id: company.id }, data: { balance: { increment: cost } } });
+    return res.status(409).json({ error: "Le chantier de la LGV est déjà en cours" });
+  }
+  await prisma.transaction.create({
+    data: { companyId: company.id, type: "LGV", amount: -cost, lineId: line.id, description: `Chantier de LGV : ${route.join(" – ")} (${routeKmOf(route)} km, ${hslDays(route)} jours)` },
+  });
+  return res.json({ ok: true, cost, openAt });
 }
 
 /* ---------------- 2.1 : gares de triage ---------------- */

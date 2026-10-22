@@ -3,6 +3,7 @@ import bcrypt from "bcrypt";
 import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import { prisma } from "../prisma";
+import { isBanned } from "../services/admin.service";
 import { mailEnabled, sendMail } from "../services/mail.service";
 
 const JWT_SECRET = process.env.JWT_SECRET as string;
@@ -159,6 +160,7 @@ export async function oauthCallback(req: Request, res: Response) {
       user = await prisma.user.create({ data: { email: profile.email, pseudo, password } });
       created = true;
     }
+    if (isBanned(user.id)) return backToSite(res, { erreur: "Ce compte est suspendu" });
     return backToSite(res, { token: signSession(user.id, remember), remember: remember ? "1" : "0", ...(created ? { nouveau: "1" } : {}) });
   } catch (e) {
     console.error("[oauth]", (e as Error).message);
@@ -203,6 +205,10 @@ export async function login(req: Request, res: Response) {
   const user = await findUserByEmail(email);
   if (!user || !(await bcrypt.compare(password, user.password))) {
     return res.status(401).json({ error: "Email ou mot de passe incorrect" });
+  }
+  // 2.2 : compte suspendu depuis le panneau d'administration
+  if (isBanned(user.id)) {
+    return res.status(403).json({ error: "Ce compte est suspendu. Contactez l'équipe de Réseau sur Discord." });
   }
   return res.json({ token: signSession(user.id, remember), user: publicUser(user) });
 }

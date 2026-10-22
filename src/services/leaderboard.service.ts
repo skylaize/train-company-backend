@@ -3,6 +3,7 @@ import { startOfParisWeek } from "./time.service";
 import { prisma } from "../prisma";
 import { rankFromContext, CareerContext } from "./career.service";
 import { extraWorth } from "./infrastructure.service";
+import { hslKmByCompany } from "./highspeed.service";
 
 /* Prix d'achat des rames : sert à valoriser le parc, pas seulement les liquidités.
    Doit rester aligné sur TRAIN_MODELS dans train.controller.ts. */
@@ -15,6 +16,7 @@ const TRAIN_VALUE: Record<string, number> = {
   FRET_ELECTRIQUE: 1800,
   COUCHETTES: 900,
   NUIT_EUROPE: 2400,
+  TGV: 6000, // 2.2
   // 2.0 : extensions
   VAPEUR: 600,
   LUXE: 1600,
@@ -38,7 +40,7 @@ function depotInvestment(maxTrains: number) {
    sans ce seuil, une compagnie neuve avec un seul trajet trônerait à 100 %. */
 export const PUNCTUALITY_MIN_SAMPLE = 10;
 
-export type BoardId = "valeur" | "livraisons" | "ponctualite" | "parrains";
+export type BoardId = "valeur" | "livraisons" | "ponctualite" | "parrains" | "grandeVitesse";
 
 export interface LeaderRow {
   id: string;
@@ -56,6 +58,7 @@ export interface LeaderRow {
   ponctualite: number;
   ponctualiteSample: number;
   parrains: number;
+  grandeVitesse: number; // 2.2 : km de LGV ouvertes
 }
 
 /* Additionne des couples (compagnie, valeur) en ignorant les lignes sans compagnie. */
@@ -145,6 +148,7 @@ async function computeLeaderRows(): Promise<LeaderRow[]> {
       prisma.workshop.groupBy({ by: ["companyId"], _count: { _all: true } }),
       prisma.line.groupBy({ by: ["companyId"], where: { electrified: true }, _count: { _all: true } }),
     ]);
+  const hslKm = await hslKmByCompany().catch(() => new Map<string, number>());
   const countBy = (rows: unknown) => new Map((rows as { companyId: string; _count: { _all: number } }[]).map((r) => [r.companyId, r._count._all]));
   const ownedBy = countBy(owned17);
   const workshopsBy = countBy(workshops17);
@@ -250,6 +254,7 @@ async function computeLeaderRows(): Promise<LeaderRow[]> {
       ponctualite,
       ponctualiteSample: sample,
       parrains: referralsBy.get(c.id) ?? 0,
+      grandeVitesse: hslKm.get(c.id) ?? 0,
     };
   });
 
@@ -286,6 +291,13 @@ export const BOARDS: { id: BoardId; label: string; note: string; unit: string; m
     unit: "",
     missing: "Invitez un ami : il apparaît ici dès qu'il a lancé sa première ligne.",
   },
+  {
+    id: "grandeVitesse",
+    label: "Grande vitesse",
+    note: "Kilomètres de LGV ouvertes",
+    unit: "km",
+    missing: "Ouvrez votre première LGV (Infrastructures) pour y figurer.",
+  },
 ];
 
 export function rankRows(rows: LeaderRow[], board: BoardId) {
@@ -296,6 +308,8 @@ export function rankRows(rows: LeaderRow[], board: BoardId) {
       ? rows.filter((r) => r.parrains > 0)
       : board === "livraisons"
       ? rows.filter((r) => r.livraisons > 0)
+      : board === "grandeVitesse"
+      ? rows.filter((r) => r.grandeVitesse > 0)
       : rows;
 
   return [...eligible]

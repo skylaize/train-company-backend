@@ -36,6 +36,8 @@ import { syncAllRoles } from "../services/discord-roles.service";
 import { runGiveaways } from "../services/giveaway.service";
 import { runTrialExpiry } from "../services/trial.service";
 import { parisHour } from "../services/time.service";
+import { TGV_MODEL, TGV_SPEED, TGV_FARE, TGV_WEAR, hslOpen, runHighSpeedOpenings } from "../services/highspeed.service";
+import { collectSouls, flushSouls, runHalloween } from "../services/halloween.service";
 let lastPricingHour = -1;
 import { checkPriceAlerts, runStandingOrders } from "../controllers/market.controller";
 import { DLC_MODELS, MOUNTAIN_STATIONS, MOUNTAIN_WEAR, mountainDemand, isWeekend } from "../services/dlc.service";
@@ -167,7 +169,12 @@ async function runSimulationTick() {
   // gares : un événement naît de temps en temps, annoncé une heure à l'avance
   await maybeSpawnStationEvent().catch((err) => console.error("[gares] échec :", (err as Error).message));
   const weather = await weatherMap().catch(() => new Map<string, StationWeather>());
+  // 2.2 : l'horaire du Train fantôme, avant les trajets qui récoltent les âmes
+  await runHalloween().catch((err) => console.error("[halloween] horaire :", (err as Error).message));
   await runLineTrains(weather);
+  await flushSouls(async (companyId, title, body) => {
+    await sendToCompany(companyId, { title, body, url: "/dashboard", tag: "halloween" });
+  }).catch((err) => console.error("[halloween] âmes :", (err as Error).message));
   await runFreightContracts(weather);
   await runPayroll();
   await runStaffExperience();
@@ -202,6 +209,12 @@ async function runSimulationTick() {
         })
       )
       .catch((err) => console.error("[concurrence] échec :", (err as Error).message));
+  }
+  // 2.2 : les LGV dont le chantier vient de finir
+  if (tickCount % 2 === 0) {
+    await runHighSpeedOpenings(async (companyId, title, body) => {
+      await sendToCompany(companyId, { title, body, url: "/dashboard", tag: "lgv" });
+    }).catch((err) => console.error("[lgv] ouvertures :", (err as Error).message));
   }
   // 2.1.2 : le Train des 200, gare après gare
   await runTrain200(async (companyId, title, body) => {
@@ -482,6 +495,9 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
     const mountainLine = routeOf(lineX).some((st) => MOUNTAIN_STATIONS.includes(st));
     if (mountainLine && train.model !== "CREMAILLERE") wearRate = wearRate * MOUNTAIN_WEAR;
     wearRate = wearRate * driver.wear;
+    // 2.2 : la rame TGV lancée sur sa LGV s'use plus vite
+    const tgv = train.model === TGV_MODEL && hslOpen(train.line as { highSpeedAt?: Date | null });
+    if (tgv) wearRate = wearRate * TGV_WEAR;
     const newWear = Math.min(100, train.wear + stochasticRound(wearRate));
     /* 2.0 : une rame négligée peut casser avant 100 % */
     const neglected = newWear >= NEGLECT_FROM && newWear < 100 && Math.random() < NEGLECT_CHANCE * driver.incident;
@@ -516,7 +532,7 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
     // Une rame Express effectue le trajet 30% plus vite ; 1.7 : chaque voiture ajoutée ralentit,
     // l'électrification fait gagner 10 %
     const effectiveDuration =
-      train.line.durationMinutes * (train.model === "EXPRESS" ? 0.7 : 1) * (dlcModel?.speed ?? 1) * speedFactor(trainX) * (lineX.electrified ? ELECTRIC_SPEED : 1) * (doubled ? DOUBLE_SPEED : 1);
+      train.line.durationMinutes * (train.model === "EXPRESS" ? 0.7 : 1) * (dlcModel?.speed ?? 1) * speedFactor(trainX) * (lineX.electrified ? ELECTRIC_SPEED : 1) * (doubled ? DOUBLE_SPEED : 1) * (tgv ? TGV_SPEED : 1);
     const progress = Math.min(100, Math.floor((elapsedMinutes / effectiveDuration) * 100));
 
     if (progress >= 100) {
@@ -586,7 +602,9 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
           (heritage?.prestige ?? 1) *
           controllerBonus(crew?.CONTROLEUR) *
           // 2.1 : double voie, le cadencement attire du monde
-          (doubled ? cadenceBonus(runningOnLine.get(train.lineId as string) ?? 1) : 1)
+          (doubled ? cadenceBonus(runningOnLine.get(train.lineId as string) ?? 1) : 1) *
+          // 2.2 : le billet de la grande vitesse
+          (tgv ? TGV_FARE : 1)
       );
       /* 1.7 : gares achetées. Chez soi, le trajet rapporte un peu plus ; chez
          les autres, il leur doit une redevance de quai ; partout où il y a des
@@ -666,6 +684,7 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
       addSeasonPoints(train.companyId, POINTS.TRIP + (fullish ? POINTS.TRIP_FULL : 0));
       seasonEvent(train.companyId, "TRIPS");
       contribute(train.companyId); // 2.0 : le Grand Chantier avance d'un trajet
+      collectSouls(train.companyId, route); // 2.2 : Halloween, le trajet passe-t-il par la gare hantée ?
       if (fullish) seasonEvent(train.companyId, "FULL_TRIPS");
       if (load.seats > 0 && load.passengers >= load.seats && PEAK_HOURS.includes(parisHour())) seasonEvent(train.companyId, "RUSH_FULL");
       if (international) seasonEvent(train.companyId, "INTL");
