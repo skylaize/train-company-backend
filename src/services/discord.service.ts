@@ -167,15 +167,33 @@ export function esc(s: string) {
 
 export const fmt = (n: number) => new Intl.NumberFormat("fr-FR").format(Math.round(n));
 
-async function send(channel: string, payload: MessagePayload) {
+async function send(channel: string, payload: MessagePayload, file?: DiscordFile) {
+  if (file) return sendWithFile(channel, { ...SAFE, ...payload }, file);
   const msg = await rest<{ id: string }>("POST", `/channels/${channel}/messages`, { body: { ...SAFE, ...payload } });
   return msg!.id;
+}
+
+/* 2.2 : un message avec une image jointe (le visuel du panneau d'administration).
+   Dans l'embed, l'image se désigne par « attachment://<nom> ». */
+export type DiscordFile = { name: string; data: Buffer; type: string };
+async function sendWithFile(channel: string, payload: MessagePayload, file: DiscordFile) {
+  const form = new FormData();
+  form.append("payload_json", JSON.stringify({ ...payload, attachments: [{ id: 0, filename: file.name }] }));
+  form.append("files[0]", new Blob([file.data], { type: file.type }), file.name);
+  const r = await fetch(`https://discord.com/api/v10/channels/${channel}/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bot ${BOT_TOKEN}` },
+    body: form,
+  });
+  const text = await r.text();
+  if (!r.ok) throw new DiscordError(r.status, `POST /channels/${channel}/messages (fichier) → ${r.status} ${text.slice(0, 200)}`);
+  return (JSON.parse(text) as { id: string }).id;
 }
 
 /* Publie une seule fois un message (ou une suite de messages) identifié par
    sa clé. Dans un salon d'annonces, il est aussi « publié » vers les serveurs
    qui suivent le salon. Renvoie false s'il l'était déjà. */
-export async function postOnce(key: string, channelKey: ChannelKey, payloads: MessagePayload[], opts: { crosspost?: boolean; ping?: NotifyRole } = {}) {
+export async function postOnce(key: string, channelKey: ChannelKey, payloads: MessagePayload[], opts: { crosspost?: boolean; ping?: NotifyRole; file?: DiscordFile } = {}) {
   if (!botEnabled() || payloads.length === 0) return false;
   if (await prisma.discordPost.findUnique({ where: { key } })) return false;
   const channel = await channelId(channelKey);
@@ -192,7 +210,8 @@ export async function postOnce(key: string, channelKey: ChannelKey, payloads: Me
     // la mention ne part qu'avec le premier message d'une annonce en plusieurs parties
     if (opts.ping) payloads = [{ ...payloads[0], ...(await rolePing(opts.ping)) }, ...payloads.slice(1)];
     for (const p of payloads) {
-      const id = await send(channel, p);
+      // l'image jointe part avec le premier message
+      const id = await send(channel, p, first ? undefined : opts.file);
       if (!first) first = id;
       if (opts.crosspost) await rest("POST", `/channels/${channel}/messages/${id}/crosspost`).catch(() => undefined);
     }

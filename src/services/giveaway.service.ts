@@ -118,7 +118,9 @@ export async function createGiveaway(input: { channelId: string; prize: Prize; w
     await prisma.giveaway.delete({ where: { id: g.id } }).catch(() => undefined);
     throw err;
   }
-  void logStaff(`🎉 <@${input.createdBy}> lance un giveaway dans <#${input.channelId}> : ${prizeLabel(input.prize)}, ${input.winners} gagnant${input.winners > 1 ? "s" : ""}, fin ${ts(g.endsAt)}`);
+  // 2.2 : lancé depuis le panneau admin par un compte sans Discord lié → pas de mention
+  const by = /^\d{15,}$/.test(input.createdBy) ? `<@${input.createdBy}>` : "Le panneau admin";
+  void logStaff(`🎉 ${by} lance un giveaway dans <#${input.channelId}> : ${prizeLabel(input.prize)}, ${input.winners} gagnant${input.winners > 1 ? "s" : ""}, fin ${ts(g.endsAt)}`);
   return g;
 }
 

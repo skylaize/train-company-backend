@@ -44,7 +44,7 @@ export const NIGHT_MIN_DURATION = 10;
 
 /* 2.0 : une rame de collection ne se déprécie pas avec l'âge : elle se
    reprend à 90 % de ce qu'elle a coûté (rachat et pièces), selon son état. */
-function trainValue(t: Parameters<typeof resaleValue>[0] & { heritage?: unknown }) {
+export function trainValue(t: Parameters<typeof resaleValue>[0] & { heritage?: unknown }) {
   const h = heritageOf(t);
   if (h) return Math.max(10, Math.round(h.value * 0.9 * (1 - Math.min(100, t.wear) / 250)));
   return resaleValue(t, TRAIN_MODELS[t.model]?.cost ?? 200);
