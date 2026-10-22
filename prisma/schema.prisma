@@ -334,6 +334,11 @@ model Line {
   priceRatio        Float    @default(1)
   electrified       Boolean  @default(false)
   doubleTrack       Boolean  @default(false) // 2.1 : double voie
+  // 2.2 : ligne à grande vitesse. Date d'ouverture (chantier en cours tant
+  // qu'elle est dans le futur), ce qu'elle a coûté, et l'ouverture déjà annoncée
+  highSpeedAt       DateTime?
+  highSpeedCost     Int      @default(0)
+  highSpeedNotified Boolean  @default(false)
   autoPrice         Boolean  @default(false) // Premium : le prix se cale chaque heure sur le prix conseillé
 
   company           Company  @relation(fields: [companyId], references: [id])
@@ -1023,4 +1028,17 @@ model SpecialTrainVisit {
 
   @@unique([trainId, companyId])
   @@index([trainId, at])
+}
+
+// 2.2 : Halloween. Les âmes récoltées par une compagnie pendant l'édition
+// d'une année (le Train fantôme hante une gare, voir halloween.service).
+model HalloweenSoul {
+  id        String   @id @default(uuid())
+  year      Int
+  companyId String
+  souls     Int      @default(0)
+  updatedAt DateTime @updatedAt
+
+  @@unique([year, companyId])
+  @@index([year, souls])
 }

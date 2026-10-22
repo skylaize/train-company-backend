@@ -31,6 +31,8 @@ const RULES: { path: RegExp; ttl: number; shared?: boolean }[] = [
   // 2.1.2 : la grande carte des 200, la même pour tous
   { path: /^\/api\/pioneers\/map$/, ttl: 300_000, shared: true },
   { path: /^\/api\/celebration$/, ttl: 30_000, shared: true },
+  // 2.2 : Halloween (mes âmes et le classement bougent à chaque tour)
+  { path: /^\/api\/halloween$/, ttl: 20_000 },
 ];
 
 type Entry = { at: number; ttl: number; owner: string; status: number; body: unknown };

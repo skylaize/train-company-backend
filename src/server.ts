@@ -40,6 +40,7 @@ import { financeRouter } from "./routes/finance.routes";
 import { v2Router } from "./routes/v2.routes";
 import { discordRouter } from "./routes/discord.routes";
 import { pioneerRouter } from "./routes/pioneer.routes"; // 2.1.2
+import { halloweenRouter } from "./routes/halloween.routes"; // 2.2
 import { discordInteractions, registerDiscordCommands } from "./controllers/discord.controller";
 import { startDiscordGateway } from "./services/discord-gateway.service";
 import { responseCache } from "./middleware/responseCache";
@@ -115,6 +116,7 @@ app.use("/api", careerRouter);
 app.use("/api", referralRouter);
 app.use("/api", adsRouter);
 app.use("/api", pioneerRouter);
+app.use("/api", halloweenRouter);
 
 /* 2.1.2 : toute erreur de route finit ici, avec une vraie réponse 500 et
    une ligne lisible dans les journaux de Coolify. */

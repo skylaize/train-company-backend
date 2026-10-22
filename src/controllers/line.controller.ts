@@ -144,6 +144,11 @@ export async function updateLine(req: AuthRequest, res: Response) {
   const same = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
   const routeChanged = !same(route, before) && !same(route, [...before].reverse());
 
+  // 2.2 : une LGV (ouverte ou en chantier) fige les gares de sa ligne
+  if (routeChanged && (line as { highSpeedAt?: Date | null }).highSpeedAt) {
+    return res.status(409).json({ error: "Cette ligne a une LGV : ses gares ne peuvent plus changer. Ouvrez une autre ligne pour desservir d'autres gares." });
+  }
+
   const noLicence = licenceError(company as { intlLicenceAt?: Date | null }, route);
   if (noLicence) return res.status(403).json({ error: noLicence });
 
