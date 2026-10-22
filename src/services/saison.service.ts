@@ -100,6 +100,12 @@ export async function currentSeason(): Promise<SeasonRow | null> {
   return current;
 }
 
+/* 2.2 : après une modification depuis le panneau d'administration. */
+export function invalidateSeason() {
+  current = null;
+  currentAt = 0;
+}
+
 /* Fin de saison : le lundi à 0 h (heure de Paris) qui suit les 28 jours. */
 function seasonEnd(startsAt: Date) {
   const d = parisDate(new Date(startsAt.getTime() + SEASON_DAYS * DAY_MS));

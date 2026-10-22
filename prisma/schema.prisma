@@ -25,6 +25,9 @@ model User {
   // joueur n'a pas cliqué sur « Lier mon Discord » dans les Paramètres.
   discordId   String? @unique
   discordName String?
+  // 2.2 : compte suspendu depuis le panneau d'administration (toute l'API lui répond 403)
+  bannedAt     DateTime?
+  bannedReason String?
 
   company   Company?
   passwordResets PasswordReset[]
@@ -1023,4 +1026,41 @@ model SpecialTrainVisit {
 
   @@unique([trainId, companyId])
   @@index([trainId, at])
+}
+
+// ============================================================
+// 2.2 — Panneau d'administration
+// ============================================================
+
+// Tout ce que fait un admin depuis le panneau : qui, quoi, sur qui.
+model AdminAction {
+  id        String   @id @default(uuid())
+  adminId   String   // User.id de l'admin
+  adminName String
+  action    String   // ARGENT | PREMIUM | OBJET | BAN | RENOMMER | ALLIANCE | SAISON | CHANTIER | ANNONCE | GIVEAWAY
+  targetId  String?  // compagnie, alliance, saison…
+  target    String?  // libellé lisible, figé au moment de l'action
+  details   String   @default("")
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([targetId])
+}
+
+// Une annonce rédigée dans le panneau : publiée sur Discord, et son texte
+// Instagram préparé à côté (publication à la main).
+model Announcement {
+  id          String   @id @default(uuid())
+  title       String
+  body        String
+  imageUrl    String?
+  channel     String   // ANNONCES | PATCH_NOTES | SAISONS | CHANTIER
+  ping        String?  // MAJ | EVENEMENTS
+  igCaption   String   @default("")
+  discordKey  String?  // clé DiscordPost, null si non publiée sur Discord
+  pushSent    Int      @default(0)
+  createdBy   String
+  createdAt   DateTime @default(now())
+
+  @@index([createdAt])
 }
