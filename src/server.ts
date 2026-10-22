@@ -41,6 +41,8 @@ import { v2Router } from "./routes/v2.routes";
 import { discordRouter } from "./routes/discord.routes";
 import { pioneerRouter } from "./routes/pioneer.routes"; // 2.1.2
 import { halloweenRouter } from "./routes/halloween.routes"; // 2.2
+import { adminRouter } from "./routes/admin.routes"; // 2.2
+import { warmBanList } from "./services/admin.service";
 import { discordInteractions, registerDiscordCommands } from "./controllers/discord.controller";
 import { startDiscordGateway } from "./services/discord-gateway.service";
 import { responseCache } from "./middleware/responseCache";
@@ -74,6 +76,8 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), handl
 // 2.1 : commandes slash Discord, signées elles aussi sur le corps brut
 app.post("/api/discord/interactions", express.raw({ type: "application/json" }), discordInteractions);
 
+// 2.2 : le panneau d'administration envoie le visuel des annonces (image en base64)
+app.use("/api/admin", express.json({ limit: "8mb" }));
 app.use(express.json());
 // 2.0 : réponses lourdes gardées quelques secondes par joueur (voir responseCache)
 app.use(responseCache);
@@ -82,6 +86,8 @@ app.get("/", (_req, res) => {
   res.json({ status: "ok", service: "train-company-backend" });
 });
 
+// 2.2 : panneau d'administration (avant les autres routeurs : préfixe dédié)
+app.use("/api/admin", adminRouter);
 app.use("/api/auth", authRouter);
 app.use("/api", userRouter);
 app.use("/api", companyRouter);
@@ -133,6 +139,7 @@ const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`Serveur démarré sur http://localhost:${PORT}`);
   startSimulationJob();
+  void warmBanList();
   void registerDiscordCommands();
   // 2.1 : bienvenue aux nouveaux membres et bot « en ligne »
   startDiscordGateway();
