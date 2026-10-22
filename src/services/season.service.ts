@@ -1,5 +1,6 @@
 import { parisDate, parisMidnight } from "./time.service";
 import type { StationEvent } from "./station.service";
+import { hauntStationEvents } from "./halloween.service";
 
 /* ============================================================
    Événements saisonniers (1.5).
@@ -113,16 +114,18 @@ export function upcomingSeasonalEvent(now = new Date()) {
 
 /* Les gares de la saison, au format des événements de gare. */
 export function seasonalStationEvents(now = new Date()): StationEvent[] {
+  // 2.2 : la gare hantée par le Train fantôme attire les curieux
+  const haunted = hauntStationEvents(now);
   const ev = activeSeasonalEvent(now);
-  if (!ev) return [];
-  return ev.stations.map((station) => ({
+  if (!ev) return haunted;
+  return [...haunted, ...ev.stations.map((station) => ({
     id: `saison-${ev.id}-${station}`,
     station,
     label: ev.name,
     multiplier: ev.multiplier,
     startsAt: ev.startsAt,
     endsAt: ev.endsAt,
-  }));
+  }))];
 }
 
 /* 2.1 : des éditions limitées de boutique seulement, sans gares à l'honneur

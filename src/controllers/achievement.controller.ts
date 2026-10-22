@@ -11,6 +11,8 @@ import { isBuilder } from "../services/world.service";
 import { SEASONAL_EVENTS, latestEdition } from "../services/season.service";
 import { stationCounts, withTrainCount } from "../services/hub.service";
 import { INTERNATIONAL_STATIONS, FIRST_INTERNATIONAL } from "../services/international.service";
+import { TGV_MODEL } from "../services/highspeed.service";
+import { bestSouls } from "../services/halloween.service";
 
 export async function listMyAchievements(req: AuthRequest, res: Response) {
   const company = await prisma.company.findUnique({
@@ -195,6 +197,13 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
   // 2.1.1 : trains de nuit internationaux
   const nightIntl211 = (await prisma.train.findMany({ where: { companyId: company.id, model: "NUIT_EUROPE" }, select: { lineId: true } })) as { lineId: string | null }[];
   const cadenced21 = doubledLines21.some((l) => l._count.trains >= 3);
+  // 2.2 : grande vitesse et Halloween
+  const [hslLines22, tgvRunning22, souls22] = (await Promise.all([
+    prisma.line.findMany({ where: { companyId: company.id, highSpeedAt: { not: null } }, select: { highSpeedAt: true } }),
+    prisma.train.count({ where: { companyId: company.id, model: TGV_MODEL, status: "EN_ROUTE", lineId: { not: null } } }),
+    bestSouls(company.id).catch(() => 0),
+  ])) as [{ highSpeedAt: Date | null }[], number, number];
+  const hslOpened22 = hslLines22.filter((l) => l.highSpeedAt && l.highSpeedAt.getTime() <= Date.now()).length;
   // 1.7 : itinéraires, composition, infrastructures, finances
   const [lines17, trains17, stationsOwned, electrified, workshopsOpen, loansRepaid, dividends] = (await Promise.all([
     prisma.line.findMany({ where: { companyId: company.id }, select: { stops: true, priceRatio: true } }),
@@ -840,6 +849,12 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     // ---- 2.1.1 : trains de nuit internationaux ----
     { id: "wagons-lits", name: "Wagons-lits", description: "Mettre en ligne un train de nuit international", liveMet: nightIntl211.some((t) => t.lineId) },
     { id: "nuits-d-europe", name: "Nuits d'Europe", description: "Faire rouler trois trains de nuit internationaux", liveMet: nightIntl211.filter((t) => t.lineId).length >= 3 },
+    // ---- 2.2 : la grande vitesse, Halloween ----
+    { id: "premier-coup-de-pioche", name: "Premier coup de pioche", description: "Lancer le chantier d'une ligne à grande vitesse", liveMet: hslLines22.length >= 1 },
+    { id: "a-grande-vitesse", name: "À grande vitesse", description: "Ouvrir une ligne à grande vitesse", liveMet: hslOpened22 >= 1 },
+    { id: "trois-tgv", name: "Trois TGV", description: "Faire rouler trois rames TGV en même temps", liveMet: tgvRunning22 >= 3 },
+    { id: "train-fantome", name: "Train fantôme", description: "Récolter 13 âmes pendant Halloween", liveMet: souls22 >= 13 },
+    { id: "exorciste", name: "Exorciste", description: "Récolter 300 âmes pendant une même semaine d'Halloween", liveMet: souls22 >= 300 },
   ];
 
   /* 1.6 : « Premiers pas » récompense la liste de départ au complet. Chaque étape

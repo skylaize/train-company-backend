@@ -201,16 +201,19 @@ export async function workshopsByCompany(): Promise<Map<string, Set<string>>> {
    et ce qui est dû à la banque, qui se retranche — sans quoi un emprunt ferait
    grimper la valeur d'autant. */
 export async function extraWorth(): Promise<Map<string, number>> {
-  const [stations, workshops, loans, holdings] = (await Promise.all([
+  const [stations, workshops, loans, holdings, hsl] = (await Promise.all([
     prisma.stationOwnership.findMany({ select: { companyId: true, invested: true } }),
     prisma.workshop.findMany({ select: { companyId: true } }),
     prisma.loan.findMany({ where: { closedAt: null }, select: { companyId: true, remaining: true } }),
     prisma.shareholding.findMany({ select: { holderId: true, shares: true, issuer: { select: { sharePrice: true } } } }),
+    // 2.2 : une LGV, même en chantier, compte pour moitié de son prix
+    prisma.line.findMany({ where: { highSpeedCost: { gt: 0 } }, select: { companyId: true, highSpeedCost: true } }),
   ])) as [
     { companyId: string; invested: number }[],
     { companyId: string }[],
     { companyId: string; remaining: number }[],
-    { holderId: string; shares: number; issuer: { sharePrice: number } | null }[]
+    { holderId: string; shares: number; issuer: { sharePrice: number } | null }[],
+    { companyId: string; highSpeedCost: number }[]
   ];
   const m = new Map<string, number>();
   const add = (id: string, v: number) => m.set(id, (m.get(id) ?? 0) + v);
@@ -218,5 +221,6 @@ export async function extraWorth(): Promise<Map<string, number>> {
   for (const w of workshops) add(w.companyId, Math.round(WORKSHOP_COST * SELL_BACK));
   for (const l of loans) add(l.companyId, -l.remaining);
   for (const h of holdings) add(h.holderId, Math.round(h.shares * (h.issuer?.sharePrice ?? 0)));
+  for (const l of hsl) add(l.companyId, Math.round(l.highSpeedCost * 0.5));
   return m;
 }

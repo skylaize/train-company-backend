@@ -1,4 +1,5 @@
 import { RELEASE_171 } from "../release";
+import { halloweenUnlocks } from "./halloween.service";
 import { seasonUnlocks } from "./saison.service";
 import { isBuilder, BUILDER_EMBLEM } from "./world.service";
 
@@ -645,6 +646,13 @@ export async function unlockedFor(companyId: string) {
     pass.emblems.forEach((e) => emblems.add(e));
     pass.titles.forEach((t) => titles.add(t));
     pass.plates.forEach((p) => plates.add(p));
+  }
+  // 2.2 : ce que les âmes d'Halloween ont fait gagner
+  const ghosts = await halloweenUnlocks(companyId).catch(() => null);
+  if (ghosts) {
+    ghosts.emblems.forEach((e) => emblems.add(e));
+    ghosts.titles.forEach((t) => titles.add(t));
+    ghosts.liveries.forEach((c) => liveries.add(c.toLowerCase()));
   }
   // 1.4 : chaque grade à partir du Directeur régional donne son nom en titre
   careerTitles(career.currentRank.id).forEach((t) => titles.add(t));
