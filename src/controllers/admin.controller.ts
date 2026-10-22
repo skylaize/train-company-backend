@@ -15,6 +15,10 @@ import { syncCompany, clearRoles } from "../services/discord-roles.service";
 import { botEnabled, BRAND_COLOR, channelId, CHANNELS, ChannelKey, DiscordFile, GUILD_ID, NOTIFY_ROLES, NotifyRole, postOnce, rest } from "../services/discord.service";
 import { createGiveaway, finishGiveaway, rerollGiveaway, parseDuration, MIN_DURATION_MS, MAX_DURATION_MS, MAX_WINNERS } from "../services/giveaway.service";
 import { LIVERY_PREMIUM } from "./company.controller";
+import { TRAIN_MODELS, trainValue } from "./train.controller";
+import { heritageOf } from "../services/wreck.service";
+import { CARS } from "../services/ridership.service";
+import { WAGONS } from "../services/freight.service";
 
 /* ============================================================
    Panneau d'administration (2.2) — /api/admin/*
@@ -262,7 +266,14 @@ export async function playerDetail(req: AuthRequest, res: Response) {
     where: { id },
     include: {
       owner: { select: { id: true, email: true, pseudo: true, createdAt: true, discordId: true, discordName: true, bannedAt: true, bannedReason: true } },
-      trains: { select: { id: true, name: true, model: true, status: true, wear: true, brokenPart: true, line: { select: { name: true } } }, orderBy: { purchasedAt: "asc" } },
+      trains: {
+        select: {
+          id: true, name: true, model: true, status: true, wear: true, brokenPart: true, cars: true, purchasedAt: true, heritage: true,
+          lineId: true, departedAt: true, progress: true, workshopUntil: true, partsEta: true, line: { select: { name: true } },
+          _count: { select: { contracts: true } },
+        },
+        orderBy: { purchasedAt: "asc" },
+      },
       lines: { select: { id: true, name: true, departureStation: true, arrivalStation: true, stops: true, priceRatio: true, _count: { select: { trains: true } } }, orderBy: { createdAt: "asc" } },
       shopPurchases: { select: { itemId: true, amountCents: true, purchasedAt: true, giftFrom: true, stripeSessionId: true }, orderBy: { purchasedAt: "desc" } },
       transactions: { select: { id: true, type: true, amount: true, description: true, createdAt: true }, orderBy: { createdAt: "desc" }, take: 60 },
@@ -300,7 +311,14 @@ export async function playerDetail(req: AuthRequest, res: Response) {
     reputationAdjust: c.reputationAdjust,
     division: DIVISIONS[c.division] ?? "—",
     owner: c.owner,
-    trains: c.trains.map((t: any) => ({ id: t.id, name: t.name, model: t.model, status: t.status, wear: t.wear, broken: t.brokenPart, line: t.line?.name ?? null })),
+    trains: c.trains.map((t: any) => ({
+      id: t.id, name: t.name, model: t.model, status: t.status, wear: t.wear, broken: t.brokenPart, line: t.line?.name ?? null,
+      progress: t.progress, departedAt: t.departedAt, workshopUntil: t.workshopUntil, partsEta: t.partsEta, freight: t._count.contracts,
+      purchasedAt: t.purchasedAt,
+      // 2.2 : ce qu'on peut rembourser si on la retire
+      purchase: purchasePrice(t),
+      resale: trainValue(t),
+    })),
     lines: c.lines.map((l: any) => ({ id: l.id, name: l.name, route: [l.departureStation, ...(l.stops ?? []), l.arrivalStation], priceRatio: l.priceRatio, trains: l._count.trains })),
     purchases: c.shopPurchases.map((p: any) => ({
       itemId: p.itemId,
@@ -481,6 +499,94 @@ export async function adjustSeasonPoints(req: AuthRequest, res: Response) {
   await prisma.seasonEntry.update({ where: { id: entry.id }, data: { points } });
   await logAdmin(actor(req), "SAISON", { id: c.id, label: c.name }, reset ? `points de saison remis à 0 (avant : ${fmt(entry.points)})` : `points de saison ${delta > 0 ? "+" : ""}${fmt(delta)} → ${fmt(points)}`);
   res.json({ ok: true, points });
+}
+
+/* ---------------- rames : débloquer, retirer et rembourser ---------------- */
+
+/* Ce que la rame a coûté : le modèle et ses voitures ou wagons au prix plein ;
+   une rame de collection, tout ce qui a été investi pour la restaurer. */
+function purchasePrice(t: { model: string; cars?: string[] | null; heritage?: unknown }) {
+  const h = heritageOf(t as { heritage?: unknown });
+  if (h) return Math.round(h.value);
+  const cars = (t.cars ?? []).reduce((n, c) => n + (CARS[c]?.price ?? (WAGONS as Record<string, { price: number }>)[c]?.price ?? 0), 0);
+  return (TRAIN_MODELS[t.model]?.cost ?? 200) + cars;
+}
+
+async function trainOr404(res: Response, companyId: string, trainId: string) {
+  const t = await prisma.train.findFirst({ where: { id: trainId, companyId } });
+  if (!t) bad(res, 404, "Rame introuvable");
+  return t as any;
+}
+
+/* Une rame coincée (trajet qui ne finit plus, statut incohérent) revient au
+   dépôt, à quai, prête à repartir. Son usure et ses organes ne bougent pas.
+   Un fret en cours repart sur le marché. */
+export async function resetTrain(req: AuthRequest, res: Response) {
+  const c = await companyOr404(res, req.params.id);
+  if (!c) return;
+  const t = await trainOr404(res, c.id, req.params.trainId);
+  if (!t) return;
+  const repaired = req.body?.repair === true;
+  const freed = await prisma.$transaction(async (tx: any) => {
+    const contracts = await tx.contract.updateMany({
+      where: { trainId: t.id, status: "EN_COURS" },
+      data: { status: "DISPONIBLE", trainId: null, companyId: null, acceptedAt: null, tourMinutes: null },
+    });
+    await tx.train.update({
+      where: { id: t.id },
+      data: {
+        status: "IDLE", lineId: null, progress: 0, departedAt: null, direction: 0, workshopUntil: null, partsEta: null,
+        ...(repaired ? { wear: 0, brokenPart: null } : t.wear >= 100 || t.brokenPart ? { status: "MAINTENANCE" } : {}),
+      },
+    });
+    return contracts.count;
+  });
+  await logAdmin(actor(req), "RAME", { id: c.id, label: c.name }, `${t.name} remise au dépôt${repaired ? " et réparée" : ""}${freed ? ` (${freed} contrat${freed > 1 ? "s" : ""} de fret rendu${freed > 1 ? "s" : ""} au marché)` : ""}`);
+  res.json({ ok: true, freed });
+}
+
+/* Retire une rame du parc et rembourse le joueur : au prix d'achat, au prix
+   de reprise du jour, d'un montant libre, ou pas du tout. */
+export async function removeTrain(req: AuthRequest, res: Response) {
+  const c = await companyOr404(res, req.params.id);
+  if (!c) return;
+  const t = await trainOr404(res, c.id, req.params.trainId);
+  if (!t) return;
+  const mode = str(req.body?.refund, 20) || "achat";
+  const reason = str(req.body?.reason, 120) || "rame défectueuse";
+  let refund = 0;
+  if (mode === "achat") refund = purchasePrice(t);
+  else if (mode === "revente") refund = trainValue(t);
+  else if (mode === "montant") {
+    refund = int(req.body?.amount);
+    if (!(refund >= 0 && refund <= 1_000_000)) return bad(res, 400, "Montant de remboursement invalide (de 0 à 1 000 000)");
+  } else if (mode !== "aucun") return bad(res, 400, "Remboursement inconnu (achat, revente, montant, aucun)");
+
+  await prisma.$transaction(async (tx: any) => {
+    // le fret en cours repart sur le marché, l'équipage descend, l'historique des incidents part avec la rame
+    await tx.contract.updateMany({ where: { trainId: t.id, status: "EN_COURS" }, data: { status: "DISPONIBLE", trainId: null, companyId: null, acceptedAt: null, tourMinutes: null } });
+    await tx.contract.updateMany({ where: { trainId: t.id }, data: { trainId: null } });
+    await tx.staff.updateMany({ where: { trainId: t.id }, data: { trainId: null } });
+    await tx.incident.deleteMany({ where: { trainId: t.id } });
+    await tx.wreck.updateMany({ where: { trainId: t.id }, data: { trainId: null } });
+    await tx.train.delete({ where: { id: t.id } });
+    if (refund > 0) {
+      await tx.company.update({ where: { id: c.id }, data: { balance: { increment: refund } } });
+    }
+    await tx.transaction.create({
+      data: { companyId: c.id, type: "REMBOURSEMENT", amount: refund, description: `${t.name} retirée par ${GIFT_FROM}${refund > 0 ? ", remboursée" : ""} : ${reason}` },
+    });
+  });
+  if (refund > 0) {
+    void sendToCompany(c.id, {
+      title: "Rame remboursée",
+      body: `L'équipe de Réseau a retiré ${t.name} (${reason}) et vous rembourse ${fmt(refund)} pi.`,
+      url: "/dashboard",
+      tag: "cadeau",
+    });
+  }
+  await logAdmin(actor(req), "RAME", { id: c.id, label: c.name }, `${t.name} (${t.model.toLowerCase()}) retirée, ${refund > 0 ? `remboursée ${fmt(refund)} pi.` : "sans remboursement"} — ${reason}`);
+  res.json({ ok: true, refund });
 }
 
 /* ---------------- saisons et Grand Chantier ---------------- */

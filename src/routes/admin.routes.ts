@@ -21,6 +21,8 @@ adminRouter.delete("/players/:id/items/:itemId", admin.revokeItem);
 adminRouter.post("/players/:id/ban", admin.banPlayer);
 adminRouter.delete("/players/:id/ban", admin.unbanPlayer);
 adminRouter.post("/players/:id/season-points", admin.adjustSeasonPoints);
+adminRouter.post("/players/:id/trains/:trainId/reset", admin.resetTrain);
+adminRouter.delete("/players/:id/trains/:trainId", admin.removeTrain);
 
 adminRouter.get("/seasons", admin.seasons);
 adminRouter.patch("/seasons/:id", admin.updateSeason);
