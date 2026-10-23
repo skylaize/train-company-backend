@@ -830,6 +830,11 @@ export async function runFreightContracts(weather: Map<string, StationWeather> =
     if (arrivesBroken) {
       const repaired = await tryAutoRepair({ ...train, companyId }, null);
       if (!repaired) await prisma.incident.create({ data: { trainId: train.id, message: `${train.name} est rentré en panne et nécessite une réparation` } });
+    } else {
+      // 2.2.1 : et la révision programmée, comme en fin de trajet voyageurs
+      await scheduledService({ id: train.id, name: train.name, companyId, lineId: null, serviceAt: train.serviceAt }, wearAfter).catch((err) =>
+        console.error("[atelier] révision du fret :", (err as Error).message)
+      );
     }
   }
 }
@@ -943,7 +948,17 @@ async function afterTrip(
     return;
   }
 
-  // révision programmée : en fin de trajet, au-delà du seuil
+  await scheduledService(train, wear);
+}
+
+/* Révision programmée : en fin de trajet, au-delà du seuil choisi par le
+   joueur. 2.2.1 : appelée aussi à l'arrivée d'un train de fret — elle ne
+   l'était qu'en fin de trajet voyageurs, et le réglage restait sans effet sur
+   les locomotives de fret (merci Kiri). */
+async function scheduledService(
+  train: { id: string; name: string; companyId: string; lineId: string | null; serviceAt?: number | null },
+  wear: number
+) {
   if (!train.serviceAt || wear < train.serviceAt) return;
   const company = await prisma.company.findUnique({ where: { id: train.companyId }, select: { balance: true } });
   const fx = await staffEffectsFor(train.companyId);
