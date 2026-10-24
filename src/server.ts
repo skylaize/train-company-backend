@@ -40,6 +40,7 @@ import { financeRouter } from "./routes/finance.routes";
 import { v2Router } from "./routes/v2.routes";
 import { discordRouter } from "./routes/discord.routes";
 import { pioneerRouter } from "./routes/pioneer.routes"; // 2.1.2
+import { economyRouter } from "./routes/economy.routes"; // 2.4
 import { halloweenRouter } from "./routes/halloween.routes"; // 2.2
 import { adminRouter } from "./routes/admin.routes"; // 2.2
 import { warmBanList } from "./services/admin.service";
@@ -122,6 +123,7 @@ app.use("/api", careerRouter);
 app.use("/api", referralRouter);
 app.use("/api", adsRouter);
 app.use("/api", pioneerRouter);
+app.use("/api", economyRouter);
 app.use("/api", halloweenRouter);
 
 /* 2.1.2 : toute erreur de route finit ici, avec une vraie réponse 500 et
