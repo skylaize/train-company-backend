@@ -17,6 +17,11 @@ import { runLoanPayments, runSharePrices, runDividends, runWeeklyReports, runSto
 import { runAutoPricing } from "../services/pricing.service";
 import { isFreightModel, modelBonus } from "../services/freight.service";
 import { sendToCompany } from "../services/push.service";
+import { consumePart } from "../services/parts-market.service";
+import { economy, inTrial } from "../services/settings.service";
+import { meterAdd, routeInOutage, tripEnergy } from "../services/energy.service";
+import { cofunderMultiplier, routeTrack, tollsFor, wearTrack } from "../services/track.service";
+import { economyAfterTick, economyBeforeTick } from "../services/economy24.service";
 import { runTrain200 } from "../services/train200.service";
 import { seasonalStationEvents } from "../services/season.service";
 import { allStationCounts, hubMultiplier } from "../services/hub.service";
@@ -189,6 +194,8 @@ async function runSimulationTick() {
   // gares : un événement naît de temps en temps, annoncé une heure à l'avance
   await maybeSpawnStationEvent().catch((err) => console.error("[gares] échec :", (err as Error).message));
   const weather = await weatherMap().catch(() => new Map<string, StationWeather>());
+  // 2.4 : réglages, cours, état des voies et des pièces, relus une fois pour le tour
+  await economyBeforeTick();
   // 2.2 : l'horaire du Train fantôme, avant les trajets qui récoltent les âmes
   await runHalloween().catch((err) => console.error("[halloween] horaire :", (err as Error).message));
   await runLineTrains(weather);
@@ -202,6 +209,10 @@ async function runSimulationTick() {
   await runWorkshop().catch((err) => console.error("[atelier] échec :", (err as Error).message));
   await runWrecks().catch((err) => console.error("[épaves] échec :", (err as Error).message));
   if (tickCount % 10 === 2) await healStuckTrains().catch((err) => console.error("[rames] échec :", (err as Error).message));
+  // 2.4 : compteurs, usure des voies et pièces écrits ; chaque heure, factures, cours, carbone
+  await economyAfterTick(weather, async (companyId, title, body) => {
+    await sendToCompany(companyId, { title, body, url: "/dashboard", tag: "energie" });
+  });
   await runUpkeep();
   // avant de réapprovisionner : les ordres périmés libèrent leur marchandise
   await expireMissions();
@@ -449,6 +460,10 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
     include: { line: true },
   });
   const staffEffects = await staffEffectsByCompany();
+  // 2.4 : compagnies dont la facture de gazole est restée impayée (jamais pendant l'essai)
+  const fuelBlocked = inTrial()
+    ? new Set<string>()
+    : new Set(((await prisma.company.findMany({ where: { fuelBlocked: true }, select: { id: true } })) as { id: string }[]).map((c) => c.id));
   // 2.0 : contrôleurs et conducteurs affectés aux rames
   const crews = await crewByTrain().catch(() => new Map());
   const mountainBoost = mountainDemand();
@@ -503,9 +518,11 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
     const dlcModel = DLC_MODELS[train.model];
     // 2.0 : la vraie météo, la pire rencontrée sur l'itinéraire de la ligne
     const wx = routeWeather(weather instanceof Map ? weather : new Map(), routeOf(train.line as typeof train.line & { stops?: string[] }));
+    // 2.4 : l'état de la voie, la pire liaison de l'itinéraire
+    const trackFx = routeTrack(routeOf(train.line as typeof train.line & { stops?: string[] }));
     // 2.1 : sur double voie, un train en retard ne bloque plus celui d'en face
     const doubled = (train.line as { doubleTrack?: boolean }).doubleTrack === true;
-    if (Math.random() < INCIDENT_CHANCE * wx.incident * driver.delay * (doubled ? DOUBLE_DELAY : 1)) {
+    if (Math.random() < INCIDENT_CHANCE * wx.incident * driver.delay * trackFx.incident * (doubled ? DOUBLE_DELAY : 1)) {
       await prisma.$transaction([
         prisma.train.update({
           where: { id: train.id },
@@ -553,6 +570,12 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
     wearRate = wearRate * driver.wear;
     // 2.2 : la rame TGV lancée sur sa LGV s'use plus vite
     const tgv = train.model === TGV_MODEL && hslOpen(train.line as { highSpeedAt?: Date | null });
+    /* 2.4 : une rame électrique est arrêtée par une panne de sous-station sur
+       son itinéraire ; une rame thermique attend si la facture de gazole n'a
+       pas pu être payée (hors période d'essai). */
+    const electric = Boolean(lineX.electrified) || tgv;
+    if (electric && routeInOutage(routeOf(lineX))) continue;
+    if (!electric && fuelBlocked.has(train.companyId)) continue;
     if (tgv) wearRate = wearRate * TGV_WEAR;
     const newWear = Math.min(100, train.wear + stochasticRound(wearRate));
     /* 2.0 : une rame négligée peut casser avant 100 % */
@@ -588,7 +611,7 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
     // Une rame Express effectue le trajet 30% plus vite ; 1.7 : chaque voiture ajoutée ralentit,
     // l'électrification fait gagner 10 %
     const effectiveDuration =
-      train.line.durationMinutes * (train.model === "EXPRESS" ? 0.7 : 1) * (dlcModel?.speed ?? 1) * speedFactor(trainX) * (lineX.electrified ? ELECTRIC_SPEED : 1) * (doubled ? DOUBLE_SPEED : 1) * (tgv ? TGV_SPEED : 1);
+      train.line.durationMinutes * (train.model === "EXPRESS" ? 0.7 : 1) * (dlcModel?.speed ?? 1) * speedFactor(trainX) * (lineX.electrified ? ELECTRIC_SPEED : 1) * (doubled ? DOUBLE_SPEED : 1) * (tgv ? TGV_SPEED : 1) * trackFx.slow;
     const progress = Math.min(100, Math.floor((elapsedMinutes / effectiveDuration) * 100));
 
     if (progress >= 100) {
@@ -671,7 +694,13 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
          les autres, il leur doit une redevance de quai ; partout où il y a des
          commerces, ses voyageurs y dépensent. */
       const infra = stationEffects(route, train.companyId, revenue, load.passengers, owners, alliesFor(train.companyId));
-      const revenueHome = Math.round(revenue * infra.homeBonus);
+      // 2.4 : +3 % pour les co-financeurs d'une liaison rénovée
+      const revenueHome = Math.round(revenue * infra.homeBonus * cofunderMultiplier(route, train.companyId));
+      // 2.4 : péages des liaisons concédées à d'autres compagnies
+      const trackTolls = tollsFor(route, train.companyId, revenue, alliesFor(train.companyId));
+      // 2.4 : le gazole ou le courant du trajet, et l'usure de la voie
+      meterAdd(train.companyId, tripEnergy(train.line.durationMinutes, { electric, powerFactor: tgv ? economy().tgvPowerFactor : 1, steam: train.model === "VAPEUR" }));
+      wearTrack(route, tgv ? 2 : 1);
       const platformFees = infra.fees.reduce((a, f) => a + f.amount, 0);
       for (const f of infra.fees) owe(f.station, "fees", f.amount);
       for (const sh of infra.shops) owe(sh.station, "shops", sh.amount);
@@ -693,7 +722,7 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
         }),
         prisma.company.update({
           where: { id: train.companyId },
-          data: { balance: { increment: revenueHome - toll - platformFees } },
+          data: { balance: { increment: revenueHome - toll - platformFees - trackTolls.total } },
         }),
         prisma.transaction.create({
           data: {
@@ -708,6 +737,18 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
           },
         }),
       ];
+      if (trackTolls.total > 0) {
+        ops.push(prisma.transaction.create({
+          data: {
+            companyId: train.companyId,
+            type: "PEAGE_VOIE",
+            amount: -trackTolls.total,
+            trainId: train.id,
+            lineId: train.lineId,
+            description: `Péage de voie : ${trackTolls.owed.map((o) => o.key.replace("|", " – ")).join(", ")}`,
+          },
+        }));
+      }
       if (toll > 0) {
         ops.push(prisma.transaction.create({
           data: {
@@ -772,6 +813,10 @@ export async function runFreightContracts(weather: Map<string, StationWeather> =
   const reputationByClient = await getReputationByCompany();
   const cargoIndex = await getCargoIndexMap();
   const yards = await yardsByCompany();
+  // 2.4 : facture de gazole impayée
+  const blockedFreight = inTrial()
+    ? new Set<string>()
+    : new Set(((await prisma.company.findMany({ where: { fuelBlocked: true }, select: { id: true } })) as { id: string }[]).map((c) => c.id));
 
   /* 2.1 : une rame peut porter plusieurs contrats (une tournée). On avance
      donc rame par rame : un seul tirage d'incident, une seule usure, une
@@ -788,7 +833,7 @@ export async function runFreightContracts(weather: Map<string, StationWeather> =
     const companyId = first.companyId as string;
     // 2.0 : la vraie météo, la pire des gares de la tournée
     const fwx = routeWeather(weather instanceof Map ? weather : new Map(), tour.flatMap((c) => [c.originStation, c.destinationStation]));
-    const incidentChance = INCIDENT_CHANCE * fwx.incident;
+    const incidentChance = INCIDENT_CHANCE * fwx.incident * routeTrack(tour.flatMap((c) => [c.originStation, c.destinationStation])).incident;
 
     /* Usure du fret. Mêmes règles que pour les lignes : le mécanicien divise
        l'usure par deux, la canicule la multiplie par 1,5, et on accumule en
@@ -811,7 +856,18 @@ export async function runFreightContracts(weather: Map<string, StationWeather> =
       continue;
     }
 
-    const minutes = first.tourMinutes ?? Math.max(...tour.map((c) => c.durationMinutes));
+    /* 2.4 : la tournée subit l'état de la voie (la pire liaison), s'arrête
+       pendant une panne de sous-station si la locomotive est électrique, et
+       attend son gazole si la facture est restée impayée. */
+    const freightRoute = tour.flatMap((c) => [c.originStation, c.destinationStation]);
+    const freightTrack = routeTrack(freightRoute);
+    const freightElectric = train.model === "FRET_ELECTRIQUE";
+    if ((freightElectric && routeInOutage(freightRoute)) || (!freightElectric && blockedFreight.has(companyId))) {
+      // le temps perdu repousse l'arrivée, comme un retard
+      await prisma.$transaction(tour.map((c) => prisma.contract.update({ where: { id: c.id }, data: { acceptedAt: new Date(new Date(c.acceptedAt).getTime() + TICK_INTERVAL_MS) } })));
+      continue;
+    }
+    const minutes = (first.tourMinutes ?? Math.max(...tour.map((c) => c.durationMinutes))) * freightTrack.slow;
     const elapsedMinutes = (Date.now() - new Date(first.acceptedAt).getTime()) / 60_000;
     const progress = Math.min(100, Math.floor((elapsedMinutes / Math.max(1, minutes)) * 100));
 
@@ -819,6 +875,10 @@ export async function runFreightContracts(weather: Map<string, StationWeather> =
       await prisma.train.update({ where: { id: train.id }, data: { progress, wear: wearNow } });
       continue;
     }
+
+    // 2.4 : le gazole ou le courant de la tournée, l'usure des voies empruntées
+    meterAdd(companyId, tripEnergy(first.tourMinutes ?? Math.max(...tour.map((c) => c.durationMinutes)), { electric: freightElectric, powerFactor: 1, steam: false }));
+    for (const c of tour) wearTrack([c.originStation, c.destinationStation], 1.5);
 
     // Arrivée : chaque contrat est payé, avec sa charge et ses aléas
     let wearAfter = wearNow;
@@ -989,6 +1049,7 @@ async function tryAutoRepair(
   const cost = labor + partPrice(part, "order");
   if (company.balance < cost) return false;
   const eta = new Date(Date.now() + partDelayMs(part, "order"));
+  consumePart(part); // 2.4 : la pièce sort du stock national
   const hhmm = new Intl.DateTimeFormat("fr-FR", { timeZone: "Europe/Paris", hour: "2-digit", minute: "2-digit" }).format(eta);
   await prisma.$transaction([
     prisma.train.update({ where: { id: train.id }, data: { ...breakdownData(train, part), partsEta: eta } }),

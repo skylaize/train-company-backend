@@ -3,7 +3,8 @@ import { prisma } from "../prisma";
 import { STATIONS } from "./geography.service";
 import { INTERNATIONAL_STATIONS } from "./international.service";
 import { MOUNTAIN_STATIONS, CORSICA_STATIONS } from "./dlc.service";
-import { ORGANS, Organ, PARTS, readStock, takeFromStock, freshBias } from "./workshop.service";
+import { ORGANS, Organ, PARTS, readStock, takeFromStock, freshBias, partPrice, partDelayMs } from "./workshop.service";
+import { consumePart } from "./parts-market.service";
 import { sendToCompany } from "./push.service";
 
 /* ============================================================
@@ -290,7 +291,8 @@ export async function restoreOrgan(companyId: string, wreckId: string, organ: st
     else break;
   }
   const missing = need - fromStock;
-  const cost = missing * PARTS[o].price;
+  // 2.4 : au prix du marché national
+  const cost = missing * partPrice(o, "order");
   if (cost > 0) {
     const paid = await prisma.company.updateMany({ where: { id: companyId, balance: { gte: cost } }, data: { balance: { decrement: cost } } });
     if (!paid.count) {
@@ -305,7 +307,8 @@ export async function restoreOrgan(companyId: string, wreckId: string, organ: st
     }
     await prisma.transaction.create({ data: { companyId, type: "REPARATION", amount: -cost, description: `Restauration (${PARTS[o].label.toLowerCase()}) : ${kind.label} ${w.serial}` } });
   }
-  const finalUntil = missing > 0 ? new Date(until.getTime() + PARTS[o].delayMin * 60_000) : until;
+  if (missing > 0) consumePart(o, missing);
+  const finalUntil = missing > 0 ? new Date(until.getTime() + partDelayMs(o, "order")) : until;
   await prisma.wreck.update({
     where: { id: w.id },
     data: { workUntil: finalUntil, spent: { increment: cost + fromStock * PARTS[o].price } },

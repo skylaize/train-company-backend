@@ -1,3 +1,4 @@
+import { consumePart, partScarcity } from "../services/parts-market.service";
 import { depotUse, heritageOf } from "../services/wreck.service";
 import { Prisma } from "@prisma/client";
 import { seasonEvent } from "../services/saison.service";
@@ -362,6 +363,7 @@ export async function repairTrain(req: AuthRequest, res: Response) {
   // une seule commande par panne, même sur un double clic
   const claimed = await prisma.train.updateMany({ where: { id: train.id, partsEta: null, status: "MAINTENANCE" }, data: { partsEta: eta } });
   if (claimed.count === 0) return res.status(409).json({ error: "Une pièce est déjà commandée pour cette rame" });
+  consumePart(part); // 2.4 : la pièce sort du stock national
   const [updatedTrain] = await prisma.$transaction([
     prisma.train.findUniqueOrThrow({ where: { id: train.id } }),
     prisma.company.update({ where: { id: company.id }, data: { balance: { decrement: cost } } }),
@@ -403,7 +405,8 @@ export async function getParts(req: AuthRequest, res: Response) {
   return res.json({
     stock: readStock(company.partsStock),
     limit: await stockLimit(company.id),
-    catalog: ORGANS.map((id) => ({ id, label: PARTS[id].label, part: PARTS[id].part, price: PARTS[id].price, delayMin: PARTS[id].delayMin, express: partPrice(id, "express"), expressMin: EXPRESS_MIN })),
+    // 2.4 : prix et délais du moment, selon le stock national
+    catalog: ORGANS.map((id) => ({ id, label: PARTS[id].label, part: PARTS[id].part, price: partPrice(id, "order"), basePrice: PARTS[id].price, delayMin: Math.round(partDelayMs(id, "order") / 60_000), express: partPrice(id, "express"), expressMin: EXPRESS_MIN, scarcity: partScarcity(id) })),
   });
 }
 
@@ -416,7 +419,8 @@ export async function buyParts(req: AuthRequest, res: Response) {
   const stock = readStock(company.partsStock);
   const limit = await stockLimit(company.id);
   if ((stock[part] ?? 0) + qty > limit) return res.status(409).json({ error: `Le magasin garde ${limit} ${PARTS[part].plural} au plus` });
-  const cost = PARTS[part].price * qty;
+  // 2.4 : au prix du marché national
+  const cost = partPrice(part, "order") * qty;
   // l'écriture ne passe que si le stock lu n'a pas bougé entre-temps et si la trésorerie suit
   const next = { ...stock, [part]: (stock[part] ?? 0) + qty };
   // stock, trésorerie et ligne de comptes écrits ensemble, ou pas du tout
@@ -428,6 +432,7 @@ export async function buyParts(req: AuthRequest, res: Response) {
     return n;
   });
   if (done === 0) return res.status(409).json({ error: `Trésorerie insuffisante (${cost} pièces)` });
+  consumePart(part, qty);
   return res.json({ stock: next, limit });
 }
 

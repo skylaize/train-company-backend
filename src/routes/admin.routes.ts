@@ -27,6 +27,9 @@ adminRouter.delete("/players/:id/trains/:trainId", admin.removeTrain);
 adminRouter.get("/seasons", admin.seasons);
 adminRouter.patch("/seasons/:id", admin.updateSeason);
 adminRouter.patch("/world", admin.updateWorld);
+// 2.4 : taux de l'économie (gazole, courant, carbone, pièces, voies, centrales)
+adminRouter.get("/economy", admin.economySettingsAdmin);
+adminRouter.patch("/economy", admin.updateEconomySettingsAdmin);
 
 adminRouter.get("/alliances", admin.listAlliances);
 adminRouter.patch("/alliances/:id", admin.updateAllianceAdmin);
