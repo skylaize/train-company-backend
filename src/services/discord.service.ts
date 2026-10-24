@@ -43,6 +43,7 @@ export const CHANNELS = {
   CLASSEMENTS: "📊・classements",
   CHANTIER: "🏔️・grand-chantier",
   LOGS: "📋・logs",
+  GENERAL: "💬・général", // 2.3 : les merci aux boosters
 } as const;
 export type ChannelKey = keyof typeof CHANNELS;
 
@@ -155,7 +156,7 @@ export type Embed = {
   footer?: { text: string };
   timestamp?: string;
 };
-export type MessagePayload = { content?: string; embeds?: Embed[]; allowed_mentions?: { parse: string[]; roles?: string[] } };
+export type MessagePayload = { content?: string; embeds?: Embed[]; allowed_mentions?: { parse: string[]; roles?: string[]; users?: string[] } };
 
 // jamais de @everyone ou de mention surprise venue d'un nom de compagnie
 const SAFE = { allowed_mentions: { parse: [] as string[] } };

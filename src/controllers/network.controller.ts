@@ -1,5 +1,5 @@
 import { tunnelOpen, TUNNEL_STATIONS } from "../services/world.service";
-import { MOUNTAIN_STATIONS, ownedDlcs } from "../services/dlc.service";
+import { dlcOfStation, ownedDlcs } from "../services/dlc.service";
 import { lineRidership } from "../services/pricing.service";
 import { Request, Response } from "express";
 import { prisma } from "../prisma";
@@ -89,7 +89,7 @@ export async function getNetworkMap(req: AuthRequest, res: Response) {
     size: stationSize(name),
     sizeLabel: SIZE_LABEL[stationSize(name)],
     // 2.0 : gare d'extension, et si la compagnie la possède
-    dlc: MOUNTAIN_STATIONS.includes(name) ? { id: "dlc-montagne", name: "Montagne", owned: dlcs.has("dlc-montagne") } : null,
+    dlc: ((d) => (d ? { id: d.id, name: d.name, owned: dlcs.has(d.id) } : null))(dlcOfStation(name)),
     demand: Math.round(stationDemand(name, events) * 100) / 100,
     events: events
       .filter((e) => e.station === name)

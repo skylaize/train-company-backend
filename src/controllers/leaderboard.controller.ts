@@ -28,6 +28,7 @@ export async function getLeaderboard(req: AuthRequest, res: Response) {
     grade: r.grade,
     title: r.title,
     plate: r.plate,
+    booster: Boolean(r.booster), // 2.3
     trains: r.trains,
     lines: r.lines,
     metric: r[board],

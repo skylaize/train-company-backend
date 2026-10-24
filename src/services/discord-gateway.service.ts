@@ -3,6 +3,7 @@ import { attachModLog, logArrival } from "./discord-modlog.service";
 import { prisma } from "../prisma";
 import { BOT_TOKEN, botEnabled, BRAND_COLOR, channelId, CHANNELS, esc, GUILD_ID, managedRoleIds, NOTIFY_ROLES, ROLES } from "./discord.service";
 import { syncUser } from "./discord-roles.service";
+import { recordBoost } from "./boost.service";
 
 /* ============================================================
    Connexion permanente au Gateway de Discord (2.1).
@@ -184,6 +185,18 @@ export function startDiscordGateway(level = 0) {
   client.on(Events.GuildMemberAdd, (member) => {
     if (member.guild.id !== GUILD_ID) return;
     welcome(member).catch((err) => console.error("[discord] bienvenue :", (err as Error).message));
+  });
+  // 2.3 : un boost qui commence ou s'arrête, tout de suite (le passage des rôles rattrape le reste)
+  client.on(Events.GuildMemberUpdate, (before, after) => {
+    if (after.guild.id !== GUILD_ID) return;
+    const was = before.partial ? undefined : before.premiumSinceTimestamp ?? null;
+    const now = after.premiumSinceTimestamp ?? null;
+    if (was === now) return;
+    recordBoost(after.id, now ? new Date(now) : null).catch((err) => console.error("[discord] boost :", (err as Error).message));
+  });
+  client.on(Events.GuildMemberRemove, (member) => {
+    if (member.guild.id !== GUILD_ID) return;
+    recordBoost(member.id, null).catch(() => undefined);
   });
   attachModLog(client, GUILD_ID);
 

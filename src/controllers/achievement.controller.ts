@@ -237,7 +237,7 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
   const [planned, crewRows, dlcTrains, mountainLines, partsOrdered, revisions] = (await Promise.all([
     prisma.train.count({ where: { companyId: company.id, serviceAt: { not: null } } }),
     prisma.staff.findMany({ where: { companyId: company.id, trainId: { not: null } }, select: { trainId: true, role: true } }),
-    prisma.train.count({ where: { companyId: company.id, model: { in: ["VAPEUR", "LUXE", "CREMAILLERE"] } } }),
+    prisma.train.count({ where: { companyId: company.id, model: { in: ["VAPEUR", "LUXE", "CREMAILLERE", "AUTORAIL_CORSE"] } } }),
     prisma.line.count({ where: { companyId: company.id, OR: MOUNTAIN_STATIONS.flatMap((st) => [{ departureStation: st }, { arrivalStation: st }, { stops: { has: st } }]) } }),
     prisma.transaction.count({ where: { companyId: company.id, type: "REPARATION", description: { contains: "ommand" } } }),
     prisma.transaction.count({ where: { companyId: company.id, type: "REPARATION", description: { startsWith: "Révision" } } }),

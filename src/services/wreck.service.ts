@@ -2,7 +2,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../prisma";
 import { STATIONS } from "./geography.service";
 import { INTERNATIONAL_STATIONS } from "./international.service";
-import { MOUNTAIN_STATIONS } from "./dlc.service";
+import { MOUNTAIN_STATIONS, CORSICA_STATIONS } from "./dlc.service";
 import { ORGANS, Organ, PARTS, readStock, takeFromStock, freshBias } from "./workshop.service";
 import { sendToCompany } from "./push.service";
 
@@ -220,7 +220,7 @@ export async function runWrecks(now = new Date(), random = Math.random) {
   if (last && now.getTime() - last.discoveredAt.getTime() < SPAWN_GAP_MIN * 60_000) return;
 
   const taken = new Set(open.map((w) => w.station));
-  const candidates = STATIONS.filter((s) => !(s in INTERNATIONAL_STATIONS) && !MOUNTAIN_STATIONS.includes(s) && !taken.has(s));
+  const candidates = STATIONS.filter((s) => !(s in INTERNATIONAL_STATIONS) && !MOUNTAIN_STATIONS.includes(s) && !CORSICA_STATIONS.includes(s) && !taken.has(s));
   if (!candidates.length) return;
   await prisma.wreck.create({ data: draftWreck(pick(candidates, random), now, random) });
 }

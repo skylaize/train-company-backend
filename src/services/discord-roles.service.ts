@@ -1,5 +1,6 @@
 import { prisma } from "../prisma";
 import { botEnabled, DiscordError, GUILD_ID, managedRoleIds, ManagedRole, rest } from "./discord.service";
+import { recordBoost } from "./boost.service";
 
 /* ============================================================
    Rôles automatiques (2.1).
@@ -50,13 +51,18 @@ function wanted(u: Linked, ctx: Ctx): Set<ManagedRole> {
 /* Ajoute et retire ce qu'il faut. Renvoie false si la personne n'est pas
    (ou plus) sur le serveur. */
 async function apply(discordId: string, want: Set<ManagedRole>, roleIds: Map<ManagedRole, string>) {
-  let member: { roles: string[] } | null;
+  let member: { roles: string[]; premium_since?: string | null } | null;
   try {
-    member = await rest<{ roles: string[] }>("GET", `/guilds/${GUILD_ID}/members/${discordId}`);
+    member = await rest<{ roles: string[]; premium_since?: string | null }>("GET", `/guilds/${GUILD_ID}/members/${discordId}`);
   } catch (err) {
-    if (err instanceof DiscordError && err.status === 404) return false;
+    if (err instanceof DiscordError && err.status === 404) {
+      await recordBoost(discordId, null).catch(() => undefined); // parti du serveur : plus de boost
+      return false;
+    }
     throw err;
   }
+  // 2.3 : le boost Nitro, lu au passage
+  await recordBoost(discordId, member?.premium_since ? new Date(member.premium_since) : null).catch((err) => console.error("[discord] boost :", (err as Error).message));
   const has = new Set(member?.roles ?? []);
   for (const [key, roleId] of roleIds) {
     if (want.has(key) && !has.has(roleId)) {
@@ -94,7 +100,6 @@ export async function syncCompany(companyId: string) {
 export async function syncAllRoles() {
   if (!botEnabled()) return;
   const [users, ctx, roleIds] = await Promise.all([linkedUsers(), context(), managedRoleIds()]);
-  if (roleIds.size === 0) return;
   for (const u of users) {
     try {
       await apply(u.discordId, wanted(u, ctx), roleIds);

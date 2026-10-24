@@ -181,7 +181,8 @@ const INCOME_GROUPS: Record<string, string> = {
   MISSION: "Missions",
   DEFI_QUOTIDIEN: "Bonus",
   PARRAINAGE: "Bonus",
-  PUBLICITE: "Bonus",
+  PUBLICITE: "Publicité", // 2.3 : les contrats de rame publicitaire aussi
+  ALLIANCE: "Alliance", // 2.3 : objectifs d'alliance
   COMPENSATION: "Bonus",
   EMPRUNT: "Banque",
 };
@@ -205,6 +206,7 @@ const EXPENSE_GROUPS: Record<string, string> = {
   BOURSE: "Bourse",
   ACHAT_FRET: "Fret",
   GARDE: "Fret",
+  PUBLICITE: "Publicité", // 2.3 : contrat rompu, moitié remboursée
 };
 
 export function weekBounds(offset: number, now = new Date()) {

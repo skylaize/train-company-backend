@@ -1,4 +1,5 @@
 import { Response } from "express";
+import { boosterCompanyIds } from "../services/boost.service";
 import { prisma } from "../prisma";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { seasonView } from "../services/saison.service";
@@ -12,6 +13,8 @@ import {
   allianceOfCompany, allianceRanking, cleanName, invalidateAlliances, pruneMessages,
 } from "../services/alliance.service";
 import { allStationCounts } from "../services/hub.service";
+import { regionsView } from "../services/regions.service";
+import { objectivesView, SYSTEM_AUTHOR } from "../services/alliance-objectives.service";
 import { sendToCompany } from "../services/push.service";
 
 /* ============================================================
@@ -133,6 +136,7 @@ export async function getAlliance(req: AuthRequest, res: Response) {
     }
   }
 
+  const boosters = await boosterCompanyIds().catch(() => new Set<string>());
   res.json({
     alliance: {
       id: alliance.id,
@@ -155,6 +159,7 @@ export async function getAlliance(req: AuthRequest, res: Response) {
       isMe: m.companyId === company.id,
       points: entries.find((e) => e.companyId === m.companyId)?.points ?? 0,
       joinedAt: m.joinedAt,
+      booster: boosters.has(m.companyId), // 2.3
     })),
     lines: (lines as { companyId: string; departureStation: string; arrivalStation: string; stops: string[] }[]).map((l) => ({
       companyId: l.companyId,
@@ -164,12 +169,18 @@ export async function getAlliance(req: AuthRequest, res: Response) {
     shared,
     messages: (messages as { id: string; companyId: string; text: string; createdAt: Date }[]).map((m) => ({
       id: m.id,
-      name: byId.get(m.companyId)?.name ?? "Ancien membre",
-      color: byId.get(m.companyId)?.liveryColor ?? "#64748b",
+      // 2.3 : les annonces du réseau (objectifs remplis) signées « Réseau »
+      name: m.companyId === SYSTEM_AUTHOR ? "Réseau" : byId.get(m.companyId)?.name ?? "Ancien membre",
+      color: m.companyId === SYSTEM_AUTHOR ? "#f2a900" : byId.get(m.companyId)?.liveryColor ?? "#64748b",
       text: m.text,
       at: m.createdAt,
       mine: m.companyId === company.id,
+      system: m.companyId === SYSTEM_AUTHOR,
+      booster: boosters.has(m.companyId),
     })),
+    // 2.3 : objectifs de la semaine et régions
+    objectives: await objectivesView(alliance.id).catch(() => null),
+    regions: await regionsView(alliance.id, (await ownedDlcs(company.id)).has("dlc-corse")).catch(() => null),
     invited: invited.map((c) => c.name),
     applications,
     // 2.1 : les livrées communes que ce membre peut poser (coffret d'alliance)

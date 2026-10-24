@@ -92,6 +92,39 @@ const MIN_MARKET_SIZE = 3;
 const PREMIUM_MARKET_SIZE = 6;
 const EXPIRY_MINUTES = 5; // durée de vie d'une offre non acceptée sur le marché
 
+/* ---------------- 2.3 : le conteneur scellé ----------------
+
+   De temps en temps, un conteneur scellé arrive sur le marché : contenu
+   inconnu, prix d'or. Un seul à la fois pour tout le réseau, premier arrivé
+   premier servi. On découvre ce qu'il y avait dedans à la livraison (voir
+   sealedOutcome dans la simulation). */
+export const SEALED_CARGO = "Conteneur scellé";
+const SEALED_CHANCE = 0.006; // par tour de 30 s quand il n'y en a pas : un toutes les quarante minutes environ
+const SEALED_EXPIRY_MINUTES = 10;
+const SEALED_RATE = 2.2; // le tarif à la minute d'un conteneur ordinaire, multiplié
+
+async function maybeOfferSealed() {
+  if (Math.random() >= SEALED_CHANCE) return;
+  const already = await prisma.contract.count({ where: { sealed: true, status: "DISPONIBLE", companyId: null } });
+  if (already > 0) return;
+  const routes = CARGO_TEMPLATES.filter((t) => t.durationMinutes >= 5);
+  const r = routes[Math.floor(Math.random() * routes.length)];
+  const base = BASE_TEMPLATES.find((t) => t.cargoType === "Conteneurs")!;
+  const perMinute = (base.reward / base.durationMinutes) * SEALED_RATE;
+  await prisma.contract.create({
+    data: {
+      cargoType: SEALED_CARGO,
+      originStation: r.originStation,
+      destinationStation: r.destinationStation,
+      durationMinutes: r.durationMinutes,
+      reward: Math.round((perMinute * r.durationMinutes) / 5) * 5,
+      risky: false,
+      sealed: true,
+      expiresAt: new Date(Date.now() + SEALED_EXPIRY_MINUTES * 60_000),
+    },
+  });
+}
+
 export async function removeExpiredContracts() {
   await prisma.contract.deleteMany({
     where: { status: "DISPONIBLE", companyId: null, expiresAt: { lt: new Date() } },
@@ -99,8 +132,9 @@ export async function removeExpiredContracts() {
 }
 
 export async function ensureMarketStocked() {
+  await maybeOfferSealed().catch((err) => console.error("[fret] conteneur scellé :", (err as Error).message));
   const availableContracts = await prisma.contract.findMany({
-    where: { status: "DISPONIBLE", companyId: null },
+    where: { status: "DISPONIBLE", companyId: null, sealed: false },
     select: { cargoType: true },
   });
   const presentTypes = new Set(availableContracts.map((c) => c.cargoType));
@@ -185,11 +219,15 @@ export async function listMarket(req: AuthRequest, res: Response) {
   });
   const orders = company ? await ordersByCargo(company.id) : new Map();
 
-  const contracts = await prisma.contract.findMany({
-    where: { status: "DISPONIBLE", companyId: null },
-    orderBy: { createdAt: "asc" },
-    take: company?.isPremium ? PREMIUM_MARKET_SIZE : MIN_MARKET_SIZE,
-  });
+  const contracts = [
+    // 2.3 : le conteneur scellé passe devant, pour tout le monde
+    ...(await prisma.contract.findMany({ where: { status: "DISPONIBLE", companyId: null, sealed: true } })),
+    ...(await prisma.contract.findMany({
+      where: { status: "DISPONIBLE", companyId: null, sealed: false },
+      orderBy: { createdAt: "asc" },
+      take: company?.isPremium ? PREMIUM_MARKET_SIZE : MIN_MARKET_SIZE,
+    })),
+  ];
 
   /* Le cours du jour est joint à chaque offre : sans lui, le joueur devrait
      ouvrir une autre page pour savoir si la marchandise proposée paie
@@ -304,43 +342,55 @@ export async function acceptContract(req: AuthRequest, res: Response) {
     ? tourMinutes(train.model, durations, (train.cars ?? []).filter((c: string) => isWagon(c)).length)
     : null;
   const now = new Date();
-  const updates: Prisma.PrismaPromise<any>[] = [
-    ...contracts.map((c) =>
-      prisma.contract.update({
-        where: { id: c.id },
-        data: {
-          companyId: company.id,
-          trainId,
-          status: "EN_COURS",
-          acceptedAt: now,
-          insured: insuredIds.has(c.id),
-          tourMinutes: tour,
-          loadFactor: loadFactorFor(train, c.cargoType),
-        },
-      })
-    ),
-    prisma.train.update({
-      where: { id: trainId },
-      data: { status: "EN_ROUTE", progress: 0, departedAt: now },
-    }),
-  ];
-
-  if (premium > 0) {
-    updates.push(
-      prisma.company.update({ where: { id: company.id }, data: { balance: { decrement: premium } } }),
-      prisma.transaction.create({
-        data: {
-          companyId: company.id,
-          type: "FRET",
-          amount: -premium,
-          description: `Prime d'assurance : ${contracts.filter((c) => insuredIds.has(c.id)).map((c) => c.cargoType).join(", ")}`,
-          trainId,
-        },
-      })
-    );
+  /* 2.3 : tout se joue en une transaction conditionnelle. Avant, deux
+     acceptations simultanées du même contrat (deux joueurs, ou un double clic
+     avec deux locomotives) passaient toutes les deux la vérification : la
+     seconde reprenait le contrat, et la première locomotive restait « en
+     tournée » sans rien à livrer, pour toujours. */
+  class Taken extends Error {}
+  let done: unknown[];
+  try {
+    done = await prisma.$transaction(async (tx) => {
+      const claimed = await tx.train.updateMany({
+        where: { id: trainId, companyId: company.id, status: "IDLE", lineId: null },
+        data: { status: "EN_ROUTE", progress: 0, departedAt: now },
+      });
+      if (claimed.count !== 1) throw new Taken("Ce train n'est pas disponible (déjà en service)");
+      const out: unknown[] = [];
+      for (const c of contracts) {
+        const hit = await tx.contract.updateMany({
+          where: { id: c.id, status: "DISPONIBLE", companyId: null },
+          data: {
+            companyId: company.id,
+            trainId,
+            status: "EN_COURS",
+            acceptedAt: now,
+            insured: insuredIds.has(c.id),
+            tourMinutes: tour,
+            loadFactor: loadFactorFor(train, c.cargoType),
+          },
+        });
+        if (hit.count !== 1) throw new Taken(contracts.length > 1 ? "Un des contrats vient d'être pris par une autre rame" : "Ce contrat vient d'être pris par une autre rame");
+        out.push(await tx.contract.findUnique({ where: { id: c.id } }));
+      }
+      if (premium > 0) {
+        await tx.company.update({ where: { id: company.id }, data: { balance: { decrement: premium } } });
+        await tx.transaction.create({
+          data: {
+            companyId: company.id,
+            type: "FRET",
+            amount: -premium,
+            description: `Prime d'assurance : ${contracts.filter((c) => insuredIds.has(c.id)).map((c) => c.cargoType).join(", ")}`,
+            trainId,
+          },
+        });
+      }
+      return out;
+    });
+  } catch (err) {
+    if (err instanceof Taken) return res.status(409).json({ error: err.message });
+    throw err;
   }
 
-  const done = await prisma.$transaction(updates);
-
-  return res.status(201).json(contracts.length === 1 ? done[0] : { ok: true, contracts: done.slice(0, contracts.length), tourMinutes: tour });
+  return res.status(201).json(contracts.length === 1 ? done[0] : { ok: true, contracts: done, tourMinutes: tour });
 }

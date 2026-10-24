@@ -1,4 +1,5 @@
 import { RELEASE_171 } from "../release";
+import { boostUnlocksFor } from "./boost.service";
 import { halloweenUnlocks } from "./halloween.service";
 import { seasonUnlocks } from "./saison.service";
 import { isBuilder, BUILDER_EMBLEM } from "./world.service";
@@ -7,7 +8,7 @@ import { isBuilder, BUILDER_EMBLEM } from "./world.service";
 export const V2_GIFT_LIVERY = "#1e6091";
 import { prisma } from "../prisma";
 import { parisDate, parisMidnight } from "./time.service";
-import { DLCS, ownedDlcs } from "./dlc.service";
+import { DLCS, ownedDlcs, CORSICA_LIVERY, CORSICA_EMBLEM } from "./dlc.service";
 import { passUnlocks, passSeasonNumber, PASS_PRICE_CENTS } from "./pass.service";
 import { computeCareerStatus, careerTitles } from "./career.service";
 
@@ -77,9 +78,9 @@ const DLC_ITEMS: ShopItem[] = DLCS.map((d) => ({
   description: d.description,
   priceCents: d.priceCents,
   isNew: true,
-  liveries: d.id === "dlc-legende" ? [LEGEND_LIVERY] : undefined,
+  liveries: d.id === "dlc-legende" ? [LEGEND_LIVERY] : d.id === "dlc-corse" ? [CORSICA_LIVERY] : undefined,
   titles: d.id === "dlc-legende" ? ["Compagnie de légende"] : undefined,
-  emblems: d.id === "dlc-montagne" ? ["sommet"] : undefined,
+  emblems: d.id === "dlc-montagne" ? ["sommet"] : d.id === "dlc-corse" ? [CORSICA_EMBLEM] : undefined,
   cabSkins: d.id === "dlc-legende" ? ["vapeur"] : undefined,
   dlc: { tagline: d.tagline, premium: d.premium, features: d.features, models: d.models.map((m) => ({ id: m.id, label: m.label, blurb: m.blurb })), stations: d.stations },
 }));
@@ -653,6 +654,13 @@ export async function unlockedFor(companyId: string) {
     ghosts.emblems.forEach((e) => emblems.add(e));
     ghosts.titles.forEach((t) => titles.add(t));
     ghosts.liveries.forEach((c) => liveries.add(c.toLowerCase()));
+  }
+  // 2.3 : boost du serveur Discord
+  const boost = await boostUnlocksFor(companyId).catch(() => null);
+  if (boost) {
+    boost.liveries.forEach((c) => liveries.add(c.toLowerCase()));
+    boost.emblems.forEach((e) => emblems.add(e));
+    boost.titles.forEach((t) => titles.add(t));
   }
   // 1.4 : chaque grade à partir du Directeur régional donne son nom en titre
   careerTitles(career.currentRank.id).forEach((t) => titles.add(t));

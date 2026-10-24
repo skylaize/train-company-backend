@@ -6,6 +6,8 @@ import { currentSeason, DIVISIONS } from "./saison.service";
 import { ensureProject, TUNNEL_NAME, TUNNEL_STATIONS } from "./world.service";
 import { pruneLogKeys } from "./discord-modlog.service";
 import { Stop, TRAIN200_ID, TRAIN200_REWARD } from "./train200.service";
+import { REGIONS } from "./regions.service";
+import { startOfParisWeek } from "./time.service";
 import { currentEdition, HAUNT_MINUTES, HAUNT_DEMAND, TIERS, topHunters, hauntSchedule, NIGHT_SOULS_FROM, NIGHT_SOULS_TO } from "./halloween.service";
 
 /* ============================================================
@@ -188,6 +190,39 @@ export async function announceSeasonEnd(seasonId: string) {
       ],
     },
   ], { crosspost: true, ping: "EVENEMENTS" });
+}
+
+/* ---------------- 2.3 : régions d'alliance ---------------- */
+
+/* Le lundi, la nouvelle carte des régions : qui tient quoi, et qui a changé de main. */
+async function checkRegions() {
+  const weekStart = startOfParisWeek();
+  const rows = (await prisma.regionControl.findMany({ where: { weekStart } })) as { region: string; allianceId: string | null; previousId: string | null; since: Date | null }[];
+  if (rows.length === 0 || !rows.some((r) => r.allianceId)) return;
+  const names = new Map(((await prisma.alliance.findMany({ select: { id: true, name: true } })) as { id: string; name: string }[]).map((a) => [a.id, a.name]));
+  const lines = REGIONS.map((reg) => {
+    const r = rows.find((x) => x.region === reg.id);
+    if (!r?.allianceId) return `▫️ ${reg.name} — *libre*`;
+    const weeks = r.since ? Math.round((weekStart.getTime() - r.since.getTime()) / (7 * 86_400_000)) + 1 : 1;
+    const change = r.previousId !== r.allianceId ? (r.previousId ? ` 🔄 prise à ${esc(names.get(r.previousId) ?? "—")}` : " 🆕") : weeks > 1 ? ` · ${weeks}e semaine` : "";
+    return `▪️ ${reg.name} — **${esc(names.get(r.allianceId) ?? "—")}**${change}`;
+  });
+  await postOnce(`regions:${weekStart.toISOString().slice(0, 10)}`, "SAISONS", [
+    {
+      embeds: [
+        {
+          title: "🗺️ La carte des régions de la semaine",
+          url: SITE_URL ? `${SITE_URL}/dashboard` : undefined,
+          description: [
+            "Chaque région revient à l'alliance qui y dessert le plus de gares. +5 % de recette sur les trajets qui y passent, toute la semaine.",
+            "",
+            ...lines,
+          ].join("\n"),
+          color: BRAND_COLOR,
+        },
+      ],
+    },
+  ], { crosspost: true });
 }
 
 /* ---------------- Grand Chantier ---------------- */
@@ -424,6 +459,7 @@ export async function runDiscordFeed() {
     ["chantier, paliers", checkWorld],
     ["fête des 200", checkTrain200],
     ["halloween", checkHalloween],
+    ["régions", checkRegions],
     ["ménage du journal", pruneLogKeys],
   ];
   for (const [label, fn] of steps) {

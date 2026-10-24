@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { boostStatus, recordBoost } from "../services/boost.service";
 import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import { prisma } from "../prisma";
@@ -43,7 +44,9 @@ function linkEnabled() {
 
 export async function discordStatus(req: AuthRequest, res: Response) {
   const user = await prisma.user.findUnique({ where: { id: req.userId }, select: { discordId: true, discordName: true } });
-  return res.json({ enabled: linkEnabled(), linked: Boolean(user?.discordId), name: user?.discordName ?? null });
+  // 2.3 : où en est le boost du serveur
+  const boost = user?.discordId ? await boostStatus(req.userId as string) : null;
+  return res.json({ enabled: linkEnabled(), linked: Boolean(user?.discordId), name: user?.discordName ?? null, boost });
 }
 
 export function discordLinkStart(req: AuthRequest, res: Response) {
@@ -116,6 +119,7 @@ export async function discordCallback(req: Request, res: Response) {
 export async function discordUnlink(req: AuthRequest, res: Response) {
   const user = await prisma.user.findUnique({ where: { id: req.userId }, select: { discordId: true } });
   if (user?.discordId) await clearRoles(user.discordId).catch(() => undefined);
+  if (user?.discordId) await recordBoost(user.discordId, null).catch(() => undefined); // 2.3 : le boost suit le compte lié
   await prisma.user.update({ where: { id: req.userId }, data: { discordId: null, discordName: null } });
   if (user?.discordId) void logAccount("a délié son compte Réseau", user.discordId);
   return res.json({ ok: true });

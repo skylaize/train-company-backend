@@ -2,6 +2,8 @@ import { severeWeather } from "./realweather.service";
 import { WRECK_KINDS } from "./wreck.service";
 import { prisma } from "../prisma";
 import { worldView } from "./world.service";
+import { recentRegionChanges } from "./regions.service";
+import { recentBoosters } from "./boost.service";
 
 /* ============================================================
    La Gazette du Rail (2.0).
@@ -14,7 +16,7 @@ import { worldView } from "./world.service";
    ============================================================ */
 
 export interface Headline {
-  kind: "record" | "fortune" | "fret" | "chantier" | "arrivees" | "voie" | "calme" | "epave" | "meteo";
+  kind: "record" | "fortune" | "fret" | "chantier" | "arrivees" | "voie" | "calme" | "epave" | "meteo" | "regions" | "conteneur" | "pub" | "boost";
   title: string;
   body: string;
 }
@@ -62,6 +64,12 @@ export async function gazette(viewerCompanyId: string) {
   if (trackIncidents > 0) {
     headlines.push({ kind: "voie", title: `${trackIncidents} incident${trackIncidents > 1 ? "s" : ""} sur la voie`, body: "Sangliers, branches et objets oubliés : les conducteurs ont eu du travail." });
   }
+  // 2.3 : merci aux boosters du serveur Discord
+  const boosters = await recentBoosters().catch(() => [] as string[]);
+  if (boosters.length) {
+    const names = boosters.length === 1 ? boosters[0] : `${boosters.slice(0, -1).join(", ")} et ${boosters[boosters.length - 1]}`;
+    headlines.push({ kind: "boost", title: `Merci à ${names}`, body: `${boosters.length > 1 ? "Ils boostent" : "Elle booste"} le serveur Discord du réseau, et ${boosters.length > 1 ? "leurs rames roulent" : "ses rames roulent"} désormais aux couleurs Nitro.` });
+  }
   if (arrivals > 0) {
     headlines.push({ kind: "arrivees", title: `${arrivals} nouvelle${arrivals > 1 ? "s" : ""} compagnie${arrivals > 1 ? "s" : ""}`, body: "Le réseau s'agrandit. Les quais aussi vont se remplir." });
   }
@@ -79,6 +87,42 @@ export async function gazette(viewerCompanyId: string) {
     const who = (revived as unknown as { company?: { name: string } | null }).company?.name ?? "Une compagnie";
     headlines.push({ kind: "epave", title: `${who} remet en service la ${revived.serial}`, body: `${WRECK_KINDS[revived.kind]?.label ?? "Une vieille rame"} roule à nouveau, ${new Date().getFullYear() - revived.year} ans après sa première sortie.` });
   }
+  /* 2.3 : les régions qui changent de main (le lundi), le conteneur scellé
+     qui cachait un trésor, la marque qui fait scandale. Ces nouvelles-là
+     passent devant : elles n'arrivent pas tous les jours. */
+  const front: Headline[] = [];
+  const regionChanges = await recentRegionChanges().catch(() => []);
+  if (regionChanges.length) {
+    const [first, ...rest] = regionChanges;
+    front.push({
+      kind: "regions",
+      title: first.from ? `${first.to} prend ${first.name} à ${first.from} !` : `${first.to} s'empare de ${first.name}`,
+      body: rest.length
+        ? `${rest.length} autre${rest.length > 1 ? "s régions changent" : " région change"} de main cette semaine : ${rest.slice(0, 3).map((r) => `${r.name} (${r.to})`).join(", ")}${rest.length > 3 ? "…" : "."}`
+        : "Les autres régions restent à leurs alliances. Rendez-vous lundi prochain.",
+    });
+  }
+  const jackpot = (await prisma.contract.findFirst({
+    where: { sealed: true, sealedOutcome: { startsWith: "TRESOR" }, status: "LIVREE", createdAt: { gte: since } },
+    orderBy: { createdAt: "desc" },
+    select: { companyId: true, sealedOutcome: true, destinationStation: true },
+  }).catch(() => null)) as { companyId: string | null; sealedOutcome: string | null; destinationStation: string } | null;
+  if (jackpot?.companyId) {
+    const who = (await prisma.company.findUnique({ where: { id: jackpot.companyId }, select: { name: true } }))?.name ?? "Une compagnie";
+    const what = jackpot.sealedOutcome?.split("|")[1] ?? "un trésor";
+    front.push({ kind: "conteneur", title: `Un conteneur scellé ouvert à ${jackpot.destinationStation}`, body: `${who} n'en revient pas : à l'intérieur, ${what}. Les quais ne parlent que de ça.` });
+  }
+  const scandal = (await prisma.decision.findFirst({
+    where: { kind: "PUB_SCANDALE", createdAt: { gte: since } },
+    orderBy: { createdAt: "desc" },
+    select: { companyId: true, data: true },
+  }).catch(() => null)) as { companyId: string; data: any } | null;
+  if (scandal) {
+    const who = (await prisma.company.findUnique({ where: { id: scandal.companyId }, select: { name: true } }))?.name ?? "une compagnie";
+    front.push({ kind: "pub", title: `Scandale chez ${scandal.data?.brand ?? "un annonceur"}`, body: `La marque s'affichait encore cette semaine sur une rame de ${who}. Les voyageurs grincent des dents.` });
+  }
+  headlines.unshift(...front);
+
   // 2.0 : la vraie météo, quand elle gêne les rames
   const severe = await severeWeather().catch(() => new Map());
   const WX: [string, string, string][] = [

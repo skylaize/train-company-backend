@@ -36,6 +36,8 @@ export const STATION_SIZE: Record<string, number> = {
   Turin: 4, Zurich: 4,
   // 2.0 : extension Montagne
   Chamonix: 2, "Bourg-Saint-Maurice": 2, "Briançon": 2, "Font-Romeu": 1,
+  // 2.3 : extension Corse
+  Bastia: 2, Ajaccio: 2, Corte: 1, Calvi: 1, "L'Île-Rousse": 1,
 };
 
 export const SIZE_LABEL: Record<number, string> = {
@@ -77,7 +79,7 @@ const EVENT_TEMPLATES: EventTemplate[] = [
     multiplier: 1.3,
     minHours: 3,
     maxHours: 6,
-    stations: ["Nice", "Marseille", "Perpignan", "Bayonne", "La Rochelle", "Montpellier", "Avignon", "Brest", "Paris", "Pau", "Londres", "Barcelone"],
+    stations: ["Nice", "Marseille", "Perpignan", "Bayonne", "La Rochelle", "Montpellier", "Avignon", "Brest", "Paris", "Pau", "Londres", "Barcelone", "Bastia", "Ajaccio", "Calvi"],
   },
   { label: "Grève locale", multiplier: 0.65, minHours: 1, maxHours: 3, minSize: 1 },
   { label: "Travaux en gare", multiplier: 0.8, minHours: 2, maxHours: 4, minSize: 1 },

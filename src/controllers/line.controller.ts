@@ -7,7 +7,7 @@ import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
 import { isKnownStation } from "../services/geography.service";
 import { stationLocked } from "../services/world.service";
-import { stationNeedsDlc } from "../services/dlc.service";
+import { stationNeedsDlc, corsicaRouteError } from "../services/dlc.service";
 import { seasonEvent } from "../services/saison.service";
 import { isInternational } from "../services/international.service";
 import { cleanStops, routeDuration } from "../services/route.service";
@@ -57,6 +57,9 @@ export async function createLine(req: AuthRequest, res: Response) {
     const dlc = await stationNeedsDlc(company.id, st);
     if (dlc) return res.status(403).json({ error: `${st} fait partie de l'extension « ${dlc} »` });
   }
+  // 2.3 : une ligne corse reste sur l'île
+  const sea = corsicaRouteError(route);
+  if (sea) return res.status(400).json({ error: sea });
 
   const noLicence = licenceError(company as { intlLicenceAt?: Date | null }, route);
   if (noLicence) return res.status(403).json({ error: noLicence });
@@ -140,6 +143,9 @@ export async function updateLine(req: AuthRequest, res: Response) {
     const dlc = await stationNeedsDlc(company.id, st);
     if (dlc) return res.status(403).json({ error: `${st} fait partie de l'extension « ${dlc} »` });
   }
+  // 2.3 : une ligne corse reste sur l'île
+  const sea = corsicaRouteError(route);
+  if (sea) return res.status(400).json({ error: sea });
   const before = [line.departureStation, ...((line as { stops?: string[] }).stops ?? []), line.arrivalStation];
   const same = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
   const routeChanged = !same(route, before) && !same(route, [...before].reverse());

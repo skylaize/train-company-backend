@@ -62,6 +62,12 @@ export const STATION_COORDS: Record<string, { x: number; y: number }> = {
   "Bourg-Saint-Maurice": { x: 299.7, y: 235.3 },
   "Briançon": { x: 295.9, y: 266.2 },
   "Font-Romeu": { x: 159.8, y: 369.3 },
+  // 2.3 — extension Corse (dlc.service), même projection, tracé réel du chemin de fer corse
+  "Bastia": { x: 379.04, y: 360.88 },
+  "Corte": { x: 370.14, y: 377.67 },
+  "Ajaccio": { x: 357.97, y: 394.3 },
+  "Calvi": { x: 358.53, y: 366.45 },
+  "L'Île-Rousse": { x: 363.86, y: 363.59 },
 };
 
 export const STATIONS = Object.keys(STATION_COORDS);

@@ -66,6 +66,7 @@ interface Ctx {
   staff: { id: string; role: string; level: number; name: string }[];
   gradeId: number;
   pick: <T>(xs: T[]) => T;
+  lastPubAt?: Date | null; // 2.3 : dernière offre publicitaire reçue
 }
 
 export interface Draft {
@@ -309,6 +310,30 @@ const MAKERS: Record<string, Maker> = {
 /* ---------- 2.0 : des enjeux qui ne se règlent pas qu'en pièces ---------- */
 
 Object.assign(MAKERS, {
+  PUB: (c: Ctx): Draft | null => {
+    if (c.lastPubAt && c.now.getTime() - c.lastPubAt.getTime() < AD_COOLDOWN_MS) return null;
+    // une rame voyageurs en service, sans publicité en cours
+    const pool = running(c).filter((t) => !["LOCOTRACTEUR", "FRET_RAPIDE", "FRET_ELECTRIQUE"].includes(t.model) && !((t as any).adUntil && new Date((t as any).adUntil) > c.now));
+    if (pool.length === 0 || running(c).length < 2) return null;
+    const t = c.pick(pool);
+    const brand = c.pick(AD_BRANDS);
+    const amount = priced(400, running(c).length, c.revenuePerHour, 8);
+    const line = `${t.line!.departureStation} – ${t.line!.arrivalStation}`;
+    return {
+      kind: "PUB",
+      title: `${brand.name} veut peindre la ${t.name}`,
+      body: `${brand.name} cherche une vitrine pour ${brand.product} : la ${t.name}, qui roule sur ${line}, aux couleurs de la marque pendant une semaine. L'agence paie d'avance.`,
+      place: t.line!.departureStation,
+      data: { trainId: t.id, trainName: t.name, brand: brand.name, color: brand.color, amount, dep: t.line!.departureStation, arr: t.line!.arrivalStation },
+      choices: [
+        { id: "accepter", label: "Accepter le contrat", effects: [{ text: `+${fmt(amount)} pi. tout de suite`, tone: "gain" }, { text: `−7 % de recette sur ${line} pendant ${AD_DAYS} jours`, tone: "cout" }, { text: "1 chance sur 5 que la marque fasse scandale", tone: "risque" }] },
+        { id: "negocier", label: "Demander 40 % de plus", effects: [{ text: `+${fmt(Math.round(amount * 1.4))} pi. si elle accepte`, tone: "gain" }, { text: "1 chance sur 2 qu'elle aille voir ailleurs", tone: "risque" }] },
+        { id: "refuser", label: "Refuser", effects: [{ text: "La rame garde votre livrée", tone: "neutre" }] },
+      ],
+      defaultChoiceId: "refuser",
+    };
+  },
+
   SYNDICAT: (c: Ctx): Draft | null => {
     if (c.staff.length < 2) return null;
     const prime = priced(120, running(c).length, c.revenuePerHour, 2);
@@ -388,7 +413,29 @@ Object.assign(MAKERS, {
   },
 });
 
-const MODEL_LABEL: Record<string, string> = { STANDARD: "Standard", EXPRESS: "Express", FRET_LOURD: "Fret lourd", LOCOTRACTEUR: "Locotracteur", FRET_RAPIDE: "Messagerie rapide", FRET_ELECTRIQUE: "Électrique longue distance", COUCHETTES: "Couchettes", NUIT_EUROPE: "Train de nuit international", VAPEUR: "Vapeur", LUXE: "Grand luxe", CREMAILLERE: "Crémaillère" };
+/* ---------- 2.3 : la rame publicitaire ----------
+
+   Une marque (inventée) propose de recouvrir une rame de sa publicité pendant
+   une semaine, contre une grosse somme versée d'avance. En échange, la ligne
+   de cette rame perd un peu de son charme (−7 % de recette pendant sept
+   jours), et une fois sur cinq la marque fait scandale dans la semaine. Une
+   offre au plus par semaine et par compagnie. */
+export const AD_DAYS = 7;
+export const AD_LINE_MULT = 0.93;
+export const AD_SCANDAL_CHANCE = 0.2;
+const AD_COOLDOWN_MS = 7 * 86_400_000;
+export const AD_BRANDS: { name: string; color: string; product: string; scandal: string }[] = [
+  { name: "Biscuits Kermor", color: "#c8102e", product: "ses galettes au beurre", scandal: "On découvre que ses galettes « pur beurre » en contiennent à peine." },
+  { name: "Eau du Vallonnet", color: "#1f7fbf", product: "son eau de source", scandal: "Sa « source de montagne » se révèle être un robinet de zone industrielle." },
+  { name: "Assurances Pélican", color: "#e3a21a", product: "son assurance auto", scandal: "Des milliers de clients attendent toujours leurs remboursements." },
+  { name: "Croquettes Mistigri", color: "#7b3fa0", product: "ses croquettes pour chats", scandal: "Les chats boudent la nouvelle recette, et leurs maîtres le font savoir." },
+  { name: "Banque Hirondelle", color: "#0f6b5c", product: "son livret d'épargne", scandal: "Des frais cachés font la une de la presse économique." },
+  { name: "Volta Énergie", color: "#f2c200", product: "son électricité verte", scandal: "Son électricité « verte » sort en grande partie d'une centrale au charbon." },
+  { name: "Lessive Blanchette", color: "#5aa9e6", product: "sa lessive", scandal: "Un reportage montre que la lessive ne lave pas plus blanc du tout." },
+  { name: "Chocolats Cabosse", color: "#6b3e26", product: "ses tablettes de chocolat", scandal: "Un rappel massif de tablettes pour cause de noisettes introuvables." },
+];
+
+const MODEL_LABEL: Record<string, string> = { STANDARD: "Standard", EXPRESS: "Express", FRET_LOURD: "Fret lourd", LOCOTRACTEUR: "Locotracteur", FRET_RAPIDE: "Messagerie rapide", FRET_ELECTRIQUE: "Électrique longue distance", COUCHETTES: "Couchettes", NUIT_EUROPE: "Train de nuit international", VAPEUR: "Vapeur", LUXE: "Grand luxe", CREMAILLERE: "Crémaillère", AUTORAIL_CORSE: "Autorail corse" };
 
 export const KINDS = Object.keys(MAKERS);
 
@@ -624,6 +671,38 @@ export async function applyChoice(d: DecisionRow, choiceId: string, random = Mat
       await prisma.staff.create({ data: { companyId: cid, role, name: String(data.name || randomStaffName()), level, xp: [0, 720, 2880, 8640, 20160][level - 1] ?? 0, salaryPerTick: salaryFor(role, level) } });
       return { outcome: `${data.name} rejoint la compagnie. Affectez-le à une rame depuis la page Personnel.`, tone: "gain" };
     }
+    case "PUB:accepter":
+    case "PUB:negocier": {
+      if (choiceId === "negocier" && random() < 0.5) {
+        return { outcome: `${data.brand} a trouvé une autre compagnie moins gourmande. La ${data.trainName} garde votre livrée.`, tone: "neutre" };
+      }
+      const amount = choiceId === "negocier" ? Math.round(Number(data.amount) * 1.4) : Number(data.amount);
+      const t = await prisma.train.findFirst({ where: { id: String(data.trainId), companyId: cid } });
+      if (!t) return { outcome: "La rame n'est plus là : l'agence retire son offre.", tone: "neutre" };
+      const until = new Date(Date.now() + AD_DAYS * 86_400_000);
+      await prisma.train.update({ where: { id: t.id }, data: { adBrand: String(data.brand), adColor: String(data.color), adUntil: until } });
+      await pay(cid, amount, "PUBLICITE", `Contrat publicitaire : ${data.brand} sur la ${t.name}`);
+      const scandal = random() < AD_SCANDAL_CHANCE;
+      return {
+        outcome: `${data.brand} vous verse ${fmt(amount)} pi. La ${t.name} roule à ses couleurs pendant ${AD_DAYS} jours.`,
+        tone: "gain",
+        effect: { key: `${data.dep}|${data.arr}`, mult: AD_LINE_MULT, hours: AD_DAYS * 24 },
+        ...(scandal ? { follow: { kind: "PUB_SCANDALE", hours: 6 + random() * (AD_DAYS * 24 - 12), data: { ...data, amount } } } : {}),
+      };
+    }
+    case "PUB:refuser":
+      return { outcome: `${data.brand} ira voir ailleurs. La ${data.trainName} garde votre livrée.`, tone: "neutre" };
+    case "PUB_SCANDALE:retirer": {
+      const refund = Math.round(Number(data.amount) / 2);
+      await charge(cid, refund, "PUBLICITE", `Contrat publicitaire rompu : ${data.brand} (remboursement)`);
+      await prisma.train.updateMany({ where: { id: String(data.trainId), companyId: cid, adBrand: String(data.brand) }, data: { adBrand: null, adColor: null, adUntil: null } });
+      // la ligne retrouve ses voyageurs : l'effet du contrat s'arrête
+      await prisma.decision.updateMany({ where: { companyId: cid, kind: "PUB", effectKey: `${data.dep}|${data.arr}`, effectEndsAt: { gt: new Date() } }, data: { effectEndsAt: new Date() } });
+      return { outcome: `La ${data.trainName} retrouve votre livrée. Vous remboursez ${fmt(refund)} pi. à la marque, mais votre image est sauve.`, tone: "neutre" };
+    }
+    case "PUB_SCANDALE:assumer":
+      await addReputation(cid, -3);
+      return { outcome: `La ${data.trainName} garde les couleurs de ${data.brand} jusqu'au bout. Les voyageurs s'en souviendront (−3 réputation).`, tone: "risque" };
     case "RECRUTEMENT:decliner":
       return { outcome: `${data.name} ira proposer ses services à la concurrence.`, tone: "neutre" };
   }
@@ -638,6 +717,23 @@ export async function applyChoice(d: DecisionRow, choiceId: string, random = Mat
    qui donne du poids à la réponse « gratuite ». */
 
 const FOLLOW_DECISIONS: Record<string, (c: { companyId: string; revenuePerHour: number; running: number }, data: Record<string, any>) => Draft | null> = {
+  // 2.3 : la marque fait scandale pendant que la rame porte ses couleurs
+  PUB_SCANDALE: (_c, data) => {
+    const brand = AD_BRANDS.find((b) => b.name === data.brand);
+    const refund = Math.round(Number(data.amount) / 2);
+    return {
+      kind: "PUB_SCANDALE",
+      title: `Scandale : ${data.brand} fait la une`,
+      body: `${brand?.scandal ?? "La marque est au cœur d'une polémique."} Et la ${data.trainName} roule toujours à ses couleurs sur ${data.dep} – ${data.arr}.`,
+      place: data.dep ?? null,
+      data,
+      choices: [
+        { id: "retirer", label: "Retirer la publicité", effects: [{ text: `−${fmt(refund)} pi. (la moitié du contrat, remboursée)`, tone: "cout" }, { text: "La ligne retrouve ses voyageurs", tone: "gain" }] },
+        { id: "assumer", label: "Assumer jusqu'au bout", effects: [{ text: "Vous gardez tout l'argent", tone: "gain" }, { text: "−3 réputation", tone: "risque" }] },
+      ],
+      defaultChoiceId: "assumer",
+    };
+  },
   GREVE_PERSONNEL: (c) => {
     const cost = priced(200, c.running, c.revenuePerHour, 3);
     return {
@@ -917,7 +1013,7 @@ export async function runDecisions(push: Push, now = new Date(), random = Math.r
 /* Choisit une situation qui a du sens pour cette compagnie, en évitant de
    reposer la même que les deux dernières fois. */
 export async function draftFor(company: { id: string; balance: number; maxTrains: number }, now = new Date(), random = Math.random): Promise<Draft | null> {
-  const [trains, lines, recent, reputation, shared, revenuePerHour, staff, gradeId] = await Promise.all([
+  const [trains, lines, recent, reputation, shared, revenuePerHour, staff, gradeId, lastPub] = await Promise.all([
     prisma.train.findMany({ where: { companyId: company.id }, include: { line: true } }),
     prisma.line.findMany({ where: { companyId: company.id }, select: { id: true, departureStation: true, arrivalStation: true } }),
     prisma.decision.findMany({ where: { companyId: company.id }, orderBy: { createdAt: "desc" }, take: 2, select: { kind: true } }),
@@ -926,6 +1022,7 @@ export async function draftFor(company: { id: string; balance: number; maxTrains
     revenuePerHourOf(company.id),
     prisma.staff.findMany({ where: { companyId: company.id }, select: { id: true, role: true, level: true, name: true } }),
     gradeOf(company.id),
+    prisma.decision.findFirst({ where: { companyId: company.id, kind: "PUB" }, orderBy: { createdAt: "desc" }, select: { createdAt: true } }),
   ]);
   const ctx: Ctx = {
     company,
@@ -938,6 +1035,7 @@ export async function draftFor(company: { id: string; balance: number; maxTrains
     staff: staff as Ctx["staff"],
     gradeId,
     pick: <T,>(xs: T[]) => xs[Math.floor(random() * xs.length)],
+    lastPubAt: (lastPub as { createdAt: Date } | null)?.createdAt ?? null,
   };
   const avoid = new Set((recent as { kind: string }[]).map((r) => r.kind));
   const order = [...KINDS].sort(() => random() - 0.5);

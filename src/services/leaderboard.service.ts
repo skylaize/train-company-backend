@@ -1,4 +1,5 @@
 import { isInternational } from "./international.service";
+import { boosterCompanyIds } from "./boost.service";
 import { startOfParisWeek } from "./time.service";
 import { prisma } from "../prisma";
 import { rankFromContext, CareerContext } from "./career.service";
@@ -21,6 +22,7 @@ const TRAIN_VALUE: Record<string, number> = {
   VAPEUR: 600,
   LUXE: 1600,
   CREMAILLERE: 500,
+  AUTORAIL_CORSE: 450, // 2.3
 };
 
 /* Une rame usée à 100 % ne vaut plus que la moitié de son prix. */
@@ -59,6 +61,7 @@ export interface LeaderRow {
   ponctualiteSample: number;
   parrains: number;
   grandeVitesse: number; // 2.2 : km de LGV ouvertes
+  booster?: boolean; // 2.3 : booste le serveur Discord
 }
 
 /* Additionne des couples (compagnie, valeur) en ignorant les lignes sans compagnie. */
@@ -216,6 +219,7 @@ async function computeLeaderRows(): Promise<LeaderRow[]> {
     _count: { trains: number; lines: number; staff: number };
   };
 
+  const boosters = await boosterCompanyIds().catch(() => new Set<string>());
   const rows: LeaderRow[] = companies.map((c: CompanyRow) => {
     const good = goodTripsBy.get(c.id) ?? 0;
     const bad = incidentsBy.get(c.id) ?? 0;
@@ -255,6 +259,7 @@ async function computeLeaderRows(): Promise<LeaderRow[]> {
       ponctualiteSample: sample,
       parrains: referralsBy.get(c.id) ?? 0,
       grandeVitesse: hslKm.get(c.id) ?? 0,
+      booster: boosters.has(c.id),
     };
   });
 

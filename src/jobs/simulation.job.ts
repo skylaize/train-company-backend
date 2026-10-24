@@ -38,9 +38,12 @@ import { runTrialExpiry } from "../services/trial.service";
 import { parisHour } from "../services/time.service";
 import { TGV_MODEL, TGV_SPEED, TGV_FARE, TGV_WEAR, hslOpen, runHighSpeedOpenings } from "../services/highspeed.service";
 import { collectSouls, flushSouls, runHalloween } from "../services/halloween.service";
+import { regionBonusMap, regionMultiplier, runRegions, RegionBonuses } from "../services/regions.service";
+import { runAllianceObjectives } from "../services/alliance-objectives.service";
+import { openContainer, outcomeText } from "../services/sealed.service";
 let lastPricingHour = -1;
 import { checkPriceAlerts, runStandingOrders } from "../controllers/market.controller";
-import { DLC_MODELS, MOUNTAIN_STATIONS, MOUNTAIN_WEAR, mountainDemand, isWeekend } from "../services/dlc.service";
+import { DLC_MODELS, MOUNTAIN_STATIONS, MOUNTAIN_WEAR, mountainDemand, isWeekend, CORSICA_STATIONS, CORSICA_WEAR, CORSICA_RAILCAR, corsicaDemand, ferryMultiplier } from "../services/dlc.service";
 import { runWrecks, heritageOf, HERITAGE_WEAR } from "../services/wreck.service";
 import { reconcilePayments } from "../controllers/billing.controller";
 import { refreshWeather, weatherMap, routeWeather, StationWeather } from "../services/realweather.service";
@@ -144,7 +147,7 @@ async function holdLease(): Promise<boolean> {
 
 /* Une rame « en panne » ne peut pas avoir moins de 100 % d'usure : si une
    écriture concurrente l'a laissée ainsi, on la remet en service. */
-async function healStuckTrains() {
+export async function healStuckTrains() {
   await prisma.train.updateMany({
     where: { status: "MAINTENANCE", wear: { lt: 100 }, lineId: { not: null }, workshopUntil: null, partsEta: null, brokenPart: null },
     data: { status: "EN_ROUTE", progress: 0, departedAt: new Date() },
@@ -153,6 +156,23 @@ async function healStuckTrains() {
     where: { status: "MAINTENANCE", wear: { lt: 100 }, lineId: null, workshopUntil: null, partsEta: null, brokenPart: null },
     data: { status: "IDLE", progress: 0, departedAt: null },
   });
+  /* 2.3 : une locomotive « en tournée » sans ligne et sans plus aucun contrat
+     en cours n'a rien à livrer : elle rentre au dépôt. (Une minute de grâce,
+     le temps que l'acceptation d'une tournée finisse de s'écrire.) */
+  const orphans = await prisma.train.findMany({
+    where: { status: "EN_ROUTE", lineId: null, contracts: { none: { status: "EN_COURS" } }, OR: [{ departedAt: null }, { departedAt: { lt: new Date(Date.now() - 60_000) } }] },
+    select: { id: true, name: true },
+  });
+  for (const t of orphans) {
+    const back = await prisma.train.updateMany({
+      where: { id: t.id, status: "EN_ROUTE", lineId: null, contracts: { none: { status: "EN_COURS" } } },
+      data: { status: "IDLE", progress: 0, departedAt: null },
+    });
+    if (back.count) {
+      console.log(`[simulation] ${t.name} était en tournée sans contrat : retour au dépôt`);
+      await prisma.incident.create({ data: { trainId: t.id, message: `${t.name} est rentrée au dépôt : sa tournée n'avait plus de contrat à livrer` } }).catch(() => undefined);
+    }
+  }
 }
 
 // les paliers de parrainage bougent lentement : inutile de les recalculer
@@ -239,6 +259,19 @@ async function runSimulationTick() {
     lastPricingHour = hourNow;
     await runAutoPricing().catch((err) => console.error("[prix auto] échec :", (err as Error).message));
   }
+  /* 2.3 : régions d'alliance (le passage du lundi) et objectifs d'alliance de
+     la semaine. Avant flushSeason : les points d'objectif partent avec ce tour. */
+  if (tickCount % 10 === 3) {
+    await runRegions()
+      .then(async (changes) => {
+        if (!changes?.length) return;
+        await notifyRegionChanges(changes).catch((err) => console.error("[régions] notifications :", (err as Error).message));
+      })
+      .catch((err) => console.error("[régions] échec :", (err as Error).message));
+    await runAllianceObjectives(async (companyId, title, body) => {
+      await sendToCompany(companyId, { title, body, url: "/dashboard", tag: "alliance" });
+    }).catch((err) => console.error("[alliances, objectifs] échec :", (err as Error).message));
+  }
   // 2.0 : saisons (ouverture, clôture, rang de la veille) et points du tour
   if (tickCount % 10 === 1) {
     await runSeasons()
@@ -289,6 +322,23 @@ async function runSimulationTick() {
   if (tickCount % 10 === 6) {
     void runDiscordFeed().catch((err) => console.error("[discord] annonces :", (err as Error).message));
     void syncAllRoles().catch((err) => console.error("[discord] rôles :", (err as Error).message));
+  }
+}
+
+/* 2.3 : chaque membre d'une alliance qui gagne ou perd une région est prévenu. */
+async function notifyRegionChanges(changes: { region: string; name: string; from: string | null; to: string | null }[]) {
+  const alliances = (await prisma.alliance.findMany({ select: { id: true, name: true } })) as { id: string; name: string }[];
+  const idOf = new Map(alliances.map((a) => [a.name, a.id]));
+  const messages = new Map<string, string[]>(); // alliance → phrases
+  for (const c of changes) {
+    if (c.to) messages.set(idOf.get(c.to) ?? "", [...(messages.get(idOf.get(c.to) ?? "") ?? []), `vous prenez ${c.name}`]);
+    if (c.from) messages.set(idOf.get(c.from) ?? "", [...(messages.get(idOf.get(c.from) ?? "") ?? []), `${c.to ?? "personne"} vous reprend ${c.name}`]);
+  }
+  for (const [allianceId, lines] of messages) {
+    if (!allianceId) continue;
+    const members = (await prisma.allianceMember.findMany({ where: { allianceId }, select: { companyId: true } })) as { companyId: string }[];
+    const body = lines.join(", ").replace(/^./, (x) => x.toUpperCase()) + ".";
+    for (const m of members) await sendToCompany(m.companyId, { title: "Les régions ont changé de main", body, url: "/dashboard", tag: "regions" }).catch(() => {});
   }
 }
 
@@ -402,17 +452,20 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
   // 2.0 : contrôleurs et conducteurs affectés aux rames
   const crews = await crewByTrain().catch(() => new Map());
   const mountainBoost = mountainDemand();
+  const corsicaBoost = corsicaDemand(); // 2.3
   const weekend = isWeekend();
   // gares et concurrence : calculées une fois pour tout le tour
   /* 1.5 : les gares d'un temps fort de saison s'ajoutent aux événements du
      moment, et les correspondances de chaque compagnie sont comptées une fois. */
-  const [liveEvents, competition, hubCounts, decisionEffects, owners, workshops] = await Promise.all([
+  const [liveEvents, competition, hubCounts, decisionEffects, owners, workshops, regionBonuses] = await Promise.all([
     activeStationEvents(),
     competitionMap(),
     allStationCounts(),
     activeDecisionEffects(),
     stationOwners(),
     workshopsByCompany(),
+    // 2.3 : les régions tenues par chaque alliance cette semaine
+    regionBonusMap().catch(() => new Map() as RegionBonuses),
   ]);
   // 1.7 : redevances et commerces dus aux propriétaires de gares, versés d'un bloc chaque heure
   const pending = new Map<string, { fees: number; shops: number }>();
@@ -494,6 +547,9 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
     if (heritage) wearRate = wearRate * HERITAGE_WEAR;
     const mountainLine = routeOf(lineX).some((st) => MOUNTAIN_STATIONS.includes(st));
     if (mountainLine && train.model !== "CREMAILLERE") wearRate = wearRate * MOUNTAIN_WEAR;
+    // 2.3 : la voie métrique corse use tout ce qui n'est pas l'autorail corse
+    const corsicanLine = routeOf(lineX).some((st) => CORSICA_STATIONS.includes(st));
+    if (corsicanLine && train.model !== CORSICA_RAILCAR) wearRate = wearRate * CORSICA_WEAR;
     wearRate = wearRate * driver.wear;
     // 2.2 : la rame TGV lancée sur sa LGV s'use plus vite
     const tgv = train.model === TGV_MODEL && hslOpen(train.line as { highSpeedAt?: Date | null });
@@ -554,6 +610,8 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
       const demand =
         routeDemand(route, stationEvents) *
         (route.some((st) => MOUNTAIN_STATIONS.includes(st)) ? mountainBoost : 1) *
+        // 2.3 : la Corse se remplit l'été
+        (route.some((st) => CORSICA_STATIONS.includes(st)) ? corsicaBoost : 1) *
         (weekend && dlcModel?.weekendDemand ? dlcModel.weekendDemand : 1);
       const contenders = competition.get(pairKey(dep, arr)) ?? [];
       const competitionMultiplier = contenders.find((c) => c.companyId === train.companyId)?.multiplier ?? 1;
@@ -604,7 +662,10 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
           // 2.1 : double voie, le cadencement attire du monde
           (doubled ? cadenceBonus(runningOnLine.get(train.lineId as string) ?? 1) : 1) *
           // 2.2 : le billet de la grande vitesse
-          (tgv ? TGV_FARE : 1)
+          (tgv ? TGV_FARE : 1) *
+          // 2.3 : correspondance maritime avec la Corse, et région tenue par l'alliance
+          ferryMultiplier(hubCounts.get(train.companyId), route) *
+          regionMultiplier(regionBonuses, train.companyId, route)
       );
       /* 1.7 : gares achetées. Chez soi, le trajet rapporte un peu plus ; chez
          les autres, il leur doit une redevance de quai ; partout où il y a des
@@ -763,6 +824,7 @@ export async function runFreightContracts(weather: Map<string, StationWeather> =
     let wearAfter = wearNow;
     const updates: Prisma.PrismaPromise<any>[] = [];
     const delivered: { cargoType: string; risky: boolean; damaged: boolean }[] = [];
+    const opened: { text: string; station: string }[] = []; // 2.3 : conteneurs scellés ouverts à l'arrivée
     for (const contract of tour) {
       /* La paie : la récompense, multipliée par la charge des wagons et le
          bonus de la locomotive (2.1), puis le directeur commercial, la
@@ -785,9 +847,31 @@ export async function runFreightContracts(weather: Map<string, StationWeather> =
       let effectiveDamageChance = premiumCompanyIds.has(companyId) ? DAMAGE_CHANCE / 2 : DAMAGE_CHANCE;
       if (contract.insured) effectiveDamageChance /= 2;
       const damaged = contract.risky && Math.random() < effectiveDamageChance;
-      const payout = damaged ? Math.round(baseReward * DAMAGE_PAYOUT_RATIO) : baseReward;
+      let payout = damaged ? Math.round(baseReward * DAMAGE_PAYOUT_RATIO) : baseReward;
       if (damaged) wearAfter = Math.min(100, wearAfter + DAMAGE_WEAR_PENALTY);
       const load = (contract.loadFactor ?? 1) > 1 ? ` ×${String(contract.loadFactor).replace(".", ",")}` : "";
+      /* 2.3 : le conteneur scellé s'ouvre à l'arrivée */
+      if (contract.sealed) {
+        const o = openContainer();
+        payout = Math.round(baseReward * o.factor);
+        wearAfter = Math.min(100, wearAfter + o.wear);
+        const fine = o.fineRatio ? Math.round(baseReward * o.fineRatio) : 0;
+        updates.push(
+          prisma.contract.update({ where: { id: contract.id }, data: { status: "LIVREE", trainId: null, sealedOutcome: `${o.code}|${o.what}`, reward: payout - fine } }),
+          prisma.company.update({ where: { id: companyId }, data: { balance: { increment: payout - fine }, ...(o.reputation ? { reputationAdjust: { increment: o.reputation } } : {}) } }),
+          prisma.transaction.create({
+            data: { companyId, type: "FRET", amount: payout, trainId: train.id, description: `Conteneur scellé ouvert à ${contract.destinationStation} : ${o.what}` },
+          })
+        );
+        if (fine > 0) updates.push(prisma.transaction.create({ data: { companyId, type: "EVENEMENT", amount: -fine, trainId: train.id, description: "Amende des douanes : contrebande dans un conteneur scellé" } }));
+        if (o.part) {
+          const stock = readStock((await prisma.company.findUnique({ where: { id: companyId }, select: { partsStock: true } }))?.partsStock);
+          updates.push(prisma.company.update({ where: { id: companyId }, data: { partsStock: { ...stock, [o.part]: (stock[o.part] ?? 0) + 1 } as any } }));
+        }
+        opened.push({ text: outcomeText(o), station: contract.destinationStation });
+        delivered.push({ cargoType: contract.cargoType, risky: false, damaged: o.code === "SAISIE" || o.code === "CASSE" });
+        continue;
+      }
       updates.push(
         prisma.contract.update({ where: { id: contract.id }, data: { status: "LIVREE", trainId: null } }),
         prisma.company.update({ where: { id: companyId }, data: { balance: { increment: payout } } }),
@@ -817,6 +901,10 @@ export async function runFreightContracts(weather: Map<string, StationWeather> =
     );
     await prisma.$transaction(updates);
 
+    for (const o of opened) {
+      await prisma.incident.create({ data: { trainId: train.id, message: `Conteneur scellé ouvert à ${o.station} : ${o.text}` } }).catch(() => undefined);
+      await sendToCompany(companyId, { title: `Conteneur ouvert à ${o.station}`, body: o.text, url: "/dashboard", tag: "fret" }).catch(() => undefined);
+    }
     for (const d of delivered) {
       // 2.0 : saison
       addSeasonPoints(companyId, POINTS.FREIGHT);
@@ -831,10 +919,8 @@ export async function runFreightContracts(weather: Map<string, StationWeather> =
       const repaired = await tryAutoRepair({ ...train, companyId }, null);
       if (!repaired) await prisma.incident.create({ data: { trainId: train.id, message: `${train.name} est rentré en panne et nécessite une réparation` } });
     } else {
-      // 2.2.1 : et la révision programmée, comme en fin de trajet voyageurs
-      await scheduledService({ id: train.id, name: train.name, companyId, lineId: null, serviceAt: train.serviceAt }, wearAfter).catch((err) =>
-        console.error("[atelier] révision du fret :", (err as Error).message)
-      );
+      // 2.3 : la révision programmée vaut aussi pour les locomotives de fret
+      await scheduledService({ ...train, companyId, lineId: null }, wearAfter).catch((err) => console.error("[atelier] fin de tournée :", (err as Error).message));
     }
   }
 }
@@ -951,10 +1037,10 @@ async function afterTrip(
   await scheduledService(train, wear);
 }
 
-/* Révision programmée : en fin de trajet, au-delà du seuil choisi par le
-   joueur. 2.2.1 : appelée aussi à l'arrivée d'un train de fret — elle ne
-   l'était qu'en fin de trajet voyageurs, et le réglage restait sans effet sur
-   les locomotives de fret (merci Kiri). */
+/* Révision programmée : en fin de trajet (ou de tournée de fret), au-delà du
+   seuil choisi dans l'atelier de la rame.
+   2.3 : partagée avec le fret. Les locomotives n'y passaient jamais : leur
+   seuil était enregistré, mais seule la fin d'un trajet voyageurs le lisait. */
 async function scheduledService(
   train: { id: string; name: string; companyId: string; lineId: string | null; serviceAt?: number | null },
   wear: number

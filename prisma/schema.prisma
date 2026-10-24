@@ -25,6 +25,10 @@ model User {
   // joueur n'a pas cliqué sur « Lier mon Discord » dans les Paramètres.
   discordId   String? @unique
   discordName String?
+  // 2.3 : boost Nitro du serveur Discord. boostSince = début du boost en cours
+  // (premium_since de Discord), boostDays = jours de boost des fois précédentes.
+  boostSince DateTime?
+  boostDays  Int       @default(0)
   // 2.2 : compte suspendu depuis le panneau d'administration (toute l'API lui répond 403)
   bannedAt     DateTime?
   bannedReason String?
@@ -405,6 +409,11 @@ model Train {
 
   // 2.0 — rame de collection, restaurée depuis une épave (numéro, histoire, livrée d'époque, prestige)
   heritage      Json?
+
+  // 2.3 : rame publicitaire. La marque, sa couleur, et la fin du contrat
+  adBrand       String?
+  adColor       String?
+  adUntil       DateTime?
 }
 
 // 2.0 : une épave près d'une gare. Libre (companyId nul) jusqu'à ce qu'une
@@ -464,6 +473,9 @@ model Contract {
   // 2.1 : tournée de fret (plusieurs contrats sur une rame) et charge portée par les wagons
   tourMinutes       Int?
   loadFactor        Float          @default(1)
+  // 2.3 : conteneur scellé. Son contenu n'est révélé qu'à la livraison
+  sealed            Boolean        @default(false)
+  sealedOutcome     String?
 
   createdAt         DateTime       @default(now())
 
@@ -904,6 +916,43 @@ model AllianceInvite {
 }
 
 // Le tableau d'affichage : messages courts, gardés sept jours.
+// 2.3 : les objectifs d'alliance de la semaine. Une ligne par alliance et par
+// semaine (lundi 0 h, heure de Paris). Les objectifs sont figés au tirage, avec
+// leur cible ; la progression et les réussites sont recalculées depuis la base.
+model AllianceWeek {
+  id         String   @id @default(uuid())
+  allianceId String
+  weekStart  DateTime
+  objectives Json     // [{ kind, label, target, points, coins }]
+  baseline   Json     @default("{}") // point de départ des objectifs « de stock » (gares communes)
+  progress   Json     @default("{}") // { kind: total }
+  shares     Json     @default("{}") // { kind: { companyId: part } }
+  done       Json     @default("{}") // { kind: date de réussite }
+  bonusPaid  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@unique([allianceId, weekStart])
+  @@index([weekStart])
+}
+
+// 2.3 : régions d'alliance. Chaque lundi, une ligne par région : l'alliance
+// qui la tient pour la semaine (ou personne), ce qui l'a départagée, et depuis
+// quand elle la tient sans interruption.
+model RegionControl {
+  id         String   @id @default(uuid())
+  weekStart  DateTime
+  region     String
+  allianceId String?
+  stations   Int      @default(0) // gares desservies par l'alliance dans la région
+  trips      Int      @default(0) // trajets de la semaine passée dans la région (départage)
+  since      DateTime? // première semaine de la série en cours
+  previousId String?  // alliance qui la tenait la semaine d'avant
+  createdAt  DateTime @default(now())
+
+  @@unique([weekStart, region])
+  @@index([allianceId])
+}
+
 model AllianceMessage {
   id         String   @id @default(uuid())
   allianceId String
