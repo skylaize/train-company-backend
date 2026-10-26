@@ -137,6 +137,168 @@ model Company {
   lastWeeklyReport String? // semaine (AAAA-MM-JJ du lundi, heure de Paris) du dernier rapport hebdo notifié
   lastDividendOn String?  // jour (AAAA-MM-JJ, heure de Paris) du dernier versement de dividendes
   wrecks       Wreck[]
+  // 2.4 : le vrai coût du rail
+  dieselTanks       Int       @default(0)  // cuves au dépôt (5 000 L chacune)
+  dieselLiters      Float     @default(0)  // gazole en cuve
+  dieselFixedPrice  Float?                 // contrat à prix fixe (prix au litre, frais compris)
+  dieselFixedUntil  DateTime?
+  powerFixedPrice   Float?                 // contrat d'électricité à prix fixe (au kWh)
+  powerFixedUntil   DateTime?
+  batteryKwh        Float     @default(0)  // courant stocké dans les batteries
+  batteryOffPeak    Boolean   @default(true) // recharger les batteries aux heures creuses
+  powerOfferPrice   Float?                 // prix auquel la compagnie vend son surplus aux autres joueurs
+  co2Week           Float     @default(0)  // tonnes de CO₂ émises depuis lundi
+  fuelBlocked       Boolean   @default(false) // facture d'énergie impayée : les rames thermiques attendent
+  energyMeters      EnergyMeter[]
+  carbonBills       CarbonBill[]
+  powerPlants       PowerPlant[]
+  partFactories     PartFactory[]
+  concessions       Concession[]
+}
+
+// 2.4 : le vrai coût du rail.
+
+// Réglages modifiables depuis le panneau d'administration (taux, période
+// d'essai, état des marchés). Une ligne par clé, la valeur en JSON.
+model GameSetting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+}
+
+// Ce qu'une compagnie a consommé et émis, heure par heure. La facture
+// d'énergie se règle à la fin de chaque heure ; les lignes servent aussi
+// aux courbes de la page Énergie.
+model EnergyMeter {
+  id         String   @id @default(uuid())
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  companyId  String
+  hour       DateTime // début de l'heure
+  kwh        Float    @default(0) // consommé par les rames électriques
+  liters     Float    @default(0) // gazole consommé
+  produced   Float    @default(0) // produit par les centrales de la compagnie
+  co2        Float    @default(0) // tonnes émises
+  cost       Int      @default(0) // facture de l'heure (énergie seule)
+  income     Int      @default(0) // courant revendu
+  settled    Boolean  @default(false)
+  trial      Boolean  @default(false) // facture calculée pendant la période d'essai, non prélevée
+
+  @@unique([companyId, hour])
+  @@index([hour, settled])
+}
+
+model CarbonBill {
+  id         String   @id @default(uuid())
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  companyId  String
+  week       String   // AAAA-MM-JJ du lundi (heure de Paris)
+  emitted    Float
+  quota      Float
+  taxable    Float
+  valuation  Int      // valeur de la compagnie au moment du calcul
+  rate       Float    // prix moyen de la tonne, toutes tranches confondues
+  amount     Int
+  trial      Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@unique([companyId, week])
+}
+
+// Cours du gazole et du courant : la valeur du moment, et un relevé par heure.
+model MarketIndex {
+  kind       String   @id // DIESEL | POWER
+  value      Float
+  shock      Float    @default(1)
+  shockUntil DateTime?
+  shockLabel String?
+  updatedAt  DateTime @updatedAt
+}
+
+model MarketIndexHistory {
+  id    String   @id @default(uuid())
+  kind  String
+  value Float    // prix effectif (choc compris)
+  at    DateTime @default(now())
+
+  @@index([kind, at])
+}
+
+model PowerPlant {
+  id        String   @id @default(uuid())
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  companyId String
+  kind      String   // SOLAIRE | EOLIEN | BARRAGE | BATTERIE
+  station   String
+  produced  Float    @default(0) // total produit depuis la construction
+  builtAt   DateTime @default(now())
+
+  @@index([companyId])
+}
+
+// Stock national de pièces détachées : le prix monte quand il baisse.
+model PartMarket {
+  part      String   @id // FREINS | BOGIES | MOTEUR | CAISSE
+  stock     Int
+  target    Int
+  updatedAt DateTime @updatedAt
+}
+
+model PartFactory {
+  id         String   @id @default(uuid())
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  companyId  String
+  part       String
+  station    String
+  stored     Int      @default(0) // pièces sorties de l'usine, pas encore rangées ni vendues
+  salePrice  Int?               // prix de vente aux autres joueurs (null = pas à vendre)
+  producedAt DateTime @default(now()) // dernière pièce sortie
+  builtAt    DateTime @default(now())
+
+  @@index([companyId])
+  @@index([part, salePrice])
+}
+
+// Une liaison entre deux gares voisines d'un itinéraire : son état, sa
+// cagnotte de rénovation et, s'il y en a un, son concessionnaire.
+model TrackSegment {
+  key        String   @id // "A|B", gares triées
+  condition  Float    @default(100)
+  fund       Int      @default(0)
+  round      Int      @default(0) // nombre de rénovations terminées
+  renovatedAt DateTime?
+  updatedAt  DateTime @updatedAt
+  concession Concession?
+  fundings   TrackFunding[]
+}
+
+model TrackFunding {
+  id         String       @id @default(uuid())
+  segment    TrackSegment @relation(fields: [segmentKey], references: [key], onDelete: Cascade)
+  segmentKey String
+  companyId  String
+  amount     Int
+  round      Int          @default(0) // numéro de la rénovation financée
+  at         DateTime     @default(now())
+
+  @@index([segmentKey, round])
+  @@index([companyId, at])
+}
+
+model Concession {
+  id             String       @id @default(uuid())
+  segment        TrackSegment @relation(fields: [segmentKey], references: [key], onDelete: Cascade)
+  segmentKey     String       @unique
+  company        Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  companyId      String
+  toll           Float        @default(0.05) // part de la recette des autres compagnies, de 0 à 0,15
+  invested       Int
+  pending        Int          @default(0) // péages encaissés pendant l'heure, versés d'un bloc
+  totalTolls     Int          @default(0)
+  lowSince       DateTime?    // état sous le seuil depuis…
+  protectedUntil DateTime
+  boughtAt       DateTime     @default(now())
+
+  @@index([companyId])
 }
 
 // Un objet cosmétique acheté. Une ligne par objet et par compagnie : on ne
@@ -357,6 +519,9 @@ model Line {
   // concurrence (1.4) : dernier état connu, pour prévenir quand il change
   rivals            Int      @default(0)
   leading           Boolean  @default(true)
+
+  // 2.4 : la simulation et les écrans filtrent par compagnie
+  @@index([companyId])
 }
 
 enum TrainStatus {
@@ -414,6 +579,12 @@ model Train {
   adBrand       String?
   adColor       String?
   adUntil       DateTime?
+
+  // 2.4 : la simulation cherche les rames par statut et par ligne à chaque tour,
+  // les écrans par compagnie ; sans index, chaque requête lisait toute la table
+  @@index([companyId])
+  @@index([status, lineId])
+  @@index([lineId])
 }
 
 // 2.0 : une épave près d'une gare. Libre (companyId nul) jusqu'à ce qu'une
@@ -480,6 +651,9 @@ model Contract {
   createdAt         DateTime       @default(now())
 
   @@index([trainId])
+  // 2.4 : marché (DISPONIBLE) et tournées en cours (EN_COURS), à chaque tour
+  @@index([status, companyId])
+  @@index([companyId])
 }
 
 model Incident {
@@ -490,6 +664,9 @@ model Incident {
   trainId     String
 
   createdAt   DateTime @default(now())
+
+  // 2.4 : la réputation compte les incidents de chaque compagnie
+  @@index([trainId])
 }
 
 model Transaction {
@@ -548,6 +725,8 @@ model Staff {
 
   // plus d'unicité par poste : on peut désormais embaucher plusieurs mécaniciens
   @@index([companyId, role])
+  // 2.4 : équipages affectés aux rames
+  @@index([trainId])
 }
 
 // 2.0 : la vraie météo de chaque gare (MET Norway), relevée toutes les 20 minutes

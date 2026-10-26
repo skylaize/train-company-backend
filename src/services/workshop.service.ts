@@ -1,3 +1,4 @@
+import { partDelayFactor, partPriceFactor } from "./parts-market.service";
 import { WAGONS, WagonId } from "./freight.service";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../prisma";
@@ -140,14 +141,16 @@ export async function takeFromStock(companyId: string, part: Organ): Promise<boo
 
 export type RepairMode = "stock" | "order" | "express";
 
+/* 2.4 : le prix et le délai suivent le stock national de la pièce
+   (parts-market.service) : jusqu'à ×3 et ×2 en pleine pénurie. */
 export function partPrice(part: Organ, mode: RepairMode) {
   if (mode === "stock") return 0;
-  return Math.round(PARTS[part].price * (mode === "express" ? EXPRESS_FACTOR : 1));
+  return Math.round(PARTS[part].price * partPriceFactor(part) * (mode === "express" ? EXPRESS_FACTOR : 1));
 }
 
 export function partDelayMs(part: Organ, mode: RepairMode) {
   if (mode === "stock") return 0;
-  return (mode === "express" ? EXPRESS_MIN : PARTS[part].delayMin) * 60_000;
+  return Math.round((mode === "express" ? EXPRESS_MIN : PARTS[part].delayMin * partDelayFactor(part)) * 60_000);
 }
 
 /* La rame remise en état : en route si elle a une ligne, à quai sinon. */

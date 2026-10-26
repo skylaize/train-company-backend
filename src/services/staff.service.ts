@@ -258,14 +258,17 @@ export async function runStaffExperience() {
     select: { id: true, xp: true, level: true, refusedAtXp: true },
   });
 
+  const asking: string[] = [];
   for (const s of candidates as { id: string; xp: number; level: number; refusedAtXp: number }[]) {
     const reached = levelFromXp(s.xp);
     if (reached <= s.level) continue;
     /* Après un refus, l'employé ne redemande pas au tick suivant : il attend
        d'avoir accumulé l'équivalent d'un niveau d'expérience de plus. */
     if (s.refusedAtXp > 0 && s.xp < s.refusedAtXp + LEVEL_THRESHOLDS[1]) continue;
-    await prisma.staff.update({ where: { id: s.id }, data: { raiseRequested: true } });
+    asking.push(s.id);
   }
+  // 2.4 : une écriture pour toutes les demandes du tour
+  if (asking.length) await prisma.staff.updateMany({ where: { id: { in: asking } }, data: { raiseRequested: true } });
 }
 
 const FIRST = ["Jeanne", "Louis", "Marcel", "Odette", "Henri", "Simone", "Gaston", "Lucienne", "René", "Paulette", "André", "Germaine", "Émile", "Yvonne", "Raymond", "Suzanne", "Fernand", "Madeleine", "Lucien", "Marthe"];

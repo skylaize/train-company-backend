@@ -5,7 +5,8 @@ import { processReferralMilestones } from "../services/referral-milestone.servic
 import { creditDelivery, expireMissions } from "../services/mission.service";
 import { cargoBonus } from "../services/client.service";
 import { upkeepPerTick } from "../services/upkeep.service";
-import { computeReputation } from "../services/reputation.service";
+import { computeReputation, reputationMap } from "../services/reputation.service";
+import { pool, groupBy, chunk, row, incrementBalances, TickTimer, SIM_CONCURRENCY } from "../services/batch.service";
 import { runMarketTick, runStorageFees, getCargoIndexMap, freightMultiplier } from "../services/market.service";
 import { completeConstructions } from "../services/construction.service";
 import { runMorningDigest } from "../services/report.service";
@@ -17,6 +18,11 @@ import { runLoanPayments, runSharePrices, runDividends, runWeeklyReports, runSto
 import { runAutoPricing } from "../services/pricing.service";
 import { isFreightModel, modelBonus } from "../services/freight.service";
 import { sendToCompany } from "../services/push.service";
+import { consumePart } from "../services/parts-market.service";
+import { economy, inTrial } from "../services/settings.service";
+import { meterAdd, routeInOutage, tripEnergy } from "../services/energy.service";
+import { cofunderMultiplier, routeTrack, tollsFor, wearTrack } from "../services/track.service";
+import { economyAfterTick, economyBeforeTick } from "../services/economy24.service";
 import { runTrain200 } from "../services/train200.service";
 import { seasonalStationEvents } from "../services/season.service";
 import { allStationCounts, hubMultiplier } from "../services/hub.service";
@@ -94,12 +100,14 @@ export function startSimulationJob() {
     }
     ticking = true;
     const started = Date.now();
+    const timer = new TickTimer();
     holdLease()
-      .then((mine) => (mine ? runSimulationTick() : undefined))
+      .then((mine) => (mine ? runSimulationTick(timer) : undefined))
       .then(() => {
         // 2.0 : un tour lent se voit dans les journaux de Coolify
+        // 2.4 : avec le détail des étapes les plus longues
         const ms = Date.now() - started;
-        if (ms > 8000) console.warn(`[simulation] tour lent : ${(ms / 1000).toFixed(1)} s`);
+        if (ms > 8000) console.warn(`[simulation] tour lent : ${(ms / 1000).toFixed(1)} s — ${timer.report()}`);
       })
       .catch((err) => {
         console.error("[simulation] tour ignoré après erreur :", err);
@@ -180,112 +188,122 @@ export async function healStuckTrains() {
 let tickCount = 0;
 const MILESTONE_EVERY = 10;
 
-async function runSimulationTick() {
+async function runSimulationTick(timer: TickTimer) {
+  /* 2.4 : chaque étape est chronométrée (T) ; un tour lent dit dans les
+     journaux lesquelles ont pris le temps. */
+  const T = <R>(name: string, fn: () => Promise<R>) => timer.step(name, fn);
   tickCount += 1;
   // 2.0 : la vraie météo des gares, relevée toutes les 20 minutes (sans bloquer le tour)
   // 2.0 : paiements livrés même si le webhook Stripe s'est perdu
   void reconcilePayments().catch((err) => console.error("[stripe] rattrapage :", (err as Error).message));
   void refreshWeather().catch((err) => console.error("[météo] échec :", (err as Error).message));
   // gares : un événement naît de temps en temps, annoncé une heure à l'avance
-  await maybeSpawnStationEvent().catch((err) => console.error("[gares] échec :", (err as Error).message));
+  await T("événements gares", () => maybeSpawnStationEvent()).catch((err) => console.error("[gares] échec :", (err as Error).message));
   const weather = await weatherMap().catch(() => new Map<string, StationWeather>());
+  // 2.4 : réglages, cours, état des voies et des pièces, relus une fois pour le tour
+  await T("économie (avant)", () => economyBeforeTick());
   // 2.2 : l'horaire du Train fantôme, avant les trajets qui récoltent les âmes
-  await runHalloween().catch((err) => console.error("[halloween] horaire :", (err as Error).message));
-  await runLineTrains(weather);
-  await flushSouls(async (companyId, title, body) => {
+  await T("halloween", () => runHalloween()).catch((err) => console.error("[halloween] horaire :", (err as Error).message));
+  await T("lignes voyageurs", () => runLineTrains(weather));
+  await T("âmes", () => flushSouls(async (companyId, title, body) => {
     await sendToCompany(companyId, { title, body, url: "/dashboard", tag: "halloween" });
-  }).catch((err) => console.error("[halloween] âmes :", (err as Error).message));
-  await runFreightContracts(weather);
-  await runPayroll();
-  await runStaffExperience();
+  })).catch((err) => console.error("[halloween] âmes :", (err as Error).message));
+  await T("fret", () => runFreightContracts(weather));
+  await T("paie", () => runPayroll());
+  await T("expérience personnel", () => runStaffExperience());
   // 2.0 : sorties d'atelier et pièces livrées
-  await runWorkshop().catch((err) => console.error("[atelier] échec :", (err as Error).message));
-  await runWrecks().catch((err) => console.error("[épaves] échec :", (err as Error).message));
-  if (tickCount % 10 === 2) await healStuckTrains().catch((err) => console.error("[rames] échec :", (err as Error).message));
-  await runUpkeep();
+  await T("atelier", () => runWorkshop()).catch((err) => console.error("[atelier] échec :", (err as Error).message));
+  await T("épaves", () => runWrecks()).catch((err) => console.error("[épaves] échec :", (err as Error).message));
+  if (tickCount % 10 === 2) await T("rames bloquées", () => healStuckTrains()).catch((err) => console.error("[rames] échec :", (err as Error).message));
+  // 2.4 : compteurs, usure des voies et pièces écrits ; chaque heure, factures, cours, carbone
+  await T("économie (après)", () => economyAfterTick(weather, async (companyId, title, body) => {
+    await sendToCompany(companyId, { title, body, url: "/dashboard", tag: "energie" });
+  }));
+  await T("entretien", () => runUpkeep());
   // avant de réapprovisionner : les ordres périmés libèrent leur marchandise
-  await expireMissions();
-  await removeExpiredContracts();
-  await ensureMarketStocked();
-  await processReferralRewards();
+  await T("ordres expirés", () => expireMissions());
+  await T("contrats expirés", () => removeExpiredContracts());
+  await T("marché des contrats", () => ensureMarketStocked());
+  // 2.4 : les parrainages bougent lentement, une fois par minute suffit
+  if (tickCount % 2 === 0) await T("parrainages", () => processReferralRewards());
   /* Cours du fret : le marché bouge que le joueur soit là ou non, sinon
      spéculer reviendrait à jouer contre une horloge qu'on met en pause soi-même. */
-  await runMarketTick();
-  await runStorageFees();
-  await checkPriceAlerts();
-  await runStandingOrders();
+  await T("cours du fret", () => runMarketTick());
+  await T("frais de garde", () => runStorageFees());
+  await T("alertes de prix", () => checkPriceAlerts());
+  await T("ordres permanents", () => runStandingOrders());
   // chantiers arrivés à terme : dépôt agrandi, entrepôt livré
-  await completeConstructions();
+  await T("chantiers", () => completeConstructions());
   // appels d'offres (1.5) : annonce, ouverture, attribution, subventions, clôture
-  await runTenders(async (companyId, title, body) => {
+  await T("appels d'offres", () => runTenders(async (companyId, title, body) => {
     await sendToCompany(companyId, { title, body, url: "/dashboard", tag: "appels" });
-  }).catch((err) => console.error("[appels d'offres] échec :", (err as Error).message));
+  })).catch((err) => console.error("[appels d'offres] échec :", (err as Error).message));
   // veille concurrentielle : toutes les cinq minutes suffit, un changement de tête n'est pas à la seconde
   if (tickCount % 10 === 0) {
-    await competitionMap()
+    await T("concurrence", () => competitionMap()
       .then((map) =>
         watchCompetition(map, async (companyId, title, body) => {
           await sendToCompany(companyId, { title, body, url: "/dashboard", tag: "concurrence" });
         })
-      )
+      ))
       .catch((err) => console.error("[concurrence] échec :", (err as Error).message));
   }
   // 2.2 : les LGV dont le chantier vient de finir
   if (tickCount % 2 === 0) {
-    await runHighSpeedOpenings(async (companyId, title, body) => {
+    await T("lgv", () => runHighSpeedOpenings(async (companyId, title, body) => {
       await sendToCompany(companyId, { title, body, url: "/dashboard", tag: "lgv" });
-    }).catch((err) => console.error("[lgv] ouvertures :", (err as Error).message));
+    })).catch((err) => console.error("[lgv] ouvertures :", (err as Error).message));
   }
   // 2.1.2 : le Train des 200, gare après gare
-  await runTrain200(async (companyId, title, body) => {
+  await T("train des 200", () => runTrain200(async (companyId, title, body) => {
     await sendToCompany(companyId, { title, body, url: "/dashboard", tag: "train200" });
-  }).catch((err) => console.error("[train des 200] échec :", (err as Error).message));
+  })).catch((err) => console.error("[train des 200] échec :", (err as Error).message));
   // décisions du directeur (1.6) : échéances, promesses, nouvelles situations
   if (tickCount % 10 === 0) {
-    await runDecisions(async (companyId, title, body) => {
+    await T("décisions", () => runDecisions(async (companyId, title, body) => {
       await sendToCompany(companyId, { title, body, url: "/dashboard", tag: "decision" });
-    }).catch((err) => console.error("[décisions] échec :", (err as Error).message));
+    })).catch((err) => console.error("[décisions] échec :", (err as Error).message));
   }
   // 1.7 : revenus des gares (toutes les heures), échéances d'emprunt, cours de bourse, dividendes, rapport hebdo
-  if (tickCount % 120 === 0) await payStationIncome().catch((err) => console.error("[gares] échec :", (err as Error).message));
-  await runLoanPayments(async (companyId, title, body) => {
+  if (tickCount % 120 === 0) await T("revenus des gares", () => payStationIncome()).catch((err) => console.error("[gares] échec :", (err as Error).message));
+  await T("emprunts", () => runLoanPayments(async (companyId, title, body) => {
     await sendToCompany(companyId, { title, body, url: "/dashboard", tag: "banque" });
-  }).catch((err) => console.error("[emprunts] échec :", (err as Error).message));
-  if (tickCount % 120 === 1) await runSharePrices().catch((err) => console.error("[bourse] échec :", (err as Error).message));
+  })).catch((err) => console.error("[emprunts] échec :", (err as Error).message));
+  if (tickCount % 120 === 1) await T("bourse", () => runSharePrices()).catch((err) => console.error("[bourse] échec :", (err as Error).message));
   // Premium : prix automatique. 2.0.3 : recalé chaque minute (et dès que l'heure
   // change), pour suivre la pointe, les rames ajoutées, les concurrents et les événements
   const hourNow = parisHour();
   if (tickCount % 2 === 1 || hourNow !== lastPricingHour) {
     lastPricingHour = hourNow;
-    await runAutoPricing().catch((err) => console.error("[prix auto] échec :", (err as Error).message));
+    await T("prix auto", () => runAutoPricing()).catch((err) => console.error("[prix auto] échec :", (err as Error).message));
   }
   /* 2.3 : régions d'alliance (le passage du lundi) et objectifs d'alliance de
      la semaine. Avant flushSeason : les points d'objectif partent avec ce tour. */
   if (tickCount % 10 === 3) {
-    await runRegions()
+    await T("régions", () => runRegions()
       .then(async (changes) => {
         if (!changes?.length) return;
         await notifyRegionChanges(changes).catch((err) => console.error("[régions] notifications :", (err as Error).message));
-      })
+      }))
       .catch((err) => console.error("[régions] échec :", (err as Error).message));
-    await runAllianceObjectives(async (companyId, title, body) => {
+    await T("objectifs d'alliance", () => runAllianceObjectives(async (companyId, title, body) => {
       await sendToCompany(companyId, { title, body, url: "/dashboard", tag: "alliance" });
-    }).catch((err) => console.error("[alliances, objectifs] échec :", (err as Error).message));
+    })).catch((err) => console.error("[alliances, objectifs] échec :", (err as Error).message));
   }
   // 2.0 : saisons (ouverture, clôture, rang de la veille) et points du tour
   if (tickCount % 10 === 1) {
-    await runSeasons()
+    await T("saisons", () => runSeasons()
       .then(async (closed) => {
         if (closed) {
           await notifySeasonEnd(closed.id).catch(() => {});
           await announceSeasonEnd(closed.id).catch((err) => console.error("[discord] fin de saison :", (err as Error).message));
         }
-      })
+      }))
       .catch((err) => console.error("[saisons] échec :", (err as Error).message));
-    await reconcileObjectives().catch((err) => console.error("[saisons, objectifs] échec :", (err as Error).message));
+    await T("objectifs de saison", () => reconcileObjectives()).catch((err) => console.error("[saisons, objectifs] échec :", (err as Error).message));
   }
-  await flushSeason().catch((err) => console.error("[saisons, points] échec :", (err as Error).message));
-  await flushWorld()
+  await T("points de saison", () => flushSeason()).catch((err) => console.error("[saisons, points] échec :", (err as Error).message));
+  await T("grand chantier", () => flushWorld()
     .then(async (opened) => {
       if (!opened) return;
       // le tunnel vient d'ouvrir : tout le monde est prévenu
@@ -293,32 +311,32 @@ async function runSimulationTick() {
       for (const c of ids) {
         await sendToCompany(c.id, { title: `${TUNNEL_NAME} est ouvert`, body: `${TUNNEL_STATIONS.join(" et ")} rejoignent la carte.`, url: "/dashboard", tag: "chantier" }).catch(() => {});
       }
-    })
+    }))
     .catch((err) => console.error("[grand chantier] échec :", (err as Error).message));
   if (tickCount % 120 === 4) await prisma.lineLoadHour.deleteMany({ where: { hour: { lt: new Date(Date.now() - 48 * 3600_000) } } }).catch(() => {});
   const premiumNotify = async (companyId: string, title: string, body: string, tag: string) => {
     await sendToCompany(companyId, { title, body, url: "/dashboard", tag });
   };
-  await runStockOrders((id, t, b) => premiumNotify(id, t, b, "bourse")).catch((err) => console.error("[ordres de bourse] échec :", (err as Error).message));
+  await T("ordres de bourse", () => runStockOrders((id, t, b) => premiumNotify(id, t, b, "bourse"))).catch((err) => console.error("[ordres de bourse] échec :", (err as Error).message));
   if (tickCount % 4 === 0) {
-    await runPremiumAlerts((id, t, b) => premiumNotify(id, t, b, "alerte")).catch((err) => console.error("[alertes] échec :", (err as Error).message));
+    await T("alertes premium", () => runPremiumAlerts((id, t, b) => premiumNotify(id, t, b, "alerte"))).catch((err) => console.error("[alertes] échec :", (err as Error).message));
   }
   // 2.1.1 (Premium) : les alertes personnalisées
-  await runCustomAlerts((id, t, b) => premiumNotify(id, t, b, "alerte"), (m) => TRAIN_MODELS[m]?.cost ?? 200).catch((err) => console.error("[alertes perso] échec :", (err as Error).message));
-  await runDividends().catch((err) => console.error("[dividendes] échec :", (err as Error).message));
-  await runWeeklyReports(async (companyId, title, body) => {
+  await T("alertes perso", () => runCustomAlerts((id, t, b) => premiumNotify(id, t, b, "alerte"), (m) => TRAIN_MODELS[m]?.cost ?? 200)).catch((err) => console.error("[alertes perso] échec :", (err as Error).message));
+  await T("dividendes", () => runDividends()).catch((err) => console.error("[dividendes] échec :", (err as Error).message));
+  await T("rapport hebdo", () => runWeeklyReports(async (companyId, title, body) => {
     await sendToCompany(companyId, { title, body, url: "/dashboard", tag: "rapport" });
-  }).catch((err) => console.error("[rapport hebdo] échec :", (err as Error).message));
+  })).catch((err) => console.error("[rapport hebdo] échec :", (err as Error).message));
   // bilan du matin : isolé, un raté ne doit pas interrompre le tick
-  await runMorningDigest().catch((err) => console.error("[bilan] échec :", (err as Error).message));
-  if (tickCount % MILESTONE_EVERY === 0) await processReferralMilestones();
+  await T("bilan du matin", () => runMorningDigest()).catch((err) => console.error("[bilan] échec :", (err as Error).message));
+  if (tickCount % MILESTONE_EVERY === 0) await T("paliers de parrainage", () => processReferralMilestones());
   /* 2.1 : Discord, toutes les cinq minutes. Sans bloquer le tour : une API
      Discord lente ne doit jamais retarder la simulation. Le bail garantit
      qu'un seul serveur publie, même pendant un déploiement. */
   // 2.1 : giveaways arrivés à échéance (tirage), compteurs de participants
   void runGiveaways().catch((err) => console.error("[giveaway] :", (err as Error).message));
   // 2.1 : les Premium d'essai arrivés à leur terme
-  await runTrialExpiry().catch((err) => console.error("[essai Premium] :", (err as Error).message));
+  await T("fin d'essai premium", () => runTrialExpiry()).catch((err) => console.error("[essai Premium] :", (err as Error).message));
   if (tickCount % 10 === 6) {
     void runDiscordFeed().catch((err) => console.error("[discord] annonces :", (err as Error).message));
     void syncAllRoles().catch((err) => console.error("[discord] rôles :", (err as Error).message));
@@ -350,17 +368,22 @@ async function processReferralRewards() {
     where: { referredById: { not: null }, referralRewardGranted: false },
     select: { id: true, referredById: true },
   });
+  if (pendingReferrals.length === 0) return;
+
+  /* 2.4 : rames et lignes comptées pour tous les filleuls en deux requêtes
+     (avant : deux comptages par filleul, à chaque tour, pour toujours). */
+  const ids = pendingReferrals.map((r: { id: string }) => r.id);
+  const [trains, lines] = await Promise.all([
+    prisma.train.groupBy({ by: ["companyId"], where: { companyId: { in: ids } }, _count: { _all: true } }),
+    prisma.line.groupBy({ by: ["companyId"], where: { companyId: { in: ids } }, _count: { _all: true } }),
+  ]);
+  const hasTrain = new Set((trains as { companyId: string }[]).map((t) => t.companyId));
+  const hasLine = new Set((lines as { companyId: string }[]).map((l) => l.companyId));
 
   for (const referred of pendingReferrals) {
     if (!referred.referredById) continue;
-
     // condition minimale pour prouver que l'ami a vraiment commencé à jouer, pas juste créé un compte
-    const [trainCount, lineCount] = await Promise.all([
-      prisma.train.count({ where: { companyId: referred.id } }),
-      prisma.line.count({ where: { companyId: referred.id } }),
-    ]);
-
-    if (trainCount >= 1 && lineCount >= 1) {
+    if (hasTrain.has(referred.id) && hasLine.has(referred.id)) {
       await prisma.$transaction([
         prisma.company.update({ where: { id: referred.id }, data: { referralRewardGranted: true } }),
         prisma.company.update({
@@ -431,6 +454,19 @@ async function getPremiumCompanyIds(): Promise<Set<string>> {
   return new Set(rows.map((r) => r.id));
 }
 
+/* 2.4 : progression et usure de toutes les rames qui roulent, en une
+   requête par paquet de 500 au lieu d'une requête par rame. Même condition
+   qu'avant : une rame passée à l'atelier entre-temps n'est pas écrasée. */
+async function flushProgress(updates: { id: string; progress: number; wear: number }[], guarded = true) {
+  const guard = guarded ? Prisma.sql`AND t."status" = 'EN_ROUTE' AND t."workshopUntil" IS NULL` : Prisma.empty;
+  for (const part of chunk(updates, 500)) {
+    await prisma.$executeRaw`
+      UPDATE "Train" AS t SET "progress" = v.progress::int, "wear" = v.wear::int
+      FROM (VALUES ${Prisma.join(part.map((u) => row([u.id, u.progress, u.wear])))}) AS v(id, progress, wear)
+      WHERE t."id" = v.id::text ${guard}`;
+  }
+}
+
 export async function runLineTrains(weather: Map<string, StationWeather> = new Map()) {
   /* 2.1.1 (Premium) : les rames garées hors de leurs horaires repartent dès
      que leur plage de service commence (ou si la compagnie n'est plus Premium) */
@@ -439,16 +475,20 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
     where: { status: "EN_ROUTE", lineId: { not: null }, departedAt: null },
     select: { id: true, companyId: true, serviceFrom: true, serviceTo: true },
   })) as { id: string; companyId: string; serviceFrom: number | null; serviceTo: number | null }[];
-  for (const p of parked) {
-    if (!premiumIds.has(p.companyId) || inServiceWindow(p)) {
-      await prisma.train.updateMany({ where: { id: p.id, status: "EN_ROUTE", departedAt: null }, data: { departedAt: new Date(), progress: 0 } });
-    }
+  // 2.4 : une seule écriture pour toutes les rames qui repartent
+  const restart = parked.filter((p) => !premiumIds.has(p.companyId) || inServiceWindow(p)).map((p) => p.id);
+  for (const ids of chunk(restart, 1000)) {
+    await prisma.train.updateMany({ where: { id: { in: ids }, status: "EN_ROUTE", departedAt: null }, data: { departedAt: new Date(), progress: 0 } });
   }
   const runningTrains = await prisma.train.findMany({
     where: { status: "EN_ROUTE", lineId: { not: null }, departedAt: { not: null } },
     include: { line: true },
   });
   const staffEffects = await staffEffectsByCompany();
+  // 2.4 : compagnies dont la facture de gazole est restée impayée (jamais pendant l'essai)
+  const fuelBlocked = inTrial()
+    ? new Set<string>()
+    : new Set(((await prisma.company.findMany({ where: { fuelBlocked: true }, select: { id: true } })) as { id: string }[]).map((c) => c.id));
   // 2.0 : contrôleurs et conducteurs affectés aux rames
   const crews = await crewByTrain().catch(() => new Map());
   const mountainBoost = mountainDemand();
@@ -489,10 +529,14 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
   // 1.7 : rames de chaque ligne en circulation, qui se partagent ses voyageurs
   const runningOnLine = new Map<string, number>();
   for (const t of runningTrains) if (t.lineId) runningOnLine.set(t.lineId, (runningOnLine.get(t.lineId) ?? 0) + 1);
+  // 2.4 : réputations de toutes les compagnies, calculées une fois (voir reputation.service)
+  const reputations = await reputationMap().catch(() => new Map<string, number>());
+  // 2.4 : les rames qui avancent simplement sont écrites d'un bloc à la fin
+  const progressUpdates: { id: string; progress: number; wear: number }[] = [];
 
-  for (const train of runningTrains) {
+  const runTrain = async (train: (typeof runningTrains)[number]) => {
     const fx = staffEffects.get(train.companyId) ?? NO_STAFF;
-    if (!train.line || !train.departedAt) continue;
+    if (!train.line || !train.departedAt) return;
 
     /* Incident aléatoire : le train perd un tick. La progression étant calculée
        depuis departedAt, il ne suffit pas de sauter le tour — il faut repousser
@@ -503,9 +547,11 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
     const dlcModel = DLC_MODELS[train.model];
     // 2.0 : la vraie météo, la pire rencontrée sur l'itinéraire de la ligne
     const wx = routeWeather(weather instanceof Map ? weather : new Map(), routeOf(train.line as typeof train.line & { stops?: string[] }));
+    // 2.4 : l'état de la voie, la pire liaison de l'itinéraire
+    const trackFx = routeTrack(routeOf(train.line as typeof train.line & { stops?: string[] }));
     // 2.1 : sur double voie, un train en retard ne bloque plus celui d'en face
     const doubled = (train.line as { doubleTrack?: boolean }).doubleTrack === true;
-    if (Math.random() < INCIDENT_CHANCE * wx.incident * driver.delay * (doubled ? DOUBLE_DELAY : 1)) {
+    if (Math.random() < INCIDENT_CHANCE * wx.incident * driver.delay * trackFx.incident * (doubled ? DOUBLE_DELAY : 1)) {
       await prisma.$transaction([
         prisma.train.update({
           where: { id: train.id },
@@ -518,12 +564,12 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
           },
         }),
       ]);
-      continue;
+      return;
     }
 
     // Par brouillard, neige ou orage, un train peut être ralenti (pas d'avancée ce tick, sans pénalité d'usure)
     if (wx.slow > 0 && Math.random() < wx.slow) {
-      continue;
+      return;
     }
 
     // Usure du matériel : un mécanicien réduit le rythme d'usure (davantage encore en Premium),
@@ -553,6 +599,12 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
     wearRate = wearRate * driver.wear;
     // 2.2 : la rame TGV lancée sur sa LGV s'use plus vite
     const tgv = train.model === TGV_MODEL && hslOpen(train.line as { highSpeedAt?: Date | null });
+    /* 2.4 : une rame électrique est arrêtée par une panne de sous-station sur
+       son itinéraire ; une rame thermique attend si la facture de gazole n'a
+       pas pu être payée (hors période d'essai). */
+    const electric = Boolean(lineX.electrified) || tgv;
+    if (electric && routeInOutage(routeOf(lineX))) return;
+    if (!electric && fuelBlocked.has(train.companyId)) return;
     if (tgv) wearRate = wearRate * TGV_WEAR;
     const newWear = Math.min(100, train.wear + stochasticRound(wearRate));
     /* 2.0 : une rame négligée peut casser avant 100 % */
@@ -569,7 +621,7 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
           where: { id: train.id, status: "EN_ROUTE", workshopUntil: null },
           data: breakdownData(train),
         });
-        if (hit.count === 0) continue;
+        if (hit.count === 0) return;
         const part = PARTS[weakestOrgan(organBias(train))];
         await prisma.incident.create({
           data: {
@@ -580,7 +632,7 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
           },
         });
       }
-      continue;
+      return;
     }
 
     const elapsedMs = Date.now() - new Date(train.departedAt).getTime();
@@ -588,13 +640,13 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
     // Une rame Express effectue le trajet 30% plus vite ; 1.7 : chaque voiture ajoutée ralentit,
     // l'électrification fait gagner 10 %
     const effectiveDuration =
-      train.line.durationMinutes * (train.model === "EXPRESS" ? 0.7 : 1) * (dlcModel?.speed ?? 1) * speedFactor(trainX) * (lineX.electrified ? ELECTRIC_SPEED : 1) * (doubled ? DOUBLE_SPEED : 1) * (tgv ? TGV_SPEED : 1);
+      train.line.durationMinutes * (train.model === "EXPRESS" ? 0.7 : 1) * (dlcModel?.speed ?? 1) * speedFactor(trainX) * (lineX.electrified ? ELECTRIC_SPEED : 1) * (doubled ? DOUBLE_SPEED : 1) * (tgv ? TGV_SPEED : 1) * trackFx.slow;
     const progress = Math.min(100, Math.floor((elapsedMinutes / effectiveDuration) * 100));
 
     if (progress >= 100) {
       // Arrivé à destination : recette voyageurs versée (modulée par la réputation
       // et par le directeur commercial en Premium), puis le trajet repart aussitôt
-      const reputation = await computeReputation(train.companyId);
+      const reputation = reputations.get(train.companyId) ?? (await computeReputation(train.companyId));
       const reputationMultiplier = 0.5 + (reputation / 100) * 0.5; // de 0.5x (mauvaise réputation) à 1x (parfaite)
       const directeurBonus = fx.revenueMultiplier;
       /* 1.4 : la recette dépend aussi des deux gares (taille et événements du
@@ -671,7 +723,13 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
          les autres, il leur doit une redevance de quai ; partout où il y a des
          commerces, ses voyageurs y dépensent. */
       const infra = stationEffects(route, train.companyId, revenue, load.passengers, owners, alliesFor(train.companyId));
-      const revenueHome = Math.round(revenue * infra.homeBonus);
+      // 2.4 : +3 % pour les co-financeurs d'une liaison rénovée
+      const revenueHome = Math.round(revenue * infra.homeBonus * cofunderMultiplier(route, train.companyId));
+      // 2.4 : péages des liaisons concédées à d'autres compagnies
+      const trackTolls = tollsFor(route, train.companyId, revenue, alliesFor(train.companyId));
+      // 2.4 : le gazole ou le courant du trajet, et l'usure de la voie
+      meterAdd(train.companyId, tripEnergy(train.line.durationMinutes, { electric, powerFactor: tgv ? economy().tgvPowerFactor : 1, steam: train.model === "VAPEUR" }));
+      wearTrack(route, tgv ? 2 : 1);
       const platformFees = infra.fees.reduce((a, f) => a + f.amount, 0);
       for (const f of infra.fees) owe(f.station, "fees", f.amount);
       for (const sh of infra.shops) owe(sh.station, "shops", sh.amount);
@@ -693,7 +751,7 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
         }),
         prisma.company.update({
           where: { id: train.companyId },
-          data: { balance: { increment: revenueHome - toll - platformFees } },
+          data: { balance: { increment: revenueHome - toll - platformFees - trackTolls.total } },
         }),
         prisma.transaction.create({
           data: {
@@ -708,6 +766,18 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
           },
         }),
       ];
+      if (trackTolls.total > 0) {
+        ops.push(prisma.transaction.create({
+          data: {
+            companyId: train.companyId,
+            type: "PEAGE_VOIE",
+            amount: -trackTolls.total,
+            trainId: train.id,
+            lineId: train.lineId,
+            description: `Péage de voie : ${trackTolls.owed.map((o) => o.key.replace("|", " – ")).join(", ")}`,
+          },
+        }));
+      }
       if (toll > 0) {
         ops.push(prisma.transaction.create({
           data: {
@@ -752,12 +822,18 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
       if (nightTrip) seasonEvent(train.companyId, "NIGHT");
       await afterTrip(train, newWear, route, driver.incident).catch((err) => console.error("[atelier] fin de trajet :", (err as Error).message));
     } else if (progress !== train.progress || newWear !== train.wear) {
-      await prisma.train.updateMany({
-        where: { id: train.id, status: "EN_ROUTE", workshopUntil: null },
-        data: { progress, wear: newWear },
-      });
+      progressUpdates.push({ id: train.id, progress, wear: newWear });
     }
-  }
+  };
+
+  /* 2.4 : les compagnies avancent en parallèle (SIM_CONCURRENCY files), les
+     rames d'une même compagnie l'une après l'autre : deux écritures sur la
+     trésorerie d'une compagnie ne se croisent jamais, l'ordre reste celui
+     d'avant. Avant, les ~milliers de rames passaient une par une. */
+  await pool([...groupBy<(typeof runningTrains)[number]>(runningTrains, (t) => t.companyId).values()], SIM_CONCURRENCY, async (trains) => {
+    for (const t of trains) await runTrain(t);
+  }, "lignes voyageurs");
+  await flushProgress(progressUpdates);
   await accruePending(pending).catch((err) => console.error("[gares] redevances non enregistrées :", (err as Error).message));
 }
 
@@ -772,6 +848,10 @@ export async function runFreightContracts(weather: Map<string, StationWeather> =
   const reputationByClient = await getReputationByCompany();
   const cargoIndex = await getCargoIndexMap();
   const yards = await yardsByCompany();
+  // 2.4 : facture de gazole impayée
+  const blockedFreight = inTrial()
+    ? new Set<string>()
+    : new Set(((await prisma.company.findMany({ where: { fuelBlocked: true }, select: { id: true } })) as { id: string }[]).map((c) => c.id));
 
   /* 2.1 : une rame peut porter plusieurs contrats (une tournée). On avance
      donc rame par rame : un seul tirage d'incident, une seule usure, une
@@ -782,13 +862,14 @@ export async function runFreightContracts(weather: Map<string, StationWeather> =
     byTrain.set(c.train.id, [...(byTrain.get(c.train.id) ?? []), c]);
   }
 
-  for (const tour of byTrain.values()) {
+  const freightProgress: { id: string; progress: number; wear: number }[] = [];
+  const runTour = async (tour: any[]) => {
     const first = tour[0];
     const train = first.train;
     const companyId = first.companyId as string;
     // 2.0 : la vraie météo, la pire des gares de la tournée
     const fwx = routeWeather(weather instanceof Map ? weather : new Map(), tour.flatMap((c) => [c.originStation, c.destinationStation]));
-    const incidentChance = INCIDENT_CHANCE * fwx.incident;
+    const incidentChance = INCIDENT_CHANCE * fwx.incident * routeTrack(tour.flatMap((c) => [c.originStation, c.destinationStation])).incident;
 
     /* Usure du fret. Mêmes règles que pour les lignes : le mécanicien divise
        l'usure par deux, la canicule la multiplie par 1,5, et on accumule en
@@ -808,17 +889,32 @@ export async function runFreightContracts(weather: Map<string, StationWeather> =
         ...tour.map((c) => prisma.contract.update({ where: { id: c.id }, data: { acceptedAt: new Date(new Date(c.acceptedAt).getTime() + TICK_INTERVAL_MS) } })),
         prisma.train.update({ where: { id: train.id }, data: { wear: wearNow } }),
       ]);
-      continue;
+      return;
     }
 
-    const minutes = first.tourMinutes ?? Math.max(...tour.map((c) => c.durationMinutes));
+    /* 2.4 : la tournée subit l'état de la voie (la pire liaison), s'arrête
+       pendant une panne de sous-station si la locomotive est électrique, et
+       attend son gazole si la facture est restée impayée. */
+    const freightRoute = tour.flatMap((c) => [c.originStation, c.destinationStation]);
+    const freightTrack = routeTrack(freightRoute);
+    const freightElectric = train.model === "FRET_ELECTRIQUE";
+    if ((freightElectric && routeInOutage(freightRoute)) || (!freightElectric && blockedFreight.has(companyId))) {
+      // le temps perdu repousse l'arrivée, comme un retard
+      await prisma.$transaction(tour.map((c) => prisma.contract.update({ where: { id: c.id }, data: { acceptedAt: new Date(new Date(c.acceptedAt).getTime() + TICK_INTERVAL_MS) } })));
+      return;
+    }
+    const minutes = (first.tourMinutes ?? Math.max(...tour.map((c) => c.durationMinutes))) * freightTrack.slow;
     const elapsedMinutes = (Date.now() - new Date(first.acceptedAt).getTime()) / 60_000;
     const progress = Math.min(100, Math.floor((elapsedMinutes / Math.max(1, minutes)) * 100));
 
     if (progress < 100) {
-      await prisma.train.update({ where: { id: train.id }, data: { progress, wear: wearNow } });
-      continue;
+      freightProgress.push({ id: train.id, progress, wear: wearNow });
+      return;
     }
+
+    // 2.4 : le gazole ou le courant de la tournée, l'usure des voies empruntées
+    meterAdd(companyId, tripEnergy(first.tourMinutes ?? Math.max(...tour.map((c) => c.durationMinutes)), { electric: freightElectric, powerFactor: 1, steam: false }));
+    for (const c of tour) wearTrack([c.originStation, c.destinationStation], 1.5);
 
     // Arrivée : chaque contrat est payé, avec sa charge et ses aléas
     let wearAfter = wearNow;
@@ -922,7 +1018,13 @@ export async function runFreightContracts(weather: Map<string, StationWeather> =
       // 2.3 : la révision programmée vaut aussi pour les locomotives de fret
       await scheduledService({ ...train, companyId, lineId: null }, wearAfter).catch((err) => console.error("[atelier] fin de tournée :", (err as Error).message));
     }
-  }
+  };
+
+  // 2.4 : comme pour les lignes, une file par compagnie, les tournées d'une compagnie en série
+  await pool([...groupBy([...byTrain.values()], (tour) => tour[0].companyId as string).values()], SIM_CONCURRENCY, async (tours) => {
+    for (const tour of tours) await runTour(tour);
+  }, "fret");
+  await flushProgress(freightProgress, false);
 }
 
 /* Entretien du réseau, prélevé à chaque tick. La charge croît avec le carré du
@@ -989,6 +1091,7 @@ async function tryAutoRepair(
   const cost = labor + partPrice(part, "order");
   if (company.balance < cost) return false;
   const eta = new Date(Date.now() + partDelayMs(part, "order"));
+  consumePart(part); // 2.4 : la pièce sort du stock national
   const hhmm = new Intl.DateTimeFormat("fr-FR", { timeZone: "Europe/Paris", hour: "2-digit", minute: "2-digit" }).format(eta);
   await prisma.$transaction([
     prisma.train.update({ where: { id: train.id }, data: { ...breakdownData(train, part), partsEta: eta } }),
@@ -1067,33 +1170,39 @@ async function runUpkeep() {
     select: { id: true, balance: true, _count: { select: { trains: true } } },
   });
 
+  /* 2.4 : même calcul qu'avant, mais écrit en trois requêtes pour toutes les
+     compagnies au lieu d'une transaction par compagnie (≈ 400 par tour). */
+  const debits = new Map<string, number>();
+  const lines: { companyId: string; type: string; amount: number; description: string }[] = [];
+  const unpaid: string[] = [];
   for (const c of companies as Array<{ id: string; balance: number; _count: { trains: number } }>) {
     const due = upkeepPerTick(c._count.trains);
     if (due <= 0) continue;
-
     const paid = Math.min(due, c.balance);
-
     if (paid > 0) {
-      await prisma.$transaction([
-        prisma.company.update({ where: { id: c.id }, data: { balance: { decrement: paid } } }),
-        prisma.transaction.create({
-          data: {
-            companyId: c.id,
-            type: "ENTRETIEN",
-            amount: -paid,
-            description: `Entretien du réseau (${c._count.trains} rames)`,
-          },
-        }),
-      ]);
+      debits.set(c.id, -paid);
+      lines.push({ companyId: c.id, type: "ENTRETIEN", amount: -paid, description: `Entretien du réseau (${c._count.trains} rames)` });
     }
-
     // entretien impayé : les rames en service se dégradent plus vite
-    if (paid < due) {
-      await prisma.train.updateMany({
-        where: { companyId: c.id, status: "EN_ROUTE" },
-        data: { wear: { increment: 1 } },
-      });
-    }
+    if (paid < due) unpaid.push(c.id);
+  }
+  if (debits.size) {
+    await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+      const entries = [...debits.entries()];
+      for (const part of chunk(entries, 500)) {
+        await tx.$executeRaw`
+          UPDATE "Company" AS c SET "balance" = c."balance" + v.delta::int
+          FROM (VALUES ${Prisma.join(part.map(([id, d]) => row([id, d])))}) AS v(id, delta)
+          WHERE c."id" = v.id::text`;
+      }
+      await tx.transaction.createMany({ data: lines });
+    });
+  }
+  for (const ids of chunk(unpaid, 1000)) {
+    await prisma.train.updateMany({
+      where: { companyId: { in: ids }, status: "EN_ROUTE" },
+      data: { wear: { increment: 1 } },
+    });
   }
 }
 
@@ -1110,36 +1219,46 @@ const warnedCompanies = new Set<string>();
 
 export async function runPayroll() {
   const [staffMembers, running] = await Promise.all([
-    prisma.staff.findMany(),
+    prisma.staff.findMany({ orderBy: { hiredAt: "asc" } }),
     prisma.train.groupBy({ by: ["companyId"], where: { status: "EN_ROUTE" }, _count: { _all: true } }),
   ]);
   const hasRunning = new Set(
     (running as { companyId: string; _count: { _all: number } }[]).filter((r) => r._count._all > 0).map((r) => r.companyId)
   );
+  const toPay = staffMembers.filter((s: { role: string; companyId: string }) => !(ROLES_IDLE_WITH_FLEET.has(s.role) && !hasRunning.has(s.companyId)));
+  if (toPay.length === 0) return;
 
-  for (const staff of staffMembers) {
-    if (ROLES_IDLE_WITH_FLEET.has(staff.role) && !hasRunning.has(staff.companyId)) continue;
+  /* 2.4 : la trésorerie de chaque compagnie est lue une fois, puis les
+     salaires sont décomptés en mémoire, employé par employé, dans le même
+     ordre qu'avant. Avant : deux requêtes par employé et par tour. */
+  const companies = (await prisma.company.findMany({
+    where: { id: { in: [...new Set(toPay.map((s: { companyId: string }) => s.companyId))] } },
+    select: { id: true, balance: true },
+  })) as { id: string; balance: number }[];
+  const balance = new Map(companies.map((c) => [c.id, c.balance]));
 
-    const company = await prisma.company.findUnique({ where: { id: staff.companyId } });
-    if (!company) continue;
+  const debits = new Map<string, number>();
+  const unpaidSet = new Map<number, string[]>(); // nouveau compteur → employés
+  const resetIds: string[] = [];
+  const leaving: string[] = [];
+  const notes: { companyId: string; type: string; amount: number; description: string }[] = [];
 
+  for (const staff of toPay) {
+    const bal = balance.get(staff.companyId);
+    if (bal === undefined) continue;
     const unpaid = staff.unpaidTicks ?? 0;
-    if (company.balance < staff.salaryPerTick) {
+    if (bal < staff.salaryPerTick) {
       /* 1.7.2 : un salaire manqué ne fait plus partir l'employé sur-le-champ.
-         Avant, un seul tour à trésorerie vide (un achat, l'entretien du
-         réseau) vidait toute l'équipe d'un coup. Il patiente désormais une
-         heure ; le joueur est prévenu au premier salaire manqué. */
+         Il patiente une heure ; le joueur est prévenu au premier salaire manqué. */
       const next = unpaid + 1;
       if (next < STAFF_PATIENCE_TICKS) {
-        await prisma.staff.update({ where: { id: staff.id }, data: { unpaidTicks: next } });
+        unpaidSet.set(next, [...(unpaidSet.get(next) ?? []), staff.id]);
         if (next === 1) {
-          await prisma.transaction.create({
-            data: {
-              companyId: staff.companyId,
-              type: "PERSONNEL",
-              amount: 0,
-              description: `${staff.name || "Un employé"} n'a pas été payé : sans trésorerie d'ici une heure, il quittera la compagnie`,
-            },
+          notes.push({
+            companyId: staff.companyId,
+            type: "PERSONNEL",
+            amount: 0,
+            description: `${staff.name || "Un employé"} n'a pas été payé : sans trésorerie d'ici une heure, il quittera la compagnie`,
           });
           if (!warnedCompanies.has(staff.companyId)) {
             warnedCompanies.add(staff.companyId);
@@ -1154,27 +1273,28 @@ export async function runPayroll() {
         continue;
       }
       // une heure sans salaire : l'employé quitte la compagnie
-      await prisma.$transaction([
-        prisma.staff.delete({ where: { id: staff.id } }),
-        prisma.transaction.create({
-          data: {
-            companyId: staff.companyId,
-            type: "PERSONNEL",
-            amount: 0,
-            description: `${staff.name || "Un employé"} a quitté la compagnie après une heure sans salaire`,
-          },
-        }),
-      ]);
+      leaving.push(staff.id);
+      notes.push({
+        companyId: staff.companyId,
+        type: "PERSONNEL",
+        amount: 0,
+        description: `${staff.name || "Un employé"} a quitté la compagnie après une heure sans salaire`,
+      });
       continue;
     }
-
-    await prisma.company.update({
-      where: { id: staff.companyId },
-      data: { balance: { decrement: staff.salaryPerTick } },
-    });
+    balance.set(staff.companyId, bal - staff.salaryPerTick);
+    debits.set(staff.companyId, (debits.get(staff.companyId) ?? 0) - staff.salaryPerTick);
     if (unpaid > 0) {
-      await prisma.staff.update({ where: { id: staff.id }, data: { unpaidTicks: 0 } });
+      resetIds.push(staff.id);
       warnedCompanies.delete(staff.companyId);
     }
   }
+
+  await incrementBalances(debits);
+  const writes: Prisma.PrismaPromise<unknown>[] = [];
+  for (const [n, ids] of unpaidSet) writes.push(prisma.staff.updateMany({ where: { id: { in: ids } }, data: { unpaidTicks: n } }));
+  if (resetIds.length) writes.push(prisma.staff.updateMany({ where: { id: { in: resetIds } }, data: { unpaidTicks: 0 } }));
+  if (leaving.length) writes.push(prisma.staff.deleteMany({ where: { id: { in: leaving } } }));
+  if (notes.length) writes.push(prisma.transaction.createMany({ data: notes }));
+  if (writes.length) await prisma.$transaction(writes);
 }

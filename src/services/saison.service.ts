@@ -1,4 +1,7 @@
 import { prisma } from "../prisma";
+import { Prisma } from "@prisma/client";
+import { randomUUID } from "crypto";
+import { chunk, row } from "./batch.service";
 import { buildLeaderRows } from "./leaderboard.service";
 import { parisDate, parisMidnight, DAY_MS } from "./time.service";
 
@@ -211,33 +214,43 @@ export async function flushSeason(now = new Date()) {
 
   const week = weekOf(season, now);
   const objectives = objectivesFor(season.number, week);
+  /* 2.4 : les objectifs de tout le monde en une requête (upsert groupé),
+     puis seulement les objectifs tout juste atteints, un par un. */
+  const progressRows: { companyId: string; kind: string; amount: number }[] = [];
   for (const [key, amount] of events) {
     const [companyId, kind] = key.split("|");
-    const obj = objectives.find((o) => o.kind === kind);
-    if (!obj) continue;
-    const row = await prisma.seasonObjectiveProgress.upsert({
-      where: { seasonId_week_kind_companyId: { seasonId: season.id, week, kind, companyId } },
-      create: { seasonId: season.id, week, kind, companyId, progress: amount },
-      update: { progress: { increment: amount } },
-    });
-    if (!row.doneAt && row.progress >= obj.target) {
+    if (objectives.some((o) => o.kind === kind)) progressRows.push({ companyId, kind, amount });
+  }
+  for (const part of chunk(progressRows, 500)) {
+    const rows = await prisma.$queryRaw<{ id: string; kind: string; companyId: string; progress: number; doneAt: Date | null }[]>`
+      INSERT INTO "SeasonObjectiveProgress" ("id", "seasonId", "week", "kind", "companyId", "progress")
+      SELECT v.id::text, ${season.id}, ${week}::int, v.kind::text, v.company::text, v.amount::int
+      FROM (VALUES ${Prisma.join(part.map((r) => row([randomUUID(), r.kind, r.companyId, r.amount])))}) AS v(id, kind, company, amount)
+      ON CONFLICT ("seasonId", "week", "kind", "companyId") DO UPDATE SET "progress" = "SeasonObjectiveProgress"."progress" + EXCLUDED."progress"
+      RETURNING "id", "kind", "companyId", "progress", "doneAt"`;
+    for (const r of rows) {
+      const obj = objectives.find((o) => o.kind === r.kind);
+      if (!obj || r.doneAt || Number(r.progress) < obj.target) continue;
       // une seule fois : la condition sur doneAt évite de payer deux fois
-      const done = await prisma.seasonObjectiveProgress.updateMany({ where: { id: row.id, doneAt: null }, data: { doneAt: now } });
-      if (done.count) points.set(companyId, (points.get(companyId) ?? 0) + obj.points);
+      const done = await prisma.seasonObjectiveProgress.updateMany({ where: { id: r.id, doneAt: null }, data: { doneAt: now } });
+      if (done.count) points.set(r.companyId, (points.get(r.companyId) ?? 0) + obj.points);
     }
   }
 
-  for (const [companyId, n] of points) {
+  for (const companyId of points.keys()) {
     // une place connue n'est pas relue à chaque tour
     const key = `${season.id}|${companyId}`;
     if (!knownEntries.has(key)) {
       await ensureEntry(season.id, companyId);
       knownEntries.add(key);
     }
-    await prisma.seasonEntry.update({
-      where: { seasonId_companyId: { seasonId: season.id, companyId } },
-      data: { points: { increment: n } },
-    });
+  }
+  // 2.4 : tous les points du tour en une requête
+  for (const part of chunk([...points.entries()].filter(([, n]) => n !== 0), 500)) {
+    await prisma.$executeRaw`
+      UPDATE "SeasonEntry" AS e SET "points" = e."points" + v.n::int
+      FROM (VALUES ${Prisma.join(part.map(([companyId, n]) => row([companyId, n])))}) AS v(company, n)
+      WHERE e."seasonId" = ${season.id} AND e."companyId" = v.company::text`;
   }
 }
 

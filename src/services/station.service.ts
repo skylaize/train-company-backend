@@ -1,5 +1,5 @@
 import { prisma } from "../prisma";
-import { computeReputation } from "./reputation.service";
+import { computeReputation, reputationMap } from "./reputation.service";
 import { STATIONS } from "./geography.service";
 
 /* ============================================================
@@ -196,8 +196,13 @@ export async function competitionMap(): Promise<Map<string, Contender[]>> {
 
   const needRep = new Set<string>();
   for (const companies of byPair.values()) if (companies.size > 1) companies.forEach((_, id) => needRep.add(id));
+  /* 2.4 : toutes les réputations d'un coup (comptages en cache, voir
+     reputation.service) au lieu de quatre requêtes par compagnie, à chaque tour */
   const reputation = new Map<string, number>();
-  await Promise.all([...needRep].map(async (id) => reputation.set(id, await computeReputation(id))));
+  if (needRep.size) {
+    const all = await reputationMap();
+    for (const id of needRep) reputation.set(id, all.get(id) ?? (await computeReputation(id)));
+  }
 
   const out = new Map<string, Contender[]>();
   for (const [key, companies] of byPair) {
