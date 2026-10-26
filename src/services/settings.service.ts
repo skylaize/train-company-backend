@@ -160,7 +160,8 @@ export async function updateEconomy(patch: Partial<Record<keyof EconomySettings,
   return current;
 }
 
-/* La période d'essai démarre au premier tour de simulation de la 2.4. */
+/* Plus de période d'essai par défaut (trialDays = 0) : au premier tour, la fin
+   d'essai est posée à maintenant. L'admin peut en ouvrir une en donnant une date. */
 export async function ensureTrialStart(now = new Date()) {
   const s = await loadEconomy();
   if (s.trialUntil) return s;
