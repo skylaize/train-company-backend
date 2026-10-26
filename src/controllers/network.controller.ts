@@ -11,8 +11,6 @@ import {
   competitionMap,
   stationSize,
   stationDemand,
-  routeDemand,
-  pairKey,
   SIZE_LABEL,
   SHARE_FLOOR,
   SHARE_CEIL,
@@ -47,12 +45,6 @@ export async function getNetworkStats(_req: Request, res: Response) {
 
 /* ============================================================
    Carte vivante du réseau (1.4) : gares, demande, événements, concurrence.
-
-   Gratuit : taille et demande des gares, événements en cours, liaisons
-   exploitées par d'autres, et pour chaque ligne sa part de voyageurs.
-   Premium : les événements annoncés une heure à l'avance, et le détail de
-   chaque concurrent (réputation, rames Express, état des rames) — de quoi
-   comprendre pourquoi on perd des voyageurs, et quoi faire.
    ============================================================ */
 export async function getNetworkMap(req: AuthRequest, res: Response) {
   const company = await prisma.company.findUnique({
@@ -75,20 +67,17 @@ export async function getNetworkMap(req: AuthRequest, res: Response) {
     }),
   ]);
 
-  // 1.5 : les gares du temps fort de saison comptent comme des événements
   const events = [...liveEvents, ...seasonalStationEvents()];
   const counts = stationCounts(
     (myLines as { departureStation: string; arrivalStation: string; stops: string[]; _count: { trains: number } }[]).map((l) => ({ ...withTrainCount(l), companyId: company.id }))
   ).get(company.id);
 
-  // 2.0 : Turin et Zurich restent cachées tant que le tunnel n'est pas ouvert
   const tunnel = await tunnelOpen();
   const dlcs = await ownedDlcs(company.id);
   const stations = STATIONS.filter((name) => tunnel || !TUNNEL_STATIONS.includes(name)).map((name) => ({
     name,
     size: stationSize(name),
     sizeLabel: SIZE_LABEL[stationSize(name)],
-    // 2.0 : gare d'extension, et si la compagnie la possède
     dlc: ((d) => (d ? { id: d.id, name: d.name, owned: dlcs.has(d.id) } : null))(dlcOfStation(name)),
     demand: Math.round(stationDemand(name, events) * 100) / 100,
     events: events
@@ -112,7 +101,6 @@ export async function getNetworkMap(req: AuthRequest, res: Response) {
     trains: { model: string; cars: string[]; status: string; lastPassengers: number | null; lastSeats: number | null }[];
   };
   const lines = (myLines as MyLine[]).map((l) => {
-    /* 1.7 : voyageurs, places et remplissage, tels que la simulation les calcule */
     const { demand, mine, contenders, ridership } = lineRidership(l, company.id, events, competition);
     const rivals = contenders.filter((c) => c.companyId !== company.id);
     return {
@@ -137,7 +125,6 @@ export async function getNetworkMap(req: AuthRequest, res: Response) {
             }
           : { name: c.name, emblem: c.emblem, trains: c.trains, share: Math.round(c.share * 1000) / 10 }
       ),
-      // ce que la compagnie vaut elle-même, pour comparer (Premium)
       self:
         company.isPremium && mine
           ? { reputation: mine.reputation, expressPct: Math.round(mine.express * 100), comfortPct: Math.round(mine.comfort * 100), trains: mine.trains }
@@ -153,29 +140,23 @@ export async function getNetworkMap(req: AuthRequest, res: Response) {
     upcoming: company.isPremium
       ? upcoming.map((e) => ({ station: e.station, label: e.label, multiplier: e.multiplier, startsAt: e.startsAt, endsAt: e.endsAt }))
       : null,
-    // le nombre seul, pour montrer au joueur gratuit qu'il se prépare quelque chose
     upcomingCount: upcoming.length,
     shareBounds: { floor: SHARE_FLOOR, ceil: SHARE_CEIL },
-    // 1.5 : correspondances de la compagnie, et règle pour prévoir l'effet d'une nouvelle ligne
     hubs: hubsOf(counts),
     hubRule: { step: HUB_STEP, cap: HUB_CAP },
     season: seasonView(),
-    // 1.6 : gares à l'étranger et licence, service de nuit
     international: {
       stations: Object.entries(INTERNATIONAL_STATIONS).filter(([name]) => tunnel || !TUNNEL_STATIONS.includes(name)).map(([name, v]) => ({ name, ...v })),
       licence: await licenceView(company as { intlLicenceAt: Date | null; isPremium: boolean; balance: number }, gradeId),
       revenueBonus: INTL_REVENUE_BONUS,
       tollRate: TOLL_RATE,
     },
-    // 1.7 : gares achetées (la carte des abonnés montre les leurs à leurs couleurs)
     ownedStations: ((await prisma.stationOwnership.findMany({ select: { station: true, companyId: true, level: true } })) as { station: string; companyId: string; level: number }[]).map((o) => ({
       station: o.station,
       mine: o.companyId === company.id,
       level: o.level,
     })),
-    // 1.7 : heures de pointe
     peak: peakInfo(),
-    // 2.0 : le Grand Chantier
     tunnel: { open: tunnel, stations: TUNNEL_STATIONS },
     night: { active: isNightService(), from: NIGHT_FROM, to: NIGHT_TO, multiplier: NIGHT_MULTIPLIER, dayMultiplier: DAY_COUCHETTES_MULTIPLIER, minDuration: NIGHT_MIN_DURATION },
   });
