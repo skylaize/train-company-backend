@@ -127,7 +127,8 @@ async function maybeOfferSealed() {
 
 export async function removeExpiredContracts() {
   await prisma.contract.deleteMany({
-    where: { status: "DISPONIBLE", companyId: null, expiresAt: { lt: new Date() } },
+    // 2.4 : même grâce de 30 s qu'à l'acceptation, sinon l'offre disparaîtrait pendant le clic
+    where: { status: "DISPONIBLE", companyId: null, expiresAt: { lt: new Date(Date.now() - 30_000) } },
   });
 }
 
@@ -233,7 +234,8 @@ export async function listMarket(req: AuthRequest, res: Response) {
      ouvrir une autre page pour savoir si la marchandise proposée paie
      au-dessus ou en dessous de sa valeur normale. */
   const index = await getCargoIndexMap();
-  const withPrices = contracts.map((c: { cargoType: string; reward: number }) => {
+  const now = Date.now();
+  const withPrices = contracts.map((c: { cargoType: string; reward: number; expiresAt: Date | null }) => {
     const i = index.get(c.cargoType);
     const multiplier = i === undefined ? 1 : freightMultiplier(i);
     return {
@@ -244,6 +246,11 @@ export async function listMarket(req: AuthRequest, res: Response) {
       marketDelta: Math.round((multiplier - 1) * 100),
       forOrder: orders.get(c.cargoType) ?? null,
       wagon: wagonFor(c.cargoType), // 2.1 : le wagon qui la transporte
+      /* 2.4 : temps restant calculé par le serveur. Le compte à rebours du
+         jeu partait de l'heure du téléphone : une horloge en retard de
+         quelques minutes affichait « expire dans 3:35 » sur une offre déjà
+         périmée pour le serveur, et le départ était refusé. */
+      expiresInMs: c.expiresAt ? Math.max(0, new Date(c.expiresAt).getTime() - now) : null,
     };
   });
 
@@ -298,12 +305,15 @@ export async function acceptContract(req: AuthRequest, res: Response) {
     id: string; status: string; companyId: string | null; expiresAt: Date | null; cargoType: string; risky: boolean; reward: number; durationMinutes: number; originStation: string; destinationStation: string;
   }[];
   if (contracts.length !== ids.length || contracts.some((c) => c.status !== "DISPONIBLE" || c.companyId)) {
-    return res.status(409).json({ error: ids.length > 1 ? "Un des contrats n'est plus disponible" : "Ce contrat n'est plus disponible" });
+    // 2.4 : le marché est commun à tous les joueurs, un autre a pu le prendre entre-temps
+    return res.status(409).json({ error: ids.length > 1 ? "Un des contrats vient d'être pris par une autre compagnie ou a expiré : la liste est mise à jour" : "Ce contrat vient d'être pris par une autre compagnie ou a expiré : la liste est mise à jour" });
   }
-  const expired = contracts.filter((c) => c.expiresAt && c.expiresAt < new Date());
+  /* 2.4 : 30 secondes de grâce, le temps que le clic arrive au serveur (une
+     offre affichée « 0:05 » sur un téléphone en 4G ne doit pas être refusée) */
+  const expired = contracts.filter((c) => c.expiresAt && new Date(c.expiresAt).getTime() < Date.now() - 30_000);
   if (expired.length) {
     await prisma.contract.deleteMany({ where: { id: { in: expired.map((c) => c.id) } } });
-    return res.status(409).json({ error: expired.length > 1 ? "Des contrats viennent d'expirer" : "Ce contrat vient d'expirer" });
+    return res.status(409).json({ error: expired.length > 1 ? "Des contrats viennent d'expirer : la liste est mise à jour" : "Ce contrat vient d'expirer : la liste est mise à jour" });
   }
 
   const train = await prisma.train.findFirst({ where: { id: trainId, companyId: company.id } });

@@ -8,6 +8,9 @@ import { computeReputation } from "./reputation.service";
 import { organBias, breakdownData, serviceMinutes, SERVICE_DISCOUNT, freshBias, PARTS } from "./workshop.service";
 import { salaryFor, randomStaffName } from "./staff.service";
 
+/* 2.4 : durée d'une hausse de salaire accordée au syndicat (avant : pour toujours au niveau 5) */
+export const SYNDICAT_DAYS = 4;
+
 /* ============================================================
    Décisions du directeur (1.6).
 
@@ -63,7 +66,7 @@ interface Ctx {
   rivalPairs: { a: string; b: string; rival: string }[];
   now: Date;
   revenuePerHour: number; // 2.0 : recettes des dernières 24 h, par heure
-  staff: { id: string; role: string; level: number; name: string }[];
+  staff: { id: string; role: string; level: number; name: string; salaryPerTick: number }[];
   gradeId: number;
   pick: <T>(xs: T[]) => T;
   lastPubAt?: Date | null; // 2.3 : dernière offre publicitaire reçue
@@ -336,6 +339,8 @@ Object.assign(MAKERS, {
 
   SYNDICAT: (c: Ctx): Draft | null => {
     if (c.staff.length < 2) return null;
+    // 2.4 : pas de nouvelle demande tant qu'une hausse accordée court encore
+    if (c.staff.some((m) => m.salaryPerTick > salaryFor(m.role, m.level))) return null;
     const prime = priced(120, running(c).length, c.revenuePerHour, 2);
     return {
       kind: "SYNDICAT",
@@ -344,7 +349,7 @@ Object.assign(MAKERS, {
       place: null,
       data: { prime },
       choices: [
-        { id: "accorder", label: "Accorder 10 % à tout le monde", effects: [{ text: "Salaires +10 % jusqu'à la prochaine augmentation", tone: "cout" }, { text: "+2 réputation", tone: "gain" }] },
+        { id: "accorder", label: "Accorder 10 % à tout le monde", effects: [{ text: `Salaires +10 % pendant ${SYNDICAT_DAYS} jours`, tone: "cout" }, { text: "+2 réputation", tone: "gain" }] },
         { id: "prime", label: "Verser une prime unique", effects: [{ text: `−${fmt(prime)} pi.`, tone: "cout" }, { text: "La question reviendra peut-être", tone: "risque" }] },
         { id: "refuser", label: "Refuser", effects: [{ text: "Gratuit aujourd'hui", tone: "gain" }, { text: "Une grève est possible dans les heures qui viennent", tone: "risque" }] },
       ],
@@ -610,12 +615,20 @@ export async function applyChoice(d: DecisionRow, choiceId: string, random = Mat
       return { outcome: `Vos trains roulent au pas autour de ${data.station} : recettes −30 % pendant deux heures.`, tone: "risque", effect: { key: data.station, mult: 0.7, hours: 2 } };
     // ---- 2.0 ----
     case "SYNDICAT:accorder": {
-      const staff = await prisma.staff.findMany({ where: { companyId: cid }, select: { id: true, salaryPerTick: true } });
-      for (const m of staff as { id: string; salaryPerTick: number }[]) {
-        await prisma.staff.update({ where: { id: m.id }, data: { salaryPerTick: Math.max(m.salaryPerTick + 1, Math.round(m.salaryPerTick * 1.1)) } });
+      /* 2.4 : la hausse dure SYNDICAT_DAYS jours, puis chacun revient au salaire
+         de son niveau. Avant, elle durait « jusqu'à la prochaine augmentation »,
+         donc pour toujours au niveau 5, et chaque nouvel accord s'empilait. */
+      const staff = await prisma.staff.findMany({ where: { companyId: cid }, select: { id: true, role: true, level: true } });
+      for (const m of staff as { id: string; role: string; level: number }[]) {
+        const base = salaryFor(m.role, m.level);
+        await prisma.staff.update({ where: { id: m.id }, data: { salaryPerTick: Math.max(base + 1, Math.round(base * 1.1)) } });
       }
       await addReputation(cid, 2);
-      return { outcome: "Accord signé dans la bonne humeur. La masse salariale grimpe, mais vos équipes en parlent autour d'elles : +2 réputation.", tone: "cout" };
+      return {
+        outcome: `Accord signé dans la bonne humeur : +10 % pendant ${SYNDICAT_DAYS} jours, et vos équipes en parlent autour d'elles (+2 réputation).`,
+        tone: "cout",
+        follow: { kind: "SYNDICAT_FIN", hours: SYNDICAT_DAYS * 24 },
+      };
     }
     case "SYNDICAT:prime":
       await charge(cid, Number(data.prime) || 120, "PERSONNEL", "Prime exceptionnelle au personnel");
@@ -758,7 +771,7 @@ const FOLLOW_DECISIONS: Record<string, (c: { companyId: string; revenuePerHour: 
       place: null,
       data: { prime },
       choices: [
-        { id: "accorder", label: "Accorder 10 % à tout le monde", effects: [{ text: "Salaires +10 % jusqu'à la prochaine augmentation", tone: "cout" }, { text: "+2 réputation", tone: "gain" }] },
+        { id: "accorder", label: "Accorder 10 % à tout le monde", effects: [{ text: `Salaires +10 % pendant ${SYNDICAT_DAYS} jours`, tone: "cout" }, { text: "+2 réputation", tone: "gain" }] },
         { id: "prime", label: "Une nouvelle prime", effects: [{ text: `−${fmt(prime)} pi.`, tone: "cout" }] },
         { id: "refuser", label: "Refuser", effects: [{ text: "Une grève est possible", tone: "risque" }] },
       ],
@@ -768,6 +781,19 @@ const FOLLOW_DECISIONS: Record<string, (c: { companyId: string; revenuePerHour: 
 };
 
 const FOLLOW_EFFECTS: Record<string, (companyId: string, data: Record<string, any>, ctx: { revenuePerHour: number; running: number }) => Promise<{ title: string; body: string } | null>> = {
+  // 2.4 : fin de la hausse accordée au syndicat, retour au salaire du niveau
+  SYNDICAT_FIN: async (companyId) => {
+    const staff = (await prisma.staff.findMany({ where: { companyId }, select: { id: true, role: true, level: true, salaryPerTick: true } })) as { id: string; role: string; level: number; salaryPerTick: number }[];
+    let n = 0;
+    for (const m of staff) {
+      const base = salaryFor(m.role, m.level);
+      if (m.salaryPerTick > base) {
+        await prisma.staff.update({ where: { id: m.id }, data: { salaryPerTick: base } });
+        n++;
+      }
+    }
+    return n ? { title: "Fin de la hausse de salaire", body: `Les ${SYNDICAT_DAYS} jours de l'accord sont passés : vos employés reviennent au salaire de leur niveau.` } : null;
+  },
   FISSURE_CEDE: async (companyId, data) => {
     const t = await prisma.train.findFirst({ where: { id: String(data.trainId), companyId } });
     if (!t || t.status === "MAINTENANCE" || t.wear < 15) return null; // révisée entre-temps : la fissure est partie avec
@@ -1020,7 +1046,7 @@ export async function draftFor(company: { id: string; balance: number; maxTrains
     computeReputation(company.id),
     rivalPairsFor(company.id),
     revenuePerHourOf(company.id),
-    prisma.staff.findMany({ where: { companyId: company.id }, select: { id: true, role: true, level: true, name: true } }),
+    prisma.staff.findMany({ where: { companyId: company.id }, select: { id: true, role: true, level: true, name: true, salaryPerTick: true } }),
     gradeOf(company.id),
     prisma.decision.findFirst({ where: { companyId: company.id, kind: "PUB" }, orderBy: { createdAt: "desc" }, select: { createdAt: true } }),
   ]);
