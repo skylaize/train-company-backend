@@ -1,6 +1,6 @@
 import { prisma } from "../prisma";
 import { Prisma } from "@prisma/client";
-import { chunk, row } from "./batch.service";
+import { chunk, row, pool, groupBy, SIM_CONCURRENCY } from "./batch.service";
 import { stationSize } from "./station.service";
 import { distanceKm } from "./geography.service";
 
@@ -113,7 +113,8 @@ export async function payStationIncome() {
   const rows = (await prisma.stationOwnership.findMany({
     where: { OR: [{ pendingFees: { gt: 0 } }, { pendingShops: { gt: 0 } }] },
   })) as { station: string; companyId: string; pendingFees: number; pendingShops: number }[];
-  for (const r of rows) {
+  // 2.4 : plusieurs compagnies à la fois (gares d'une même compagnie en série)
+  await pool([...groupBy(rows, (r) => r.companyId).values()], SIM_CONCURRENCY, async (mine) => { for (const r of mine) {
     const ops: any[] = [
       prisma.stationOwnership.update({
         where: { station: r.station },
@@ -131,7 +132,7 @@ export async function payStationIncome() {
     if (r.pendingShops > 0)
       ops.push(prisma.transaction.create({ data: { companyId: r.companyId, type: "COMMERCES", amount: r.pendingShops, description: `Commerces : gare de ${r.station}` } }));
     await prisma.$transaction(ops);
-  }
+  } }, "revenus des gares");
 }
 
 /* ---------------- 2.1 : double voie ----------------

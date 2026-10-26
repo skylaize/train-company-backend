@@ -667,6 +667,7 @@ model Incident {
 
   // 2.4 : la réputation compte les incidents de chaque compagnie
   @@index([trainId])
+  @@index([createdAt])
 }
 
 model Transaction {
@@ -689,6 +690,8 @@ model Transaction {
   // statistiques filtrent par type, et la lisaient en entier
   @@index([companyId, type, createdAt])
   @@index([type, createdAt])
+  // 2.4 : compteurs tenus à jour par morceaux (lifetime.service)
+  @@index([createdAt])
 }
 
 model DailyChallenge {

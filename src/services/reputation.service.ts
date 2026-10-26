@@ -1,5 +1,5 @@
-import { Prisma } from "@prisma/client";
 import { prisma } from "../prisma";
+import { lifetimeStats } from "./lifetime.service";
 import { controllerReputation, CONTROLLER_REPUTATION_MAX } from "./crew.service";
 
 /* ============================================================
@@ -18,49 +18,15 @@ import { controllerReputation, CONTROLLER_REPUTATION_MAX } from "./crew.service"
    des points se voit tout de suite.
    ============================================================ */
 
-const COUNTS_TTL_MS = 5 * 60_000;
 type Counts = { good: number; incidents: number };
-let counts: { at: number; map: Map<string, Counts> } | null = null;
-let refreshing: Promise<Map<string, Counts>> | null = null;
 
-async function loadCounts(): Promise<Map<string, Counts>> {
-  const [trips, incidents] = await Promise.all([
-    prisma.transaction.groupBy({ by: ["companyId"], where: { type: "REVENU_LIGNE" }, _count: { _all: true } }),
-    prisma.$queryRaw<{ companyId: string; n: number }[]>(Prisma.sql`
-      SELECT t."companyId", COUNT(*)::int AS n
-      FROM "Incident" i JOIN "Train" t ON t."id" = i."trainId"
-      GROUP BY t."companyId"`),
-  ]);
-  const map = new Map<string, Counts>();
-  for (const r of trips as { companyId: string; _count: { _all: number } }[]) map.set(r.companyId, { good: r._count._all, incidents: 0 });
-  for (const r of incidents) {
-    const c = map.get(r.companyId) ?? { good: 0, incidents: 0 };
-    c.incidents = Number(r.n);
-    map.set(r.companyId, c);
-  }
-  return map;
-}
-
-function refreshCounts() {
-  if (!refreshing) {
-    refreshing = loadCounts()
-      .then((map) => {
-        counts = { at: Date.now(), map };
-        return map;
-      })
-      .finally(() => {
-        refreshing = null;
-      });
-  }
-  return refreshing;
-}
-
-/* Les comptages de toutes les compagnies : le premier appel attend, les
-   suivants rendent la valeur connue et la rafraîchissent en fond. */
+/* 2.4 : les comptages viennent des compteurs « depuis toujours » de
+   lifetime.service, complétés par morceaux au lieu de relire les tables. */
 async function allCounts(): Promise<Map<string, Counts>> {
-  if (!counts) return refreshCounts();
-  if (Date.now() - counts.at > COUNTS_TTL_MS) void refreshCounts().catch((err) => console.error("[réputation] recalcul :", (err as Error).message));
-  return counts.map;
+  const life = await lifetimeStats();
+  const map = new Map<string, Counts>();
+  for (const [id, s] of life) map.set(id, { good: s.trips, incidents: s.incidents });
+  return map;
 }
 
 function baseOf(c: Counts | undefined) {

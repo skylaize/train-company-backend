@@ -2,6 +2,7 @@ import { isInternational } from "./international.service";
 import { boosterCompanyIds } from "./boost.service";
 import { startOfParisWeek } from "./time.service";
 import { prisma } from "../prisma";
+import { lifetimeStats } from "./lifetime.service";
 import { rankFromContext, CareerContext } from "./career.service";
 import { extraWorth } from "./infrastructure.service";
 import { hslKmByCompany } from "./highspeed.service";
@@ -98,7 +99,7 @@ async function computeLeaderRows(): Promise<LeaderRow[]> {
   // le cache ne doit pas survivre au passage du lundi, sinon l'ancienne semaine reste affichée
   if (rowsCache && Date.now() - rowsCache.at < ROWS_TTL_MS && rowsCache.at >= weekStart.getTime()) return rowsCache.rows;
 
-  const [companies, trains, revenue, delivered, freightWeek, goodTrips, incidents, stationLines, referrals, extra, owned17, workshops17, electrified17] =
+  const [companies, trains, life, delivered, freightWeek, stationLines, referrals, extra, owned17, workshops17, electrified17] =
     await Promise.all([
       prisma.company.findMany({
         select: {
@@ -114,11 +115,8 @@ async function computeLeaderRows(): Promise<LeaderRow[]> {
         },
       }),
       prisma.train.findMany({ select: { companyId: true, model: true, wear: true } }),
-      prisma.transaction.groupBy({
-        by: ["companyId"],
-        where: { amount: { gt: 0 }, type: { not: "FONDATION" } },
-        _sum: { amount: true },
-      }),
+      // 2.4 : recettes, trajets et incidents depuis toujours, tenus à jour par morceaux (lifetime.service)
+      lifetimeStats(),
       prisma.contract.groupBy({
         by: ["companyId"],
         where: { status: "LIVREE" },
@@ -129,13 +127,6 @@ async function computeLeaderRows(): Promise<LeaderRow[]> {
         where: { type: "FRET", amount: { gt: 0 }, createdAt: { gte: weekStart } },
         _count: { _all: true },
       }),
-      prisma.transaction.groupBy({
-        by: ["companyId"],
-        where: { type: "REVENU_LIGNE" },
-        _count: { _all: true },
-      }),
-      // les incidents pointent sur un train : on remonte à la compagnie côté serveur
-      prisma.incident.findMany({ select: { train: { select: { companyId: true } } } }),
       // un filleul ne compte que s'il a vraiment démarré (récompense déjà versée)
       // gares desservies, pour les grades de la 1.4
       prisma.line.findMany({ select: { companyId: true, departureStation: true, arrivalStation: true, stops: true } }),
@@ -163,12 +154,7 @@ async function computeLeaderRows(): Promise<LeaderRow[]> {
       trainWorth(t.model, t.wear),
     ])
   );
-  const revenueBy = sumByCompany(
-    revenue.map((r: { companyId: string | null; _sum: { amount: number | null } }): [string | null, number] => [
-      r.companyId,
-      r._sum.amount ?? 0,
-    ])
-  );
+  const revenueBy = new Map<string, number>([...life].map(([id, s]) => [id, s.revenue]));
   const deliveredBy = sumByCompany(
     delivered.map((d: { companyId: string | null; _count: { _all: number } }): [string | null, number] => [
       d.companyId,
@@ -181,18 +167,8 @@ async function computeLeaderRows(): Promise<LeaderRow[]> {
       f._count._all,
     ])
   );
-  const goodTripsBy = sumByCompany(
-    goodTrips.map((g: { companyId: string | null; _count: { _all: number } }): [string | null, number] => [
-      g.companyId,
-      g._count._all,
-    ])
-  );
-  const incidentsBy = sumByCompany(
-    incidents.map((i: { train: { companyId: string } | null }): [string | null, number] => [
-      i.train?.companyId ?? null,
-      1,
-    ])
-  );
+  const goodTripsBy = new Map<string, number>([...life].map(([id, s]) => [id, s.trips]));
+  const incidentsBy = new Map<string, number>([...life].map(([id, s]) => [id, s.incidents]));
   const stationsBy = new Map<string, Set<string>>();
   for (const l of stationLines as { companyId: string; departureStation: string; arrivalStation: string; stops?: string[] }[]) {
     const set = stationsBy.get(l.companyId) ?? new Set<string>();

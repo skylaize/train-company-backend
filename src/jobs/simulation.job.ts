@@ -1,4 +1,5 @@
 import { Prisma } from "@prisma/client";
+import { randomUUID } from "crypto";
 import { prisma } from "../prisma";
 import { ensureMarketStocked, removeExpiredContracts } from "../controllers/contract.controller";
 import { processReferralMilestones } from "../services/referral-milestone.service";
@@ -1165,6 +1166,10 @@ async function scheduledService(
   seasonEvent(train.companyId, "REVISE");
 }
 
+// 2.4 : la ligne « Entretien » de l'heure en cours, par compagnie
+let upkeepHour = -1;
+const upkeepRows = new Map<string, string>();
+
 async function runUpkeep() {
   const companies = await prisma.company.findMany({
     select: { id: true, balance: true, _count: { select: { trains: true } } },
@@ -1181,12 +1186,23 @@ async function runUpkeep() {
     const paid = Math.min(due, c.balance);
     if (paid > 0) {
       debits.set(c.id, -paid);
-      lines.push({ companyId: c.id, type: "ENTRETIEN", amount: -paid, description: `Entretien du réseau (${c._count.trains} rames)` });
+      lines.push({ companyId: c.id, type: "ENTRETIEN", amount: -paid, description: `Entretien du réseau, ${parisHour()} h (${c._count.trains} rames)` });
     }
     // entretien impayé : les rames en service se dégradent plus vite
     if (paid < due) unpaid.push(c.id);
   }
   if (debits.size) {
+    /* 2.4 : une ligne « Entretien » par compagnie et par HEURE, complétée à
+       chaque tour, au lieu d'une ligne par tour (≈ 1,1 million de lignes par
+       jour dans Transaction, qui ralentissaient toute la base). La trésorerie,
+       elle, est toujours prélevée à chaque tour. */
+    const hour = Math.floor(Date.now() / 3_600_000);
+    if (hour !== upkeepHour) {
+      upkeepHour = hour;
+      upkeepRows.clear();
+    }
+    const fresh = lines.filter((l) => !upkeepRows.has(l.companyId)).map((l) => ({ ...l, id: randomUUID() }));
+    const again = lines.filter((l) => upkeepRows.has(l.companyId));
     await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
       const entries = [...debits.entries()];
       for (const part of chunk(entries, 500)) {
@@ -1195,8 +1211,15 @@ async function runUpkeep() {
           FROM (VALUES ${Prisma.join(part.map(([id, d]) => row([id, d])))}) AS v(id, delta)
           WHERE c."id" = v.id::text`;
       }
-      await tx.transaction.createMany({ data: lines });
+      if (fresh.length) await tx.transaction.createMany({ data: fresh });
+      for (const part of chunk(again, 500)) {
+        await tx.$executeRaw`
+          UPDATE "Transaction" AS t SET "amount" = t."amount" + v.amount::int, "description" = v.description::text
+          FROM (VALUES ${Prisma.join(part.map((l) => row([upkeepRows.get(l.companyId), l.amount, l.description])))}) AS v(id, amount, description)
+          WHERE t."id" = v.id::text`;
+      }
     });
+    for (const l of fresh) upkeepRows.set(l.companyId, l.id);
   }
   for (const ids of chunk(unpaid, 1000)) {
     await prisma.train.updateMany({

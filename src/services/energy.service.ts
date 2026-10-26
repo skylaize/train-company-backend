@@ -1,7 +1,7 @@
 import { prisma } from "../prisma";
 import { Prisma } from "@prisma/client";
 import { randomUUID } from "crypto";
-import { chunk, row } from "./batch.service";
+import { chunk, row, pool, SIM_CONCURRENCY } from "./batch.service";
 import { economy, inTrial } from "./settings.service";
 import { parisDate, parisHour } from "./time.service";
 import { REGIONS, REGION_OF } from "./regions.service";
@@ -471,7 +471,8 @@ export async function settleEnergy(weather: Map<string, StationWeather>, now = n
 
     const bills = computeSettlement(companies, meters, production, hour, { tensionAlert, baselines }) as (HourBill & { batteryAfter: number })[];
     const label = `${parisHour(hour)} h`;
-    for (const b of bills) {
+    // 2.4 : une compagnie par file, plusieurs files à la fois
+    await pool(bills, SIM_CONCURRENCY, async (b) => {
       const c = companies.find((x) => x.id === b.companyId)!;
       const cost = Math.round(b.powerCost + b.dieselCost);
       const income = Math.round(b.income + b.bonus);
@@ -509,7 +510,7 @@ export async function settleEnergy(weather: Map<string, StationWeather>, now = n
         })
       );
       await prisma.$transaction(ops as never).catch((err: Error) => console.error("[énergie] règlement :", err.message));
-    }
+    }, "énergie");
     // production totale des centrales, pour la page Énergie
     if (producing) {
       for (const p of plants) {

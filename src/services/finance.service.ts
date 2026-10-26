@@ -1,4 +1,6 @@
+import { Prisma } from "@prisma/client";
 import { prisma } from "../prisma";
+import { chunk, row } from "./batch.service";
 import { buildLeaderRows } from "./leaderboard.service";
 import { computeReputation } from "./reputation.service";
 import { parisDate, parisHour, parisMidnight, startOfParisWeek, DAY_MS } from "./time.service";
@@ -110,12 +112,20 @@ export async function runSharePrices() {
   })) as { companyId: string; _sum: { amount: number | null } }[];
   const rev = new Map(revenue.map((r) => [r.companyId, r._sum.amount ?? 0]));
   const held = await heldByIssuer();
-  for (const r of rows) {
+  /* 2.4 : tous les cours en une requête et tout l'historique en une autre
+     (avant : deux requêtes par compagnie, ~800 allers-retours chaque heure) */
+  const prices = rows.map((r) => {
     const fundamental = Math.max(1, (Math.max(0, r.valeur) + (rev.get(r.id) ?? 0)) / SHARES_PER_COMPANY);
     const price = Math.round(fundamental * 100) / 100;
-    await prisma.company.update({ where: { id: r.id }, data: { sharePrice: price } });
-    await prisma.sharePrice.create({ data: { companyId: r.id, price: Math.round(marketPrice(price, held.get(r.id) ?? 0) * 100) / 100 } });
+    return { id: r.id, price, market: Math.round(marketPrice(price, held.get(r.id) ?? 0) * 100) / 100 };
+  });
+  for (const part of chunk(prices, 500)) {
+    await prisma.$executeRaw`
+      UPDATE "Company" AS c SET "sharePrice" = v.price::float8
+      FROM (VALUES ${Prisma.join(part.map((p) => row([p.id, p.price])))}) AS v(id, price)
+      WHERE c."id" = v.id::text`;
   }
+  if (prices.length) await prisma.sharePrice.createMany({ data: prices.map((p) => ({ companyId: p.id, price: p.market })) });
   // une semaine d'historique suffit à tracer les courbes
   await prisma.sharePrice.deleteMany({ where: { at: { lt: new Date(Date.now() - 8 * DAY_MS) } } });
 }
@@ -147,24 +157,40 @@ export async function runDividends() {
     select: { id: true, name: true },
     take: 200,
   })) as { id: string; name: string }[];
-  for (const issuer of issuers) {
-    await prisma.company.update({ where: { id: issuer.id }, data: { lastDividendOn: today } });
-    const agg = (await prisma.transaction.aggregate({
-      where: { companyId: issuer.id, type: "REVENU_LIGNE", createdAt: { gte: new Date(now.getTime() - DAY_MS) } },
+  if (issuers.length === 0) return;
+  /* 2.4 : toutes les compagnies d'un coup — recettes, actionnaires, versements
+     (avant : quatre requêtes par compagnie et une transaction par actionnaire) */
+  const ids = issuers.map((i) => i.id);
+  const [revenue, holdings] = await Promise.all([
+    prisma.transaction.groupBy({
+      by: ["companyId"],
+      where: { companyId: { in: ids }, type: "REVENU_LIGNE", createdAt: { gte: new Date(now.getTime() - DAY_MS) } },
       _sum: { amount: true },
-    })) as { _sum: { amount: number | null } };
-    const perShare = ((agg._sum.amount ?? 0) * DIVIDEND_RATE) / SHARES_PER_COMPANY;
-    if (perShare <= 0) continue;
-    const holders = (await prisma.shareholding.findMany({ where: { issuerId: issuer.id } })) as { holderId: string; shares: number }[];
-    for (const h of holders) {
-      const amount = Math.floor(h.shares * perShare);
-      if (amount <= 0) continue;
-      await prisma.$transaction([
-        prisma.company.update({ where: { id: h.holderId }, data: { balance: { increment: amount } } }),
-        prisma.transaction.create({ data: { companyId: h.holderId, type: "DIVIDENDE", amount, description: `Dividendes : ${h.shares} actions ${issuer.name}` } }),
-      ]);
-    }
+    }),
+    prisma.shareholding.findMany({ where: { issuerId: { in: ids } }, select: { holderId: true, issuerId: true, shares: true } }),
+  ]);
+  const revBy = new Map((revenue as { companyId: string; _sum: { amount: number | null } }[]).map((r) => [r.companyId, r._sum.amount ?? 0]));
+  const nameOf = new Map(issuers.map((i) => [i.id, i.name]));
+  const credits = new Map<string, number>();
+  const lines: { companyId: string; type: string; amount: number; description: string }[] = [];
+  for (const h of holdings as { holderId: string; issuerId: string; shares: number }[]) {
+    const perShare = ((revBy.get(h.issuerId) ?? 0) * DIVIDEND_RATE) / SHARES_PER_COMPANY;
+    const amount = Math.floor(h.shares * perShare);
+    if (amount <= 0) continue;
+    credits.set(h.holderId, (credits.get(h.holderId) ?? 0) + amount);
+    lines.push({ companyId: h.holderId, type: "DIVIDENDE", amount, description: `Dividendes : ${h.shares} actions ${nameOf.get(h.issuerId)}` });
   }
+  await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    // marqué dans la même transaction : un versement interrompu sera refait en entier
+    await tx.company.updateMany({ where: { id: { in: ids } }, data: { lastDividendOn: today } });
+    for (const part of chunk([...credits.entries()], 500)) {
+      await tx.$executeRaw`
+        UPDATE "Company" AS c SET "balance" = c."balance" + v.amount::int
+        FROM (VALUES ${Prisma.join(part.map(([id, amount]) => row([id, amount])))}) AS v(id, amount)
+        WHERE c."id" = v.id::text`;
+    }
+    if (lines.length) await tx.transaction.createMany({ data: lines });
+  });
 }
 
 /* ---------------- rapport de la semaine ---------------- */
