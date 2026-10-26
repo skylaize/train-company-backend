@@ -1,3 +1,5 @@
+import { energyEvents, loadIndices, outageNow } from "./energy.service";
+import { REGIONS } from "./regions.service";
 import { severeWeather } from "./realweather.service";
 import { WRECK_KINDS } from "./wreck.service";
 import { prisma } from "../prisma";
@@ -16,7 +18,7 @@ import { recentBoosters } from "./boost.service";
    ============================================================ */
 
 export interface Headline {
-  kind: "record" | "fortune" | "fret" | "chantier" | "arrivees" | "voie" | "calme" | "epave" | "meteo" | "regions" | "conteneur" | "pub" | "boost";
+  kind: "record" | "fortune" | "fret" | "chantier" | "arrivees" | "voie" | "calme" | "epave" | "meteo" | "regions" | "conteneur" | "pub" | "boost" | "energie";
   title: string;
   body: string;
 }
@@ -43,6 +45,15 @@ export async function gazette(viewerCompanyId: string) {
   );
 
   const headlines: Headline[] = [];
+  // 2.4 : chocs du gazole, vague de froid, panne de sous-station
+  const [idx, ev] = await Promise.all([loadIndices().catch(() => null), energyEvents().catch(() => null)]);
+  const outage = outageNow(ev);
+  if (outage) {
+    const name = REGIONS.find((r) => r.id === outage.region)?.name ?? outage.region;
+    headlines.push({ kind: "energie", title: `Panne de sous-station en ${name}`, body: "Les rames électriques de la région sont à l'arrêt. Le diesel, lui, roule." });
+  }
+  if (idx?.diesel.shockLabel) headlines.push({ kind: "energie", title: "Le prix du gazole fait la une", body: `${idx.diesel.shockLabel}.` });
+  if (idx?.power.shockLabel) headlines.push({ kind: "energie", title: "Le froid fait flamber le courant", body: `${idx.power.shockLabel}. Aux heures de pointe, chaque rame laissée au dépôt rapporte une prime.` });
   if (best && best.amount > 0) {
     const route = /sur (.+?)( ·|$)/.exec(best.description ?? "")?.[1] ?? "le réseau";
     headlines.push({ kind: "record", title: `Trajet record sur ${route}`, body: `${names.get(best.companyId) ?? "Une compagnie"} a encaissé ${fmt(best.amount)} pi. en un seul trajet.` });

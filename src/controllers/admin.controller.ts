@@ -1,3 +1,4 @@
+import { ECONOMY_DEFAULTS, inTrial, loadEconomy, updateEconomy } from "../services/settings.service";
 import crypto from "crypto";
 import { Response } from "express";
 import { AuthRequest } from "../middleware/auth.middleware";
@@ -946,4 +947,40 @@ export async function adminLogs(req: AuthRequest, res: Response) {
     prisma.adminAction.findMany({ where, orderBy: { createdAt: "desc" }, skip: page * 50, take: 50 }),
   ]);
   res.json({ total, page, pageSize: 50, logs: rows });
+}
+
+/* ---------------- 2.4 : réglages de l'économie ---------------- */
+
+export async function economySettingsAdmin(_req: AuthRequest, res: Response) {
+  const current = await loadEconomy();
+  const [diesel, power] = await Promise.all([prisma.marketIndex.findUnique({ where: { kind: "DIESEL" } }), prisma.marketIndex.findUnique({ where: { kind: "POWER" } })]);
+  const [co2, energy, carbon] = await Promise.all([
+    prisma.company.aggregate({ _sum: { co2Week: true } }),
+    prisma.energyMeter.aggregate({ where: { hour: { gte: new Date(Date.now() - 24 * 3_600_000) } }, _sum: { cost: true, income: true, kwh: true, liters: true } }),
+    prisma.carbonBill.aggregate({ where: { createdAt: { gte: new Date(Date.now() - 8 * 86_400_000) } }, _sum: { amount: true }, _count: { _all: true } }),
+  ]);
+  res.json({
+    settings: current,
+    defaults: ECONOMY_DEFAULTS,
+    trial: inTrial(),
+    markets: { diesel, power },
+    stats: {
+      co2Week: co2._sum.co2Week ?? 0,
+      energy24h: energy._sum,
+      carbonLastWeek: { amount: carbon._sum.amount ?? 0, companies: carbon._count._all },
+    },
+  });
+}
+
+export async function updateEconomySettingsAdmin(req: AuthRequest, res: Response) {
+  const patch = (req.body?.settings ?? {}) as Record<string, unknown>;
+  const allowed = Object.keys(ECONOMY_DEFAULTS);
+  const clean: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(patch)) if (allowed.includes(k)) clean[k] = v;
+  // fin de la période d'essai à la main : « now » la termine tout de suite
+  if (req.body?.endTrial === true) clean.trialUntil = new Date().toISOString();
+  if (!Object.keys(clean).length) return bad(res, 400, "Rien à modifier");
+  const next = await updateEconomy(clean as never);
+  await logAdmin(actor(req), "ECONOMIE", null, Object.keys(clean).join(", "));
+  res.json({ ok: true, settings: next });
 }
