@@ -519,6 +519,9 @@ model Line {
   // concurrence (1.4) : dernier état connu, pour prévenir quand il change
   rivals            Int      @default(0)
   leading           Boolean  @default(true)
+
+  // 2.4.1 : la simulation et les écrans filtrent par compagnie
+  @@index([companyId])
 }
 
 enum TrainStatus {
@@ -576,6 +579,12 @@ model Train {
   adBrand       String?
   adColor       String?
   adUntil       DateTime?
+
+  // 2.4.1 : la simulation cherche les rames par statut et par ligne à chaque tour,
+  // les écrans par compagnie ; sans index, chaque requête lisait toute la table
+  @@index([companyId])
+  @@index([status, lineId])
+  @@index([lineId])
 }
 
 // 2.0 : une épave près d'une gare. Libre (companyId nul) jusqu'à ce qu'une
@@ -642,6 +651,9 @@ model Contract {
   createdAt         DateTime       @default(now())
 
   @@index([trainId])
+  // 2.4.1 : marché (DISPONIBLE) et tournées en cours (EN_COURS), à chaque tour
+  @@index([status, companyId])
+  @@index([companyId])
 }
 
 model Incident {
@@ -652,6 +664,9 @@ model Incident {
   trainId     String
 
   createdAt   DateTime @default(now())
+
+  // 2.4.1 : la réputation compte les incidents de chaque compagnie
+  @@index([trainId])
 }
 
 model Transaction {
@@ -710,6 +725,8 @@ model Staff {
 
   // plus d'unicité par poste : on peut désormais embaucher plusieurs mécaniciens
   @@index([companyId, role])
+  // 2.4.1 : équipages affectés aux rames
+  @@index([trainId])
 }
 
 // 2.0 : la vraie météo de chaque gare (MET Norway), relevée toutes les 20 minutes

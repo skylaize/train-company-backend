@@ -1,4 +1,6 @@
 import { prisma } from "../prisma";
+import { Prisma } from "@prisma/client";
+import { chunk, row } from "./batch.service";
 import { economy } from "./settings.service";
 import { distanceKm } from "./geography.service";
 
@@ -120,18 +122,37 @@ export async function flushTrack() {
   if (pendingWear.size) {
     const batch = [...pendingWear.entries()];
     pendingWear = new Map();
-    for (const [key, w] of batch) {
-      await prisma.trackSegment
-        .upsert({ where: { key }, create: { key, condition: Math.max(0, 100 - w) }, update: { condition: { decrement: w } } })
-        .catch((err: Error) => console.error("[voies] usure :", err.message));
+    /* 2.4.1 : deux requêtes par paquet au lieu d'une par liaison. Les
+       liaisons nouvelles sont créées (à 100 − usure), les autres décomptées. */
+    for (const part of chunk(batch, 500)) {
+      try {
+        const created = await prisma.$queryRaw<{ key: string }[]>`
+          INSERT INTO "TrackSegment" ("key", "condition", "updatedAt")
+          SELECT v.key::text, GREATEST(0, 100 - v.w::float8), (NOW() AT TIME ZONE 'UTC')
+          FROM (VALUES ${Prisma.join(part.map(([key, w]) => row([key, w])))}) AS v(key, w)
+          ON CONFLICT ("key") DO NOTHING
+          RETURNING "key"`;
+        const fresh = new Set(created.map((c: { key: string }) => c.key));
+        const rest = part.filter(([key]) => !fresh.has(key));
+        if (rest.length) {
+          await prisma.$executeRaw`
+            UPDATE "TrackSegment" AS s SET "condition" = GREATEST(0, s."condition" - v.w::float8), "updatedAt" = (NOW() AT TIME ZONE 'UTC')
+            FROM (VALUES ${Prisma.join(rest.map(([key, w]) => row([key, w])))}) AS v(key, w)
+            WHERE s."key" = v.key::text`;
+        }
+      } catch (err) {
+        console.error("[voies] usure :", (err as Error).message);
+      }
     }
-    await prisma.trackSegment.updateMany({ where: { condition: { lt: 0 } }, data: { condition: 0 } }).catch(() => undefined);
   }
   if (pendingTolls.size) {
     const batch = [...pendingTolls.entries()];
     pendingTolls = new Map();
-    for (const [key, amount] of batch) {
-      await prisma.concession.updateMany({ where: { segmentKey: key }, data: { pending: { increment: amount } } }).catch(() => undefined);
+    for (const part of chunk(batch, 500)) {
+      await prisma.$executeRaw`
+        UPDATE "Concession" AS c SET "pending" = c."pending" + v.amount::int
+        FROM (VALUES ${Prisma.join(part.map(([key, amount]) => row([key, Math.round(amount)])))}) AS v(key, amount)
+        WHERE c."segmentKey" = v.key::text`.catch((err: Error) => console.error("[voies] péages :", err.message));
     }
   }
 }

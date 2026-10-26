@@ -1,4 +1,7 @@
 import { prisma } from "../prisma";
+import { Prisma } from "@prisma/client";
+import { randomUUID } from "crypto";
+import { chunk, row } from "./batch.service";
 import { economy, inTrial } from "./settings.service";
 import { parisDate, parisHour } from "./time.service";
 import { REGIONS, REGION_OF } from "./regions.service";
@@ -81,14 +84,32 @@ export async function flushMeters(at = new Date()) {
   const hour = hourStart(at);
   const batch = [...pendingMeters.entries()];
   pendingMeters.clear();
-  for (const [companyId, r] of batch) {
-    await prisma.energyMeter
-      .upsert({
-        where: { companyId_hour: { companyId, hour } },
-        create: { companyId, hour, kwh: r.kwh, liters: r.liters, co2: r.co2 },
-        update: { kwh: { increment: r.kwh }, liters: { increment: r.liters }, co2: { increment: r.co2 } },
-      })
-      .catch((err: Error) => console.error("[énergie] compteur :", err.message));
+  /* 2.4.1 : toutes les compagnies en une requête (avant : une par compagnie).
+     L'heure est passée en texte UTC, comme Prisma l'écrit dans la colonne. */
+  const hourIso = hour.toISOString();
+  for (const part of chunk(batch, 500)) {
+    try {
+      await prisma.$executeRaw`
+        INSERT INTO "EnergyMeter" ("id", "companyId", "hour", "kwh", "liters", "co2")
+        SELECT v.id::text, v.company::text, ${hourIso}::timestamp(3), v.kwh::float8, v.liters::float8, v.co2::float8
+        FROM (VALUES ${Prisma.join(part.map(([companyId, r]) => row([randomUUID(), companyId, r.kwh, r.liters, r.co2])))}) AS v(id, company, kwh, liters, co2)
+        ON CONFLICT ("companyId", "hour") DO UPDATE SET
+          "kwh" = "EnergyMeter"."kwh" + EXCLUDED."kwh",
+          "liters" = "EnergyMeter"."liters" + EXCLUDED."liters",
+          "co2" = "EnergyMeter"."co2" + EXCLUDED."co2"`;
+    } catch (err) {
+      // une compagnie supprimée entre-temps fait échouer le lot : on repasse une par une
+      console.error("[énergie] compteurs groupés :", (err as Error).message);
+      for (const [companyId, r] of part) {
+        await prisma.energyMeter
+          .upsert({
+            where: { companyId_hour: { companyId, hour } },
+            create: { companyId, hour, kwh: r.kwh, liters: r.liters, co2: r.co2 },
+            update: { kwh: { increment: r.kwh }, liters: { increment: r.liters }, co2: { increment: r.co2 } },
+          })
+          .catch((e: Error) => console.error("[énergie] compteur :", e.message));
+      }
+    }
   }
 }
 

@@ -1,4 +1,6 @@
 import { prisma } from "../prisma";
+import { Prisma } from "@prisma/client";
+import { chunk, row } from "./batch.service";
 import { stationSize } from "./station.service";
 import { distanceKm } from "./geography.service";
 
@@ -97,12 +99,13 @@ export function stationEffects(
 /* Les sommes dues aux propriétaires s'accumulent pendant l'heure et sont
    versées d'un coup : une écriture par heure plutôt qu'une par train. */
 export async function accruePending(pending: Map<string, { fees: number; shops: number }>) {
-  for (const [station, p] of pending) {
-    if (p.fees <= 0 && p.shops <= 0) continue;
-    await prisma.stationOwnership.updateMany({
-      where: { station },
-      data: { pendingFees: { increment: p.fees }, pendingShops: { increment: p.shops } },
-    });
+  // 2.4.1 : toutes les gares en une requête
+  const rows = [...pending.entries()].filter(([, p]) => p.fees > 0 || p.shops > 0);
+  for (const part of chunk(rows, 500)) {
+    await prisma.$executeRaw`
+      UPDATE "StationOwnership" AS s SET "pendingFees" = s."pendingFees" + v.fees::int, "pendingShops" = s."pendingShops" + v.shops::int
+      FROM (VALUES ${Prisma.join(part.map(([station, p]) => row([station, Math.round(p.fees), Math.round(p.shops)])))}) AS v(station, fees, shops)
+      WHERE s."station" = v.station::text`;
   }
 }
 

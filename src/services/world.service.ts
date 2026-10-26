@@ -1,4 +1,7 @@
 import { prisma } from "../prisma";
+import { Prisma } from "@prisma/client";
+import { randomUUID } from "crypto";
+import { chunk, row } from "./batch.service";
 
 /* ============================================================
    Le Grand Chantier (2.0).
@@ -44,12 +47,13 @@ export async function flushWorld() {
   const project = await ensureProject();
   if (project.completedAt) return false;
   const total = [...batch.values()].reduce((a, b) => a + b, 0);
-  for (const [companyId, amount] of batch) {
-    await prisma.worldContribution.upsert({
-      where: { projectId_companyId: { projectId: TUNNEL_ID, companyId } },
-      create: { projectId: TUNNEL_ID, companyId, amount },
-      update: { amount: { increment: amount } },
-    });
+  // 2.4.1 : toutes les contributions du tour en une requête
+  for (const part of chunk([...batch.entries()], 500)) {
+    await prisma.$executeRaw`
+      INSERT INTO "WorldContribution" ("id", "projectId", "companyId", "amount")
+      SELECT v.id::text, ${TUNNEL_ID}, v.company::text, v.amount::int
+      FROM (VALUES ${Prisma.join(part.map(([companyId, amount]) => row([randomUUID(), companyId, amount])))}) AS v(id, company, amount)
+      ON CONFLICT ("projectId", "companyId") DO UPDATE SET "amount" = "WorldContribution"."amount" + EXCLUDED."amount"`;
   }
   const updated = await prisma.worldProject.update({ where: { id: TUNNEL_ID }, data: { progress: { increment: total } } });
   if (updated.progress >= updated.target && !updated.completedAt) {
