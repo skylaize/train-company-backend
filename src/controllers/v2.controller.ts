@@ -184,7 +184,7 @@ export async function getAlliance(req: AuthRequest, res: Response) {
     regions: await regionsView(alliance.id, (await ownedDlcs(company.id)).has("dlc-corse")).catch(() => null),
     invited: invited.map((c) => c.name),
     // 2.4.1 : les invitations en attente, pour pouvoir les retirer
-    invites: (invites as { companyId: string; createdAt: Date }[])
+    sentInvites: (invites as { companyId: string; createdAt: Date }[])
       .filter((i) => invited.some((c) => c.id === i.companyId))
       .map((i) => ({ companyId: i.companyId, name: invited.find((c) => c.id === i.companyId)!.name, at: i.createdAt })),
     applications,
