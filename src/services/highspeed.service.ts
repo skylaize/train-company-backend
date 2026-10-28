@@ -35,6 +35,12 @@ export const TGV_SEATS = 500;
 export const TGV_SPEED = 0.55; // durée × 0,55
 export const TGV_FARE = 1.15;
 export const TGV_WEAR = 1.25;
+/* 2.4.1 : la rame TGV peut aussi rouler sur une ligne classique électrifiée,
+   comme les vrais TGV hors LGV : un peu plus vite qu'une rame ordinaire,
+   mais loin de sa vitesse de LGV, et ses 500 places se remplissent moins
+   bien qu'en grande vitesse (billet −20 %, comme les couchettes de jour). */
+export const TGV_CLASSIC_SPEED = 0.9; // durée × 0,9 (× 0,55 sur LGV)
+export const TGV_CLASSIC_FARE = 0.8;
 
 const DAY_MS = 86_400_000;
 

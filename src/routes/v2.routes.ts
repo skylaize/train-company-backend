@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth.middleware";
 import {
-  getSeason, getWorld, getAlliance, createAlliance, inviteToAlliance, answerInvite, leaveAlliance, kickMember, updateAlliance, postMessage, deleteMessage, applyToAlliance, withdrawApplication, answerApplication, setAllianceLivery, getMuseum, getGazette, getDlcs, getPass, claimPass,
+  getSeason, getWorld, getAlliance, createAlliance, inviteToAlliance, cancelInvite, answerInvite, leaveAlliance, kickMember, updateAlliance, postMessage, deleteMessage, applyToAlliance, withdrawApplication, answerApplication, setAllianceLivery, getMuseum, getGazette, getDlcs, getPass, claimPass,
 } from "../controllers/v2.controller";
 import { getWrecks, postBuyWreck, postRestore, postCommission } from "../controllers/wreck.controller";
 
@@ -15,6 +15,8 @@ v2Router.post("/alliance", requireAuth, createAlliance);
 v2Router.patch("/alliance", requireAuth, updateAlliance);
 v2Router.post("/alliance/invite", requireAuth, inviteToAlliance);
 v2Router.post("/alliance/invites/:id", requireAuth, answerInvite);
+// 2.4.1 : retirer une invitation envoyée (par l'identifiant de la compagnie invitée)
+v2Router.delete("/alliance/invited/:companyId", requireAuth, cancelInvite);
 v2Router.post("/alliance/leave", requireAuth, leaveAlliance);
 v2Router.post("/alliance/kick", requireAuth, kickMember);
 // 2.0.2 : candidatures

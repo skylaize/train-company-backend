@@ -522,10 +522,16 @@ export async function sellConcession(req: AuthRequest, res: Response) {
 
 /* ---------------- pour la carte : l'état des voies empruntées ---------------- */
 
-export async function trackMap(_req: AuthRequest, res: Response) {
+export async function trackMap(req: AuthRequest, res: Response) {
   const snap = trackSnapshot();
+  /* 2.4.1 : seules les concessions du joueur sont marquées. Celles de tout le
+     réseau dessinaient de gros traits dorés partout sur la carte, et les
+     joueurs s'en plaignaient. */
+  const me = (await myCompany(req).catch(() => null))?.id ?? null;
   return res.json({
-    segments: [...snap.entries()].filter(([, v]) => v.condition < 99 || v.concession).map(([key, v]) => ({ key, condition: Math.round(v.condition), concession: Boolean(v.concession) })),
+    segments: [...snap.entries()]
+      .filter(([, v]) => v.condition < 99 || (me && v.concession?.companyId === me))
+      .map(([key, v]) => ({ key, condition: Math.round(v.condition), concession: Boolean(me && v.concession?.companyId === me) })),
     outage: outageNow()?.region ?? null,
     regions: Object.fromEntries(Object.entries(REGION_OF)),
     hour: hourStart().toISOString(),

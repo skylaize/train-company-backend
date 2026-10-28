@@ -47,6 +47,7 @@ export async function getWorld(req: AuthRequest, res: Response) {
 export async function getAlliance(req: AuthRequest, res: Response) {
   const company = await myCompany(req);
   if (!company) return err(res, 404, "Créez d'abord votre compagnie");
+  await purgeOldInvites(); // 2.4.1 : les invitations de plus de 7 jours tombent
   const alliance = await allianceOfCompany(company.id);
   const ranking = await allianceRanking();
   const rules = {
@@ -182,6 +183,10 @@ export async function getAlliance(req: AuthRequest, res: Response) {
     objectives: await objectivesView(alliance.id).catch(() => null),
     regions: await regionsView(alliance.id, (await ownedDlcs(company.id)).has("dlc-corse")).catch(() => null),
     invited: invited.map((c) => c.name),
+    // 2.4.1 : les invitations en attente, pour pouvoir les retirer
+    invites: (invites as { companyId: string; createdAt: Date }[])
+      .filter((i) => invited.some((c) => c.id === i.companyId))
+      .map((i) => ({ companyId: i.companyId, name: invited.find((c) => c.id === i.companyId)!.name, at: i.createdAt })),
     applications,
     // 2.1 : les livrées communes que ce membre peut poser (coffret d'alliance)
     liveryChoices: await (async () => {
@@ -215,11 +220,30 @@ export async function createAlliance(req: AuthRequest, res: Response) {
   res.json({ ok: true, id: alliance.id });
 }
 
+/* 2.4.1 : une invitation sans réponse tombe au bout de 7 jours. Elle
+   bloquait une place de l'alliance pour toujours. */
+const INVITE_DAYS = 7;
+async function purgeOldInvites() {
+  await prisma.allianceInvite.deleteMany({ where: { createdAt: { lt: new Date(Date.now() - INVITE_DAYS * 86_400_000) } } }).catch(() => undefined);
+}
+
+/* 2.4.1 : retirer une invitation restée sans réponse (tout membre, comme pour inviter) */
+export async function cancelInvite(req: AuthRequest, res: Response) {
+  const company = await myCompany(req);
+  if (!company) return err(res, 404, "Créez d'abord votre compagnie");
+  const alliance = await allianceOfCompany(company.id);
+  if (!alliance) return err(res, 409, "Vous n'avez pas d'alliance");
+  const gone = await prisma.allianceInvite.deleteMany({ where: { allianceId: alliance.id, companyId: String(req.params.companyId ?? "") } });
+  if (gone.count === 0) return err(res, 404, "Invitation introuvable");
+  res.json({ ok: true });
+}
+
 export async function inviteToAlliance(req: AuthRequest, res: Response) {
   const company = await myCompany(req);
   if (!company) return err(res, 404, "Créez d'abord votre compagnie");
   const alliance = await allianceOfCompany(company.id);
   if (!alliance) return err(res, 409, "Vous n'avez pas d'alliance");
+  await purgeOldInvites();
   const count = await prisma.allianceMember.count({ where: { allianceId: alliance.id } });
   const pendingInvites = await prisma.allianceInvite.count({ where: { allianceId: alliance.id } });
   if (count + pendingInvites >= ALLIANCE_MAX) return err(res, 409, `Une alliance compte ${ALLIANCE_MAX} compagnies au plus, invitations comprises`);

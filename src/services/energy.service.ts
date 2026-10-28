@@ -431,10 +431,13 @@ export async function settleEnergy(weather: Map<string, StationWeather>, now = n
   const s = economy();
   const allPlants = (await prisma.powerPlant.findMany({ select: { id: true, companyId: true, kind: true, station: true, builtAt: true } })) as { id: string; companyId: string; kind: PlantKind; station: string; builtAt: Date }[];
 
+  const billedLastHour = new Set<string>();
   for (const hour of hours.slice(-6)) {
     // une centrale ne compte que pour les heures où elle existait déjà
     const plants = allPlants.filter((p) => p.builtAt.getTime() < hour.getTime() + 3_600_000);
     const rows = (await prisma.energyMeter.findMany({ where: { hour } })) as { id: string; companyId: string; kwh: number; liters: number; co2: number; settled: boolean }[];
+    // les compagnies déjà facturées pour l'heure écoulée gardent leur blocage éventuel
+    if (hour.getTime() === lastHour.getTime()) for (const r of rows) billedLastHour.add(r.companyId);
     // une heure déjà réglée pour tout le monde n'est pas refaite
     if (rows.length && rows.every((r) => r.settled)) continue;
     const settledIds = new Set(rows.filter((r) => r.settled).map((r) => r.companyId));
@@ -450,6 +453,7 @@ export async function settleEnergy(weather: Map<string, StationWeather>, now = n
       production.set(p.companyId, cur);
     }
     const ids = [...new Set([...meters.keys(), ...production.keys()])];
+    if (hour.getTime() === lastHour.getTime()) for (const id of ids) billedLastHour.add(id);
     if (ids.length === 0) continue;
     const companies = (await prisma.company.findMany({
       where: { id: { in: ids } },
@@ -520,6 +524,14 @@ export async function settleEnergy(weather: Map<string, StationWeather>, now = n
       }
     }
   }
+  /* 2.4.1 : une compagnie bloquée (facture de gazole impayée) dont les rames
+     thermiques sont à l'arrêt ne consomme plus rien, n'a donc plus de facture,
+     et le blocage n'était jamais levé : ses rames restaient figées pour
+     toujours. Le blocage dure désormais jusqu'à la facture suivante. */
+  await prisma.company
+    .updateMany({ where: { fuelBlocked: true, id: { notIn: [...billedLastHour] } }, data: { fuelBlocked: false } })
+    .catch((err: Error) => console.error("[énergie] levée des blocages :", err.message));
+
   // trente jours de compteurs suffisent
   await prisma.energyMeter.deleteMany({ where: { hour: { lt: new Date(now.getTime() - 30 * 86_400_000) } } });
 }

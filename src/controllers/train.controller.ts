@@ -152,12 +152,13 @@ export async function assignTrainToLine(req: AuthRequest, res: Response) {
     const why = nightIntlLineError(routeOf(line as { departureStation: string; arrivalStation: string; stops?: string[] }), line.durationMinutes, NIGHT_MIN_DURATION);
     if (why) return res.status(409).json({ error: why });
   }
-  // 2.2 : la rame TGV ne roule que sur une LGV ouverte
-  if (train.model === TGV_MODEL && !hslOpen(line as { highSpeedAt?: Date | null })) {
+  /* 2.2 : la rame TGV roule sur une LGV ouverte ;
+     2.4.1 : ou sur une ligne classique électrifiée, plus lentement et moins rentable */
+  if (train.model === TGV_MODEL && !hslOpen(line as { highSpeedAt?: Date | null }) && !(line as { electrified?: boolean }).electrified) {
     return res.status(409).json({
       error: hslBuilding(line as { highSpeedAt?: Date | null })
-        ? "La LGV de cette ligne est encore en chantier : la rame TGV attendra son ouverture"
-        : "Une rame TGV ne roule que sur une ligne à grande vitesse (Infrastructures → LGV)",
+        ? "La LGV de cette ligne est encore en chantier, et la ligne n'est pas électrifiée : la rame TGV attendra"
+        : "Une rame TGV demande une ligne électrifiée (Infrastructures → Électrification), ou mieux, une LGV",
     });
   }
   if (train.model === "COUCHETTES" && line.durationMinutes < NIGHT_MIN_DURATION) {
@@ -439,12 +440,20 @@ export async function buyParts(req: AuthRequest, res: Response) {
 /* 2.0 : revente d'une rame (Premium). Le prix de reprise baisse avec l'âge
    (65 % du prix neuf, puis 1 % de moins par jour, 30 % au plus bas) et avec
    l'usure ; les voitures attelées sont reprises à moitié prix. */
+/* 2.4.1 : sans Premium, on peut quand même se séparer d'une vieille rame pour
+   en acheter une plus moderne : elle part à la casse, reprise au quart de sa
+   valeur. La revente au prix de reprise reste un avantage Premium. */
+export const SCRAP_RATIO = 0.25;
+export function scrapValue(t: Parameters<typeof trainValue>[0]) {
+  return Math.floor(trainValue(t) * SCRAP_RATIO);
+}
+
 export async function sellTrain(req: AuthRequest, res: Response) {
   const { trainId } = req.body ?? {};
   if (!trainId) return res.status(400).json({ error: "trainId est requis" });
   const company = await getOwnedCompanyOrFail(req.userId as string);
   if (!company) return res.status(404).json({ error: "Créez d'abord votre compagnie" });
-  if (!company.isPremium) return res.status(403).json({ error: "La revente des rames est réservée au Premium" });
+  const scrap = !company.isPremium;
   const train = await prisma.train.findFirst({ where: { id: trainId, companyId: company.id } });
   if (!train) return res.status(404).json({ error: "Train introuvable" });
   if (train.status === "EN_ROUTE" && !train.lineId) return res.status(409).json({ error: "Cette rame livre du fret : attendez son retour" });
@@ -452,16 +461,16 @@ export async function sellTrain(req: AuthRequest, res: Response) {
   const total = await prisma.train.count({ where: { companyId: company.id } });
   if (total <= 1) return res.status(409).json({ error: "Gardez au moins une rame" });
 
-  const value = trainValue(train);
+  const value = scrap ? scrapValue(train) : trainValue(train);
   await prisma.$transaction([
     prisma.incident.deleteMany({ where: { trainId: train.id } }),
     prisma.staff.updateMany({ where: { companyId: company.id, trainId: train.id }, data: { trainId: null } }),
     prisma.contract.updateMany({ where: { trainId: train.id }, data: { trainId: null } }),
     prisma.train.delete({ where: { id: train.id } }),
     prisma.company.update({ where: { id: company.id }, data: { balance: { increment: value } } }),
-    prisma.transaction.create({ data: { companyId: company.id, type: "VENTE_TRAIN", amount: value, description: `Revente de ${train.name}` } }),
+    prisma.transaction.create({ data: { companyId: company.id, type: "VENTE_TRAIN", amount: value, description: scrap ? `Mise à la casse de ${train.name}` : `Revente de ${train.name}` } }),
   ]);
-  return res.json({ ok: true, value });
+  return res.json({ ok: true, value, scrap });
 }
 
 /* 2.1.1 (Premium) : la cote de la rame, ses 14 derniers jours et le meilleur jour de la semaine pour la revendre */
@@ -553,6 +562,7 @@ export async function listMyTrains(req: AuthRequest, res: Response) {
       ...t,
       organs: organWear(t),
       resaleValue: trainValue(t),
+      scrapValue: scrapValue(t), // 2.4.1 : mise à la casse, sans Premium
       crew: (crew as { id: string; name: string; role: string; level: number; trainId: string | null }[])
         .filter((c) => c.trainId === t.id)
         .map((c) => ({ id: c.id, name: c.name, role: c.role, level: c.level })),

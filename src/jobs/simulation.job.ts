@@ -43,7 +43,7 @@ import { syncAllRoles } from "../services/discord-roles.service";
 import { runGiveaways } from "../services/giveaway.service";
 import { runTrialExpiry } from "../services/trial.service";
 import { parisHour } from "../services/time.service";
-import { TGV_MODEL, TGV_SPEED, TGV_FARE, TGV_WEAR, hslOpen, runHighSpeedOpenings } from "../services/highspeed.service";
+import { TGV_MODEL, TGV_SPEED, TGV_FARE, TGV_WEAR, TGV_CLASSIC_SPEED, TGV_CLASSIC_FARE, hslOpen, runHighSpeedOpenings } from "../services/highspeed.service";
 import { collectSouls, flushSouls, runHalloween } from "../services/halloween.service";
 import { regionBonusMap, regionMultiplier, runRegions, RegionBonuses } from "../services/regions.service";
 import { runAllianceObjectives } from "../services/alliance-objectives.service";
@@ -539,6 +539,20 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
     const fx = staffEffects.get(train.companyId) ?? NO_STAFF;
     if (!train.line || !train.departedAt) return;
 
+    /* 2.4.1 (Premium) : une rame qui vient de (re)partir hors de ses horaires
+       se gare tout de suite. Une sortie d'atelier, une pièce livrée, une
+       réparation ou un changement de ligne la relançaient à toute heure : un
+       train de nuit réglé sur 22 h – 6 h roulait en pleine soirée. */
+    if (
+      premiumIds.has(train.companyId) &&
+      !inServiceWindow(train as { serviceFrom?: number | null; serviceTo?: number | null }) &&
+      train.progress === 0 &&
+      Date.now() - new Date(train.departedAt).getTime() < 90_000
+    ) {
+      await prisma.train.updateMany({ where: { id: train.id, status: "EN_ROUTE", progress: 0 }, data: { departedAt: null } });
+      return;
+    }
+
     /* Incident aléatoire : le train perd un tick. La progression étant calculée
        depuis departedAt, il ne suffit pas de sauter le tour — il faut repousser
        l'heure de départ, sinon le « retard » n'a aucun effet sur l'arrivée.
@@ -600,13 +614,15 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
     wearRate = wearRate * driver.wear;
     // 2.2 : la rame TGV lancée sur sa LGV s'use plus vite
     const tgv = train.model === TGV_MODEL && hslOpen(train.line as { highSpeedAt?: Date | null });
+    // 2.4.1 : la même rame sur une ligne classique électrifiée
+    const tgvClassic = train.model === TGV_MODEL && !tgv;
     /* 2.4 : une rame électrique est arrêtée par une panne de sous-station sur
        son itinéraire ; une rame thermique attend si la facture de gazole n'a
        pas pu être payée (hors période d'essai). */
-    const electric = Boolean(lineX.electrified) || tgv;
+    const electric = Boolean(lineX.electrified) || train.model === TGV_MODEL;
     if (electric && routeInOutage(routeOf(lineX))) return;
     if (!electric && fuelBlocked.has(train.companyId)) return;
-    if (tgv) wearRate = wearRate * TGV_WEAR;
+    if (tgv || tgvClassic) wearRate = wearRate * TGV_WEAR;
     const newWear = Math.min(100, train.wear + stochasticRound(wearRate));
     /* 2.0 : une rame négligée peut casser avant 100 % */
     const neglected = newWear >= NEGLECT_FROM && newWear < 100 && Math.random() < NEGLECT_CHANCE * driver.incident;
@@ -641,7 +657,7 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
     // Une rame Express effectue le trajet 30% plus vite ; 1.7 : chaque voiture ajoutée ralentit,
     // l'électrification fait gagner 10 %
     const effectiveDuration =
-      train.line.durationMinutes * (train.model === "EXPRESS" ? 0.7 : 1) * (dlcModel?.speed ?? 1) * speedFactor(trainX) * (lineX.electrified ? ELECTRIC_SPEED : 1) * (doubled ? DOUBLE_SPEED : 1) * (tgv ? TGV_SPEED : 1) * trackFx.slow;
+      train.line.durationMinutes * (train.model === "EXPRESS" ? 0.7 : 1) * (dlcModel?.speed ?? 1) * speedFactor(trainX) * (lineX.electrified ? ELECTRIC_SPEED : 1) * (doubled ? DOUBLE_SPEED : 1) * (tgv ? TGV_SPEED : tgvClassic ? TGV_CLASSIC_SPEED : 1) * trackFx.slow;
     const progress = Math.min(100, Math.floor((elapsedMinutes / effectiveDuration) * 100));
 
     if (progress >= 100) {
@@ -715,7 +731,7 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
           // 2.1 : double voie, le cadencement attire du monde
           (doubled ? cadenceBonus(runningOnLine.get(train.lineId as string) ?? 1) : 1) *
           // 2.2 : le billet de la grande vitesse
-          (tgv ? TGV_FARE : 1) *
+          (tgv ? TGV_FARE : tgvClassic ? TGV_CLASSIC_FARE : 1) *
           // 2.3 : correspondance maritime avec la Corse, et région tenue par l'alliance
           ferryMultiplier(hubCounts.get(train.companyId), route) *
           regionMultiplier(regionBonuses, train.companyId, route)
@@ -729,7 +745,7 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
       // 2.4 : péages des liaisons concédées à d'autres compagnies
       const trackTolls = tollsFor(route, train.companyId, revenue, alliesFor(train.companyId));
       // 2.4 : le gazole ou le courant du trajet, et l'usure de la voie
-      meterAdd(train.companyId, tripEnergy(train.line.durationMinutes, { electric, powerFactor: tgv ? economy().tgvPowerFactor : 1, steam: train.model === "VAPEUR" }));
+      meterAdd(train.companyId, tripEnergy(train.line.durationMinutes, { electric, powerFactor: train.model === TGV_MODEL ? economy().tgvPowerFactor : 1, steam: train.model === "VAPEUR" }));
       wearTrack(route, tgv ? 2 : 1);
       const platformFees = infra.fees.reduce((a, f) => a + f.amount, 0);
       for (const f of infra.fees) owe(f.station, "fees", f.amount);

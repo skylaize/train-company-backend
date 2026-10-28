@@ -3,6 +3,8 @@ import { dlcOfStation, ownedDlcs } from "../services/dlc.service";
 import { lineRidership } from "../services/pricing.service";
 import { Request, Response } from "express";
 import { prisma } from "../prisma";
+import { lifetimeStats } from "../services/lifetime.service";
+import { currentSeason } from "../services/saison.service";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { STATIONS } from "../services/geography.service";
 import {
@@ -24,13 +26,24 @@ import { buildLeaderRows } from "../services/leaderboard.service";
 import { NIGHT_MIN_DURATION } from "./train.controller";
 
 export async function getNetworkStats(_req: Request, res: Response) {
-  const [activeCompanies, trainsInService, goodTrips, totalIncidents, recentIncidents] = await Promise.all([
+  /* 2.4.1 : trajets et incidents viennent des compteurs tenus à jour par
+     morceaux (lifetime.service) : la page d'accueil comptait toute la table
+     Transaction à chaque visite. Et la saison en cours, pour le compte à
+     rebours de la page d'accueil. */
+  const [activeCompanies, trainsInService, life, recentIncidents, season, tunnel] = await Promise.all([
     prisma.company.count(),
     prisma.train.count({ where: { status: "EN_ROUTE" } }),
-    prisma.transaction.count({ where: { type: "REVENU_LIGNE" } }),
-    prisma.incident.count(),
+    lifetimeStats(),
     prisma.incident.count({ where: { createdAt: { gte: new Date(Date.now() - 10 * 60_000) } } }),
+    currentSeason().catch(() => null),
+    tunnelOpen().catch(() => false),
   ]);
+  let goodTrips = 0;
+  let totalIncidents = 0;
+  for (const s of life.values()) {
+    goodTrips += s.trips;
+    totalIncidents += s.incidents;
+  }
 
   const totalOps = goodTrips + totalIncidents;
   const punctuality = totalOps === 0 ? 100 : Math.round((goodTrips / totalOps) * 100);
@@ -40,6 +53,9 @@ export async function getNetworkStats(_req: Request, res: Response) {
     trainsInService,
     punctuality,
     activeIncidents: recentIncidents,
+    season: season && new Date(season.endsAt).getTime() > Date.now() ? { number: season.number, name: season.name, endsAt: season.endsAt } : null,
+    // 2.4.1 : la page d'accueil parle du tunnel au passé une fois ouvert
+    tunnelOpen: tunnel,
   });
 }
 

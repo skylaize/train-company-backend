@@ -200,7 +200,8 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
   // 2.2 : grande vitesse et Halloween
   const [hslLines22, tgvRunning22, souls22] = (await Promise.all([
     prisma.line.findMany({ where: { companyId: company.id, highSpeedAt: { not: null } }, select: { highSpeedAt: true } }),
-    prisma.train.count({ where: { companyId: company.id, model: TGV_MODEL, status: "EN_ROUTE", lineId: { not: null } } }),
+    // 2.4.1 : sur LGV ouverte, comme avant (la rame TGV roule aussi sur ligne classique maintenant)
+    prisma.train.count({ where: { companyId: company.id, model: TGV_MODEL, status: "EN_ROUTE", line: { highSpeedAt: { lte: new Date() } } } }),
     bestSouls(company.id).catch(() => 0),
   ])) as [{ highSpeedAt: Date | null }[], number, number];
   const hslOpened22 = hslLines22.filter((l) => l.highSpeedAt && l.highSpeedAt.getTime() <= Date.now()).length;
