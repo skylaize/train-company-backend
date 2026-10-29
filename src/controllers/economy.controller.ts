@@ -4,7 +4,7 @@ import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
 import { economy, inTrial } from "../services/settings.service";
 import {
-  PLANT_KINDS, PLANT_LABELS, PlantKind, plantSiteOk, plantSites, plantOutput, dieselPrice, powerPrice, powerProfile,
+  PLANT_KINDS, PLANT_LABELS, PlantKind, storageCapacity, plantSiteOk, plantSites, plantOutput, dieselPrice, powerPrice, powerProfile,
   loadIndices, energyEvents, outageNow, companyDieselPrice, companyPowerPrice, hourStart,
 } from "../services/energy.service";
 import { carbonBracket, carbonRate, carbonTax } from "../services/carbon.service";
@@ -101,7 +101,7 @@ export async function energyOverview(req: AuthRequest, res: Response) {
 
   const tax = carbonTax(company.co2Week, valuation);
   const o = outageNow(ev, now.getTime());
-  const batteryCap = plants.filter((p) => p.kind === "BATTERIE").length * s.plants.BATTERIE.kwh;
+  const batteryCap = storageCapacity(plants);
 
   return res.json({
     trial: { active: inTrial(now.getTime()), until: s.trialUntil },
@@ -212,7 +212,7 @@ export async function buildPlant(req: AuthRequest, res: Response) {
   const station = String(req.body?.station ?? "");
   if (!PLANT_KINDS.includes(kind)) return err(res, 400, "Centrale inconnue");
   if (!plantSiteOk(kind, station)) {
-    return err(res, 400, kind === "BARRAGE" ? "Un barrage se construit en montagne" : kind === "SOLAIRE" ? "Un parc solaire se construit dans le Sud" : "Des éoliennes se construisent sur la côte ou dans le Nord");
+    return err(res, 400, kind === "BARRAGE" ? "Un barrage se construit en montagne" : kind === "STEP" ? "Une station de pompage se construit en montagne, près d'un lac de barrage" : kind === "SOLAIRE" ? "Un parc solaire se construit dans le Sud" : "Des éoliennes se construisent sur la côte ou dans le Nord");
   }
   if (!(await servedStations(company.id)).has(station)) return err(res, 409, `Desservez d'abord ${station}`);
   const count = await prisma.powerPlant.count({ where: { companyId: company.id } });
@@ -237,7 +237,7 @@ export async function sellPlant(req: AuthRequest, res: Response) {
     prisma.transaction.create({ data: { companyId: company.id, type: "CENTRALE", amount: back, description: `Revente : ${PLANT_LABELS[p.kind as PlantKind]} à ${p.station}` } }),
   ]);
   // la batterie retirée perd ce qu'elle stockait au-delà de la nouvelle capacité
-  const cap = (await prisma.powerPlant.count({ where: { companyId: company.id, kind: "BATTERIE" } })) * economy().plants.BATTERIE.kwh;
+  const cap = storageCapacity(await prisma.powerPlant.findMany({ where: { companyId: company.id }, select: { kind: true } }));
   await prisma.company.updateMany({ where: { id: company.id, batteryKwh: { gt: cap } }, data: { batteryKwh: cap } });
   return res.json({ ok: true, refund: back });
 }
@@ -349,8 +349,12 @@ export async function buyFromPlayer(req: AuthRequest, res: Response) {
   const part = f.part as Organ;
   const stock = readStock(company.partsStock);
   const limit = await stockLimit(company.id);
-  const qty = Math.max(1, Math.min(f.stored, limit - (stock[part] ?? 0), Math.floor(Number(req.body?.qty ?? 1)) || 1));
-  if (qty <= 0 || f.stored <= 0) return err(res, 409, "Plus rien à vendre, ou votre magasin est plein");
+  /* 2.4.2 : le « au moins 1 » passait AVANT la place restante : magasin plein,
+     l'achat rangeait quand même une pièce de plus (12 caisses pour 6 places). */
+  const room = limit - (stock[part] ?? 0);
+  if (room <= 0) return err(res, 409, `Votre magasin est plein : ${limit} ${PARTS[part].plural} au plus`);
+  if (f.stored <= 0) return err(res, 409, "Plus rien à vendre");
+  const qty = Math.min(f.stored, room, Math.max(1, Math.floor(Number(req.body?.qty ?? 1)) || 1));
   const cost = qty * f.salePrice;
   const next = { ...stock, [part]: (stock[part] ?? 0) + qty };
   const done = await prisma.$transaction(async (tx) => {

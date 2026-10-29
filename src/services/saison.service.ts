@@ -40,7 +40,7 @@ export const SCORING = [
 ];
 
 /* Ce que gagne la première moitié d'un groupe, selon la saison du calendrier. */
-const SEASON_THEMES: Record<string, { name: string; title: string; livery: string; liveryName: string }> = {
+export const SEASON_THEMES: Record<string, { name: string; title: string; livery: string; liveryName: string }> = {
   automne: { name: "Saison d'automne", title: "Pionnier d'automne", livery: "#b4532a", liveryName: "Feuilles d'automne" },
   hiver: { name: "Saison d'hiver", title: "Pionnier de l'hiver", livery: "#9cc7e0", liveryName: "Givre" },
   printemps: { name: "Saison de printemps", title: "Pionnier du printemps", livery: "#6fae6b", liveryName: "Prairie" },

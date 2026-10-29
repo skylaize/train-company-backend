@@ -92,6 +92,11 @@ export const ECONOMY_DEFAULTS = {
     EOLIEN: { cost: 12000, kwh: 800 },
     BARRAGE: { cost: 60000, kwh: 1500 },
     BATTERIE: { cost: 10000, kwh: 3000 }, // capacité de stockage
+    // 2.4.2 : deux autres stockages. Le grand bloc coûte un peu plus cher au kWh
+    // mais n'occupe qu'une place sur huit ; la STEP est la moins chère au kWh,
+    // mais seulement près d'un barrage.
+    BATTERIE_XL: { cost: 34000, kwh: 9000 },
+    STEP: { cost: 55000, kwh: 20000 },
   } as Record<string, { cost: number; kwh: number }>,
   maxPlants: 8,
 };

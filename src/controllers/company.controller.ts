@@ -11,6 +11,7 @@ import { unlockedFor } from "../services/shop.service";
 import { touchActivity } from "../services/report.service";
 import { staffEffectsFor, repairCostPerPoint } from "../services/staff.service";
 import { buildLeaderRows } from "../services/leaderboard.service";
+import { liveryNames, BASE_LIVERIES } from "../services/livery-names.service";
 import { licenceView, LICENCE_COST } from "../services/international.service";
 
 /* 1.6 : les explications « Nouveau dans cette version » annoncent un changement
@@ -271,6 +272,8 @@ export async function getMyCompany(req: AuthRequest, res: Response) {
       emblems: [...unlocked.emblems],
       titles: [...unlocked.titles],
       liveries: [...unlocked.liveries],
+      // 2.4.2 : le nom de chaque livrée (palette de base, Premium et débloquées)
+      liveryNames: liveryNames([...unlocked.liveries, ...BASE_LIVERIES]),
       // 2.1 : l'atelier de prestige
       trainPlates: [...unlocked.trainPlates],
       sounds: [...unlocked.sounds],

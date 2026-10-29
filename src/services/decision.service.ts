@@ -61,7 +61,7 @@ const fmt = (n: number) => n.toLocaleString("fr-FR").replace(/ | /g, " ");
 interface Ctx {
   company: { id: string; balance: number; maxTrains: number };
   trains: { id: string; name: string; model: string; status: string; wear: number; lineId: string | null; line: { departureStation: string; arrivalStation: string } | null }[];
-  lines: { id: string; departureStation: string; arrivalStation: string }[];
+  lines: { id: string; departureStation: string; arrivalStation: string; stops?: string[] }[];
   reputation: number;
   rivalPairs: { a: string; b: string; rival: string }[];
   now: Date;
@@ -88,6 +88,8 @@ type Maker = (c: Ctx) => Draft | null;
 
 const running = (c: Ctx) => c.trains.filter((t) => t.lineId && t.line);
 const myStations = (c: Ctx) => [...new Set(c.lines.flatMap((l) => [l.departureStation, l.arrivalStation]))];
+// 2.4.2 : pour le maire, une gare desservie par un arrêt intermédiaire l'est déjà
+const servedStations = (c: Ctx) => new Set(c.lines.flatMap((l) => [l.departureStation, ...(l.stops ?? []), l.arrivalStation]));
 
 const MAKERS: Record<string, Maker> = {
   FISSURE: (c) => {
@@ -153,7 +155,7 @@ const MAKERS: Record<string, Maker> = {
   },
 
   MAIRE: (c) => {
-    const served = new Set(myStations(c));
+    const served = servedStations(c);
     const candidates = STATIONS.filter((s) => !served.has(s) && !(s in INTERNATIONAL_STATIONS) && stationSize(s) >= 3);
     if (candidates.length === 0 || c.lines.length === 0) return null;
     const g = c.pick(candidates);
@@ -984,7 +986,8 @@ export async function runDecisions(push: Push, now = new Date(), random = Math.r
   })) as { id: string; companyId: string; goalStation: string; goalReward: number }[];
   for (const g of goals) {
     const served = await prisma.train.count({
-      where: { companyId: g.companyId, line: { OR: [{ departureStation: g.goalStation }, { arrivalStation: g.goalStation }] } },
+      // 2.4.2 : un arrêt intermédiaire tient aussi la promesse
+      where: { companyId: g.companyId, line: { OR: [{ departureStation: g.goalStation }, { arrivalStation: g.goalStation }, { stops: { has: g.goalStation } }] } },
     });
     if (served === 0) continue;
     const done = await prisma.decision.updateMany({ where: { id: g.id, goalDone: false }, data: { goalDone: true } });
@@ -1041,7 +1044,7 @@ export async function runDecisions(push: Push, now = new Date(), random = Math.r
 export async function draftFor(company: { id: string; balance: number; maxTrains: number }, now = new Date(), random = Math.random): Promise<Draft | null> {
   const [trains, lines, recent, reputation, shared, revenuePerHour, staff, gradeId, lastPub] = await Promise.all([
     prisma.train.findMany({ where: { companyId: company.id }, include: { line: true } }),
-    prisma.line.findMany({ where: { companyId: company.id }, select: { id: true, departureStation: true, arrivalStation: true } }),
+    prisma.line.findMany({ where: { companyId: company.id }, select: { id: true, departureStation: true, arrivalStation: true, stops: true } }),
     prisma.decision.findMany({ where: { companyId: company.id }, orderBy: { createdAt: "desc" }, take: 2, select: { kind: true } }),
     computeReputation(company.id),
     rivalPairsFor(company.id),

@@ -43,7 +43,7 @@ interface PassTheme {
   final: { color: string; name: string; title: string };
 }
 
-const PASS_THEMES: Record<string, PassTheme> = {
+export const PASS_THEMES: Record<string, PassTheme> = {
   automne: {
     liveries: [
       { color: "#8c3b1f", name: "Rouille" },

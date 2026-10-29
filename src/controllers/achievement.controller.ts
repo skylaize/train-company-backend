@@ -6,7 +6,7 @@ import { stationSize, STATION_SIZE } from "../services/station.service";
 import { computeCareerStatus, RANK_DEFINITIONS, LEGEND_RANK } from "../services/career.service";
 import { PEAK_HOURS, OFF_PEAK_HOURS } from "../services/peak.service";
 import { parisHour } from "../services/time.service";
-import { MOUNTAIN_STATIONS } from "../services/dlc.service";
+import { MOUNTAIN_STATIONS, CORSICA_STATIONS } from "../services/dlc.service";
 import { isBuilder } from "../services/world.service";
 import { SEASONAL_EVENTS, latestEdition } from "../services/season.service";
 import { stationCounts, withTrainCount } from "../services/hub.service";
@@ -166,15 +166,17 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
   const mechanicSeats = mechanics.reduce((sum, m) => sum + mechanicCoverage(m.level), 0);
   const trainCount = company._count.trains;
 
-  const lineList = linesForStations as Array<{ departureStation: string; arrivalStation: string; rivals: number; leading: boolean }>;
+  const lineList = linesForStations as Array<{ departureStation: string; arrivalStation: string; stops?: string[]; rivals: number; leading: boolean }>;
+  // 2.4.2 : une gare « desservie » l'est aussi par un arrêt intermédiaire, pas seulement en terminus
+  const routeOf = (l: { departureStation: string; arrivalStation: string; stops?: string[] }) => [l.departureStation, ...(l.stops ?? []), l.arrivalStation];
   const sharedLines = lineList.filter((l) => l.rivals >= 1);
   const parisLines = lineList.filter((l) => l.departureStation === "Paris" || l.arrivalStation === "Paris").length;
   const servedBig = new Set(
-    lineList.flatMap((l) => [l.departureStation, l.arrivalStation]).filter((s) => stationSize(s) >= 4)
+    lineList.flatMap(routeOf).filter((s) => stationSize(s) >= 4)
   ).size;
   const bigTotal = Object.values(STATION_SIZE).filter((n) => n >= 4).length;
   const smallLine = lineList.some((l) => stationSize(l.departureStation) <= 2 && stationSize(l.arrivalStation) <= 2);
-  const servesStation = (name: string) => lineList.some((l) => l.departureStation === name || l.arrivalStation === name);
+  const servesStation = (name: string) => lineList.some((l) => routeOf(l).includes(name));
   const hasLine = (a: string, b: string) =>
     lineList.some((l) => (l.departureStation === a && l.arrivalStation === b) || (l.departureStation === b && l.arrivalStation === a));
 
@@ -205,6 +207,34 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     bestSouls(company.id).catch(() => 0),
   ])) as [{ highSpeedAt: Date | null }[], number, number];
   const hslOpened22 = hslLines22.filter((l) => l.highSpeedAt && l.highSpeedAt.getTime() <= Date.now()).length;
+  /* 2.4.2 : les succès qui manquaient pour la Corse, les objectifs et régions
+     d'alliance, le conteneur scellé, la rame publicitaire (2.3), l'énergie, les
+     pièces et les voies (2.4), la casse et le TGV sur ligne classique (2.4.1).
+     Tous lus en une passe, en petites requêtes indexées par compagnie. */
+  const member24 = (await prisma.allianceMember.findUnique({ where: { companyId: company.id }, select: { allianceId: true } }).catch(() => null)) as { allianceId: string } | null;
+  const [corsicaLines24, corsicaRailcars24, sealed24, ads24, plants24, energySold24, factories24, partsSold24, funded24, concessions24, scrapped24, tgvClassic24, lineElec24, regions24, allianceWeeks24] = (await Promise.all([
+    prisma.line.count({ where: { companyId: company.id, OR: CORSICA_STATIONS.flatMap((st: string) => [{ departureStation: st }, { arrivalStation: st }, { stops: { has: st } }]) } }),
+    prisma.train.count({ where: { companyId: company.id, model: "AUTORAIL_CORSE", lineId: { not: null } } }),
+    prisma.contract.count({ where: { companyId: company.id, sealed: true, status: "LIVREE" } }),
+    prisma.transaction.count({ where: { companyId: company.id, type: "PUBLICITE", amount: { gt: 0 } } }),
+    prisma.powerPlant.findMany({ where: { companyId: company.id }, select: { kind: true } }),
+    prisma.transaction.count({ where: { companyId: company.id, type: "ENERGIE_VENTE" } }),
+    prisma.partFactory.count({ where: { companyId: company.id } }),
+    prisma.transaction.count({ where: { companyId: company.id, type: "USINE", amount: { gt: 0 }, description: { startsWith: "Vente de" } } }),
+    prisma.trackFunding.count({ where: { companyId: company.id } }),
+    prisma.concession.count({ where: { companyId: company.id } }),
+    prisma.transaction.count({ where: { companyId: company.id, type: "VENTE_TRAIN", description: { startsWith: "Mise à la casse" } } }),
+    prisma.train.count({ where: { companyId: company.id, model: TGV_MODEL, status: "EN_ROUTE", line: { electrified: true, highSpeedAt: null } } }),
+    prisma.line.findMany({ where: { companyId: company.id }, select: { electrified: true } }),
+    member24 ? prisma.regionControl.count({ where: { allianceId: member24.allianceId } }) : Promise.resolve(0),
+    member24 ? prisma.allianceWeek.findMany({ where: { allianceId: member24.allianceId }, select: { objectives: true, done: true } }) : Promise.resolve([]),
+  ])) as [number, number, number, number, { kind: string }[], number, number, number, number, number, number, number, { electrified: boolean }[], number, { objectives: unknown; done: unknown }[]];
+  const plantKinds24 = new Set(plants24.map((p) => p.kind));
+  const perfectWeek24 = allianceWeeks24.some((w) => {
+    const n = Array.isArray(w.objectives) ? w.objectives.length : 0;
+    return n > 0 && Object.keys((w.done as Record<string, unknown>) ?? {}).length >= n;
+  });
+  const c24 = company as unknown as { dieselTanks?: number; dieselFixedUntil?: Date | null; powerFixedUntil?: Date | null };
   // 1.7 : itinéraires, composition, infrastructures, finances
   const [lines17, trains17, stationsOwned, electrified, workshopsOpen, loansRepaid, dividends] = (await Promise.all([
     prisma.line.findMany({ where: { companyId: company.id }, select: { stops: true, priceRatio: true } }),
@@ -755,15 +785,13 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
       id: "sous-la-manche",
       name: "Sous la Manche",
       description: "Exploiter une ligne vers Londres",
-      liveMet: (linesForStations as { departureStation: string; arrivalStation: string }[]).some((l) => l.departureStation === "Londres" || l.arrivalStation === "Londres"),
+      liveMet: servesStation("Londres"),
     },
     {
       id: "tour-d-europe",
       name: "Tour d'Europe",
       description: "Desservir les six gares étrangères",
-      liveMet: FIRST_INTERNATIONAL.every((st) =>
-        (linesForStations as { departureStation: string; arrivalStation: string }[]).some((l) => l.departureStation === st || l.arrivalStation === st)
-      ),
+      liveMet: FIRST_INTERNATIONAL.every((st) => servesStation(st)),
     },
     {
       id: "train-de-nuit",
@@ -856,6 +884,28 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     { id: "trois-tgv", name: "Trois TGV", description: "Faire rouler trois rames TGV en même temps", liveMet: tgvRunning22 >= 3 },
     { id: "train-fantome", name: "Train fantôme", description: "Récolter 13 âmes pendant Halloween", liveMet: souls22 >= 13 },
     { id: "exorciste", name: "Exorciste", description: "Récolter 300 âmes pendant une même semaine d'Halloween", liveMet: souls22 >= 300 },
+    // ---- 2.3 : la Corse, les alliances, le conteneur scellé, la publicité ----
+    { id: "ile-de-beaute", name: "Île de Beauté", description: "Ouvrir une ligne en Corse", liveMet: corsicaLines24 >= 1 },
+    { id: "trinichellu", name: "U Trinichellu", description: "Faire rouler un autorail corse", liveMet: corsicaRailcars24 >= 1 },
+    { id: "boite-noire", name: "Boîte noire", description: "Livrer un conteneur scellé", liveMet: sealed24 >= 1 },
+    { id: "rame-publicitaire", name: "Aux couleurs de la marque", description: "Louer une rame à une marque pour une semaine", liveMet: ads24 >= 1 },
+    { id: "maitre-des-lieux", name: "Maîtres des lieux", description: "Votre alliance remporte une région", liveMet: regions24 >= 1 },
+    { id: "semaine-parfaite", name: "Semaine parfaite", description: "Votre alliance remplit ses trois objectifs de la semaine", liveMet: perfectWeek24 },
+    // ---- 2.4 : l'énergie, les pièces, les voies ----
+    { id: "premier-kilowatt", name: "Premier kilowatt", description: "Construire une centrale", liveMet: plants24.some((p) => !["BATTERIE", "BATTERIE_XL", "STEP"].includes(p.kind)) },
+    { id: "bouquet-energetique", name: "Bouquet énergétique", description: "Posséder un parc solaire, des éoliennes et un barrage", liveMet: ["SOLAIRE", "EOLIEN", "BARRAGE"].every((k) => plantKinds24.has(k)) },
+    { id: "producteur", name: "Producteur", description: "Revendre son surplus de courant", liveMet: energySold24 >= 1 },
+    { id: "reserve-strategique", name: "Réserve stratégique", description: "Installer une cuve de gazole au dépôt", liveMet: (c24.dieselTanks ?? 0) >= 1 },
+    { id: "prix-bloque", name: "Prix bloqué", description: "Signer un contrat d'énergie à prix fixe", liveMet: Boolean(c24.dieselFixedUntil || c24.powerFixedUntil) },
+    { id: "tout-electrique", name: "Tout électrique", description: "Exploiter au moins trois lignes, toutes électrifiées", liveMet: lineElec24.length >= 3 && lineElec24.every((l) => l.electrified) },
+    { id: "usine-du-rail", name: "Usine du rail", description: "Construire une usine de pièces détachées", liveMet: factories24 >= 1 },
+    { id: "fournisseur", name: "Fournisseur", description: "Vendre des pièces à une autre compagnie", liveMet: partsSold24 >= 1 },
+    { id: "cantonnier", name: "Cantonnier", description: "Financer la rénovation d'une voie", liveMet: funded24 >= 1 },
+    { id: "concessionnaire", name: "Concessionnaire", description: "Obtenir la concession d'une liaison", liveMet: concessions24 >= 1 },
+    // ---- 2.4.1 et 2.4.2 ----
+    { id: "a-la-casse", name: "Place aux jeunes", description: "Mettre une vieille rame à la casse", liveMet: scrapped24 >= 1 },
+    { id: "tgv-classique", name: "Hors des sentiers battus", description: "Faire rouler une rame TGV sur une ligne classique électrifiée", liveMet: tgvClassic24 >= 1 },
+    { id: "lac-de-montagne", name: "Lac de montagne", description: "Construire une station de pompage", liveMet: plantKinds24.has("STEP") },
   ];
 
   /* 1.6 : « Premiers pas » récompense la liste de départ au complet. Chaque étape

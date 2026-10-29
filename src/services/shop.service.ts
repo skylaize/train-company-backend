@@ -374,7 +374,7 @@ const ALL_ITEMS: ShopItem[] = [
 
 /* 2.0 : des objets à l'unité, pour que la boutique du jour ne se répète pas.
    Une livrée ou un titre seul, à 0,99 €. */
-const SINGLE_LIVERIES: [string, string, string][] = [
+export const SINGLE_LIVERIES: [string, string, string][] = [
   ["livree-prusse", "Bleu de Prusse", "#1f3b5a"],
   ["livree-wagon", "Vert wagon", "#2e5a3c"],
   ["livree-signal", "Rouge signal", "#c23b22"],

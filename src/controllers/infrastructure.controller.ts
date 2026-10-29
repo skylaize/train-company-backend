@@ -342,6 +342,21 @@ export async function buyStation(req: AuthRequest, res: Response) {
     | null;
 
   if (!current) {
+    /* 2.4.2 : revendre sa gare juste avant la fin de sa protection puis la
+       racheter aussitôt remettait les 72 heures à zéro : la gare ne pouvait
+       plus jamais être rachetée. Une gare revendue ne se rachète pas avant
+       72 heures par la compagnie qui l'a revendue ; les autres, si. */
+    const resold = await prisma.transaction.findFirst({
+      where: { companyId: company.id, type: "GARE", createdAt: { gte: new Date(Date.now() - PROTECTION_MS) }, description: `Revente de la gare de ${station}` },
+      orderBy: { createdAt: "desc" },
+      select: { createdAt: true },
+    });
+    if (resold) {
+      const until = new Date(resold.createdAt.getTime() + PROTECTION_MS);
+      return res.status(409).json({
+        error: `Vous avez revendu cette gare : vous pourrez la racheter à partir du ${until.toLocaleString("fr-FR", { timeZone: "Europe/Paris", dateStyle: "short", timeStyle: "short" })}`,
+      });
+    }
     const price = stationPrice(station);
     if (!(await debit(company.id, price))) return res.status(409).json({ error: `Trésorerie insuffisante (${price.toLocaleString("fr-FR")} pi.)` });
     try {

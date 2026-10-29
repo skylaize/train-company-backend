@@ -24,9 +24,25 @@ import type { StationWeather } from "./realweather.service";
      prélevé ni versé.
    ============================================================ */
 
-export type PlantKind = "SOLAIRE" | "EOLIEN" | "BARRAGE" | "BATTERIE";
-export const PLANT_KINDS: PlantKind[] = ["SOLAIRE", "EOLIEN", "BARRAGE", "BATTERIE"];
-export const PLANT_LABELS: Record<PlantKind, string> = { SOLAIRE: "Parc solaire", EOLIEN: "Éoliennes", BARRAGE: "Barrage", BATTERIE: "Batterie" };
+export type PlantKind = "SOLAIRE" | "EOLIEN" | "BARRAGE" | "BATTERIE" | "BATTERIE_XL" | "STEP";
+export const PLANT_KINDS: PlantKind[] = ["SOLAIRE", "EOLIEN", "BARRAGE", "BATTERIE", "BATTERIE_XL", "STEP"];
+export const PLANT_LABELS: Record<PlantKind, string> = {
+  SOLAIRE: "Parc solaire",
+  EOLIEN: "Éoliennes",
+  BARRAGE: "Barrage",
+  BATTERIE: "Batterie",
+  BATTERIE_XL: "Grande batterie",
+  STEP: "Station de pompage",
+};
+
+/* 2.4.2 : plusieurs stockages. Tous ne font que stocker (aucune production) ;
+   leurs capacités s'additionnent dans la même réserve de la compagnie. */
+export const STORAGE_KINDS: string[] = ["BATTERIE", "BATTERIE_XL", "STEP"];
+export const isStorage = (kind: string) => STORAGE_KINDS.includes(kind);
+export function storageCapacity(plants: { kind: string }[]) {
+  const s = economy();
+  return plants.reduce((n, p) => n + (isStorage(p.kind) ? s.plants[p.kind]?.kwh ?? 0 : 0), 0);
+}
 
 /* Où chaque centrale peut se construire. */
 const SUN_REGIONS = ["occitanie", "paca", "nouvelle-aquitaine", "corse"];
@@ -34,15 +50,16 @@ const WIND_REGIONS = ["hdf", "normandie", "bretagne", "pdl", "nouvelle-aquitaine
 const DAM_STATIONS = ["Grenoble", "Chamonix", "Bourg-Saint-Maurice", "Briançon", "Font-Romeu", "Pau", "Corte"];
 
 export function plantSiteOk(kind: PlantKind, station: string) {
-  if (kind === "BATTERIE") return true;
-  if (kind === "BARRAGE") return DAM_STATIONS.includes(station);
+  if (kind === "BATTERIE" || kind === "BATTERIE_XL") return true;
+  // la STEP pompe l'eau d'un lac de montagne : près d'un barrage seulement
+  if (kind === "BARRAGE" || kind === "STEP") return DAM_STATIONS.includes(station);
   const region = REGION_OF[station];
   return kind === "SOLAIRE" ? SUN_REGIONS.includes(region) : WIND_REGIONS.includes(region);
 }
 
 export function plantSites(kind: PlantKind) {
-  if (kind === "BARRAGE") return DAM_STATIONS;
-  if (kind === "BATTERIE") return null; // partout
+  if (kind === "BARRAGE" || kind === "STEP") return DAM_STATIONS;
+  if (kind === "BATTERIE" || kind === "BATTERIE_XL") return null; // partout
   const regions = kind === "SOLAIRE" ? SUN_REGIONS : WIND_REGIONS;
   return REGIONS.filter((r) => regions.includes(r.id)).flatMap((r) => r.stations);
 }
@@ -281,7 +298,7 @@ export async function runEnergyMarkets(weather: Map<string, StationWeather>, now
 
 export function plantOutput(kind: PlantKind, w: StationWeather | undefined) {
   const cap = economy().plants[kind]?.kwh ?? 0;
-  if (kind === "BATTERIE") return 0;
+  if (isStorage(kind)) return 0;
   if (kind === "BARRAGE") return cap * (w?.kind === "CANICULE" ? 0.8 : 1);
   if (kind === "SOLAIRE") {
     if (!w || !w.isDay) return 0;
@@ -448,7 +465,7 @@ export async function settleEnergy(weather: Map<string, StationWeather>, now = n
     for (const p of plants) {
       if (settledIds.has(p.companyId)) continue;
       const cur = production.get(p.companyId) ?? { produced: 0, batteryCap: 0 };
-      if (p.kind === "BATTERIE") cur.batteryCap += s.plants.BATTERIE.kwh;
+      if (isStorage(p.kind)) cur.batteryCap += s.plants[p.kind]?.kwh ?? 0;
       else if (producing) cur.produced += plantOutput(p.kind, weather.get(p.station));
       production.set(p.companyId, cur);
     }
@@ -518,7 +535,7 @@ export async function settleEnergy(weather: Map<string, StationWeather>, now = n
     // production totale des centrales, pour la page Énergie
     if (producing) {
       for (const p of plants) {
-        if (p.kind === "BATTERIE") continue;
+        if (isStorage(p.kind)) continue;
         const out = plantOutput(p.kind, weather.get(p.station));
         if (out > 0) await prisma.powerPlant.update({ where: { id: p.id }, data: { produced: { increment: out } } }).catch(() => undefined);
       }
