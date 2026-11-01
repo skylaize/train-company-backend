@@ -78,7 +78,7 @@ export async function getNetworkMap(req: AuthRequest, res: Response) {
       where: { companyId: company.id },
       select: {
         id: true, departureStation: true, arrivalStation: true, stops: true, priceRatio: true, autoPrice: true, _count: { select: { trains: true } },
-        trains: { select: { model: true, cars: true, status: true, lastPassengers: true, lastSeats: true } },
+        trains: { select: { model: true, cars: true, status: true, workshopUntil: true, lastPassengers: true, lastSeats: true } },
       },
     }),
   ]);

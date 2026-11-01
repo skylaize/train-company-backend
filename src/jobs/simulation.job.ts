@@ -1015,7 +1015,9 @@ export async function runFreightContracts(weather: Map<string, StationWeather> =
     await prisma.$transaction(updates);
 
     for (const o of opened) {
-      await prisma.incident.create({ data: { trainId: train.id, message: `Conteneur scellé ouvert à ${o.station} : ${o.text}` } }).catch(() => undefined);
+      /* 2.5 : plus d'« incident » pour un conteneur ouvert. Il s'affichait en rouge
+         (même un jackpot) et comptait contre la réputation comme un retard. La
+         notification reste, et la livraison le raconte dans le fret. */
       await sendToCompany(companyId, { title: `Conteneur ouvert à ${o.station}`, body: o.text, url: "/dashboard", tag: "fret" }).catch(() => undefined);
     }
     for (const d of delivered) {

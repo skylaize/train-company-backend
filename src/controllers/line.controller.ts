@@ -114,7 +114,7 @@ export async function updateLine(req: AuthRequest, res: Response) {
       // le prix conseillé s'applique tout de suite, puis chaque minute
       const full = (await prisma.line.findUnique({
         where: { id: lineId },
-        select: { id: true, departureStation: true, arrivalStation: true, stops: true, priceRatio: true, trains: { select: { model: true, cars: true, status: true } } },
+        select: { id: true, departureStation: true, arrivalStation: true, stops: true, priceRatio: true, trains: { select: { model: true, cars: true, status: true, workshopUntil: true } } },
       })) as RidershipLine;
       const [live, competition] = await Promise.all([activeStationEvents(), competitionMap()]);
       priceNow = lineRidership(full, company.id, [...live, ...seasonalStationEvents()], competition).ridership.idealPrice;

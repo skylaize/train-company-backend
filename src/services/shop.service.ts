@@ -10,6 +10,8 @@ import { prisma } from "../prisma";
 import { parisDate, parisMidnight } from "./time.service";
 import { DLCS, ownedDlcs, CORSICA_LIVERY, CORSICA_EMBLEM } from "./dlc.service";
 import { passUnlocks, passSeasonNumber, PASS_PRICE_CENTS } from "./pass.service";
+import { campaignTitles } from "./campaign.service";
+import { mentorTitles } from "./mentor.service";
 import { computeCareerStatus, careerTitles } from "./career.service";
 
 /* ============================================================
@@ -135,6 +137,25 @@ const ALL_ITEMS: ShopItem[] = [
     description: "Quatre emblèmes tirés du monde ferroviaire : le rail, la boussole, l'horloge de gare et le viaduc.",
     priceCents: 299,
     emblems: ["rail", "boussole", "horloge", "viaduc"],
+  },
+  // ---- 2.5 : avec les campagnes régionales ----
+  {
+    id: "emblemes-regions",
+    kind: "EMBLEMES",
+    name: "Emblèmes des régions",
+    description: "Quatre emblèmes pour fêter vos campagnes régionales : l'hermine de Bretagne, la cigogne d'Alsace, la lavande de Provence et le volcan d'Auvergne.",
+    priceCents: 299,
+    emblems: ["hermine", "cigogne", "lavande", "volcan"],
+    isNew: true,
+  },
+  {
+    id: "livrees-nuit",
+    kind: "LIVREES",
+    name: "Livrées de nuit",
+    description: "Quatre couleurs profondes pour les trains qui roulent quand tout dort : bleu orage, velours, sapinière et graphite.",
+    priceCents: 199,
+    liveries: ["#26345e", "#4a1626", "#1d3b30", "#2c3038"],
+    isNew: true,
   },
   {
     id: "titres-legende",
@@ -389,6 +410,11 @@ export const SINGLE_LIVERIES: [string, string, string][] = [
   ["livree-rose-quai", "Rose quai", "#d88aa5"],
   ["livree-acier", "Acier", "#4a5d6b"],
   ["livree-ocre", "Ocre", "#c58b2a"],
+  // 2.5
+  ["livree-jade", "Vert jade", "#3aa17e"],
+  ["livree-moutarde", "Moutarde", "#c9a227"],
+  ["livree-glacier", "Bleu glacier", "#8fb8d8"],
+  ["livree-sienne", "Terre de Sienne", "#a0522d"],
 ];
 const SINGLE_TITLES: [string, string][] = [
   ["titre-aiguilleur-nuit", "Aiguilleur de nuit"],
@@ -399,6 +425,11 @@ const SINGLE_TITLES: [string, string][] = [
   ["titre-ami-voyageurs", "Ami des voyageurs"],
   ["titre-correspondances", "Faiseur de correspondances"],
   ["titre-catenaires", "Prince des caténaires"],
+  // 2.5
+  ["titre-seigneur-quais", "Seigneur des quais"],
+  ["titre-maitre-horaires", "Maître des horaires"],
+  ["titre-cheminot-coeur", "Cheminot de cœur"],
+  ["titre-dernier-train", "Gardien du dernier train"],
 ];
 const SINGLES: ShopItem[] = [
   ...SINGLE_LIVERIES.map(([id, name, color]) => ({
@@ -475,11 +506,16 @@ const FEATURED_ORDER = (() => {
 })();
 const SINGLE_IDS = new Set(SINGLES.map((i) => i.id));
 
+/* 2.5 : la première semaine, les deux nouveautés tiennent la une (sinon on ne
+   les verrait qu'au gré du roulement, parfois dans plusieurs semaines) */
+const LAUNCH_FEATURED = { until: "2026-11-09", ids: ["emblemes-regions", "livrees-nuit"] };
+
 export function dailyRotation(now = new Date()) {
   const d = dayKey(now);
   const index = Math.floor(Date.UTC(d.year, d.month - 1, d.day) / 86_400_000);
   const n = FEATURED_ORDER.length;
-  const featured = [FEATURED_ORDER[(index * FEATURED_COUNT) % n], FEATURED_ORDER[(index * FEATURED_COUNT + 1) % n]];
+  const launch = d.key < LAUNCH_FEATURED.until ? LAUNCH_FEATURED.ids.map((id) => ROTATING.find((i) => i.id === id)).filter((i): i is ShopItem => Boolean(i)) : [];
+  const featured = launch.length === FEATURED_COUNT ? launch : [FEATURED_ORDER[(index * FEATURED_COUNT) % n], FEATURED_ORDER[(index * FEATURED_COUNT + 1) % n]];
   const rnd = seeded(`reseau-${d.key}`);
   const taken = new Set(featured);
   const singles = pick(ROTATING.filter((i) => SINGLE_IDS.has(i.id)), 4, rnd, taken);
@@ -662,6 +698,9 @@ export async function unlockedFor(companyId: string) {
     boost.emblems.forEach((e) => emblems.add(e));
     boost.titles.forEach((t) => titles.add(t));
   }
+  // 2.5 : campagnes régionales terminées et compagnonnage
+  (await campaignTitles(companyId)).forEach((t) => titles.add(t));
+  (await mentorTitles(companyId)).forEach((t) => titles.add(t));
   // 1.4 : chaque grade à partir du Directeur régional donne son nom en titre
   careerTitles(career.currentRank.id).forEach((t) => titles.add(t));
 

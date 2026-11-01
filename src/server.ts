@@ -42,6 +42,8 @@ import { discordRouter } from "./routes/discord.routes";
 import { pioneerRouter } from "./routes/pioneer.routes"; // 2.1.2
 import { economyRouter } from "./routes/economy.routes"; // 2.4
 import { halloweenRouter } from "./routes/halloween.routes"; // 2.2
+import { v25Router } from "./routes/v25.routes"; // 2.5
+import { startMentorJob } from "./services/mentor.service";
 import { adminRouter } from "./routes/admin.routes"; // 2.2
 import { warmBanList } from "./services/admin.service";
 import { discordInteractions, registerDiscordCommands } from "./controllers/discord.controller";
@@ -125,6 +127,7 @@ app.use("/api", adsRouter);
 app.use("/api", pioneerRouter);
 app.use("/api", economyRouter);
 app.use("/api", halloweenRouter);
+app.use("/api", v25Router);
 
 /* 2.1.2 : toute erreur de route finit ici, avec une vraie réponse 500 et
    une ligne lisible dans les journaux de Coolify. */
@@ -141,6 +144,7 @@ const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`Serveur démarré sur http://localhost:${PORT}`);
   startSimulationJob();
+  startMentorJob(); // 2.5 : primes et diplômes du compagnonnage
   void warmBanList();
   void registerDiscordCommands();
   // 2.1 : bienvenue aux nouveaux membres et bot « en ligne »

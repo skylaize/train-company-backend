@@ -47,6 +47,9 @@ export async function deleteAccount(req: AuthRequest, res: Response) {
       prisma.contract.deleteMany({ where: { OR: [{ companyId: company.id }, { trainId: { in: trainIds } }] } }),
       prisma.transaction.deleteMany({ where: { companyId: company.id } }),
       prisma.dailyChallenge.deleteMany({ where: { companyId: company.id } }),
+      // 2.5 : campagnes et compagnonnage (sans clé étrangère)
+      prisma.regionCampaign.deleteMany({ where: { companyId: company.id } }),
+      prisma.mentorship.updateMany({ where: { endedAt: null, OR: [{ mentorId: company.id }, { apprenticeId: company.id }] }, data: { endedAt: new Date(), endReason: "APPRENTI" } }),
       prisma.staff.deleteMany({ where: { companyId: company.id } }),
       prisma.achievementUnlock.deleteMany({ where: { companyId: company.id } }),
       prisma.adWatch.deleteMany({ where: { companyId: company.id } }),

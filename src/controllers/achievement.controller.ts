@@ -13,6 +13,7 @@ import { stationCounts, withTrainCount } from "../services/hub.service";
 import { INTERNATIONAL_STATIONS, FIRST_INTERNATIONAL } from "../services/international.service";
 import { TGV_MODEL } from "../services/highspeed.service";
 import { bestSouls } from "../services/halloween.service";
+import { buildLeaderRows, rankRows } from "../services/leaderboard.service";
 
 export async function listMyAchievements(req: AuthRequest, res: Response) {
   const company = await prisma.company.findUnique({
@@ -58,7 +59,9 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     prisma.transaction.count({ where: { companyId: company.id, type: "REPARATION" } }),
     prisma.incident.count({ where: { train: { companyId: company.id } } }),
     prisma.train.count({ where: { companyId: company.id, status: "EN_ROUTE", lineId: { not: null } } }),
-    prisma.company.findMany({ orderBy: { balance: "desc" }, select: { id: true } }),
+    /* 2.5 : le rang du classement affiché (la valeur : trésorerie, matériel, dépôt,
+       gares…), pas la seule trésorerie : un 3e du classement n'avait pas « Sur le podium » */
+    buildLeaderRows().then((rows) => rankRows(rows, "valeur").map((r) => ({ id: r.id }))),
     prisma.staff.count({ where: { companyId: company.id } }),
     prisma.contract.count({ where: { companyId: company.id, risky: true } }),
     prisma.dailyChallenge.count({ where: { companyId: company.id, claimed: true } }),
@@ -234,6 +237,12 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     const n = Array.isArray(w.objectives) ? w.objectives.length : 0;
     return n > 0 && Object.keys((w.done as Record<string, unknown>) ?? {}).length >= n;
   });
+  // 2.5 : campagnes régionales et compagnonnage
+  const [campaignsDone25, graduates25, graduated25] = (await Promise.all([
+    prisma.regionCampaign.count({ where: { companyId: company.id, completedAt: { not: null } } }),
+    prisma.mentorship.count({ where: { mentorId: company.id, endReason: "DIPLOME" } }),
+    prisma.mentorship.count({ where: { apprenticeId: company.id, endReason: "DIPLOME" } }),
+  ]).catch(() => [0, 0, 0])) as [number, number, number];
   const c24 = company as unknown as { dieselTanks?: number; dieselFixedUntil?: Date | null; powerFixedUntil?: Date | null };
   // 1.7 : itinéraires, composition, infrastructures, finances
   const [lines17, trains17, stationsOwned, electrified, workshopsOpen, loansRepaid, dividends] = (await Promise.all([
@@ -906,6 +915,12 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     { id: "a-la-casse", name: "Place aux jeunes", description: "Mettre une vieille rame à la casse", liveMet: scrapped24 >= 1 },
     { id: "tgv-classique", name: "Hors des sentiers battus", description: "Faire rouler une rame TGV sur une ligne classique électrifiée", liveMet: tgvClassic24 >= 1 },
     { id: "lac-de-montagne", name: "Lac de montagne", description: "Construire une station de pompage", liveMet: plantKinds24.has("STEP") },
+    // ---- 2.5 : campagnes régionales, compagnonnage ----
+    { id: "campagne-terminee", name: "Fils du pays", description: "Terminer une campagne régionale", liveMet: campaignsDone25 >= 1 },
+    { id: "tour-des-regions", name: "Tour des régions", description: "Terminer cinq campagnes régionales", liveMet: campaignsDone25 >= 5 },
+    { id: "diplome", name: "Diplômé", description: "Atteindre le grade de Baron du rail avec un tuteur", liveMet: graduated25 >= 1 },
+    { id: "premier-apprenti", name: "Transmettre", description: "Mener un apprenti jusqu'au diplôme", liveMet: graduates25 >= 1 },
+    { id: "maitre-de-quai", name: "Maître de quai", description: "Mener trois apprentis jusqu'au diplôme", liveMet: graduates25 >= 3 },
   ];
 
   /* 1.6 : « Premiers pas » récompense la liste de départ au complet. Chaque étape

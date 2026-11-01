@@ -94,6 +94,9 @@ model Company {
   absenceFromBalance Int?
   absenceToBalance   Int?
   lastDigestOn       String? // jour (AAAA-MM-JJ, heure de Paris) du dernier bilan du matin envoyé
+  // 2.5 : compagnonnage — la compagnie accepte des apprentis, et ce qu'elle leur dit d'elle
+  mentorOpen   Boolean  @default(false)
+  mentorPitch  String?
   // 2.1.2 : numéro de pionnier, figé à la migration (les 200 premières compagnies)
   pioneerNumber Int?    @unique
   createdAt    DateTime @default(now())
@@ -1312,4 +1315,49 @@ model Announcement {
   createdAt   DateTime @default(now())
 
   @@index([createdAt])
+}
+
+// 2.5 : campagnes régionales. Une ligne par compagnie et par région commencée :
+// l'étape en cours, quand elle a commencé (les livraisons et trajets comptent
+// à partir de là), et la fin. Une seule campagne active à la fois.
+model RegionCampaign {
+  id            String    @id @default(uuid())
+  companyId     String
+  region        String
+  step          Int       @default(0) // index de l'étape en cours (= nombre d'étapes réussies)
+  active        Boolean   @default(true)
+  startedAt     DateTime  @default(now())
+  stepStartedAt DateTime  @default(now())
+  completedAt   DateTime?
+
+  @@unique([companyId, region])
+  @@index([companyId, active])
+}
+
+// 2.5 : compagnonnage. Un tuteur (compagnie installée) accompagne un apprenti
+// (compagnie de moins de 14 jours) jusqu'au grade de Baron du rail. Primes aux
+// deux à chaque grade franchi par l'apprenti.
+model Mentorship {
+  id           String    @id @default(uuid())
+  mentorId     String
+  apprenticeId String
+  gradeReached Int       @default(0) // plus haut grade de l'apprenti déjà récompensé
+  startedAt    DateTime  @default(now())
+  endedAt      DateTime?
+  endReason    String?   // DIPLOME | TUTEUR | APPRENTI | INACTIF
+  createdAt    DateTime  @default(now())
+
+  @@index([mentorId, endedAt])
+  @@index([apprenticeId, endedAt])
+}
+
+// 2.5 : les mots échangés entre un tuteur et son apprenti (courts, pas un chat)
+model MentorNote {
+  id           String   @id @default(uuid())
+  mentorshipId String
+  fromId       String   // compagnie qui écrit
+  text         String
+  createdAt    DateTime @default(now())
+
+  @@index([mentorshipId, createdAt])
 }

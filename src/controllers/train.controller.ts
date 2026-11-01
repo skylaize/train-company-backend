@@ -127,7 +127,10 @@ export async function assignTrainToLine(req: AuthRequest, res: Response) {
   if (!train) {
     return res.status(404).json({ error: "Train introuvable" });
   }
-  if (train.status !== "IDLE") {
+  /* 2.5 : pendant une révision, on peut choisir la ligne qu'elle reprendra à la
+     sortie de l'atelier (elle garde la sienne si on ne touche à rien) */
+  const inWorkshop = train.status === "MAINTENANCE" && Boolean(train.workshopUntil);
+  if (train.status !== "IDLE" && !inWorkshop) {
     return res.status(409).json({ error: "Ce train est déjà en service (ligne ou fret en cours)" });
   }
   if (train.wear >= 100) {
@@ -145,8 +148,8 @@ export async function assignTrainToLine(req: AuthRequest, res: Response) {
   if (dm?.minDuration && line.durationMinutes < dm.minDuration) {
     return res.status(409).json({ error: `Une rame ${dm.label.toLowerCase()} ne fait que les lignes d'au moins ${dm.minDuration} minutes` });
   }
-  if (train.workshopUntil || train.partsEta) {
-    return res.status(409).json({ error: "Cette rame est à l'atelier" });
+  if (train.partsEta) {
+    return res.status(409).json({ error: "Cette rame attend une pièce à l'atelier" });
   }
   if (isNightIntl(train.model)) {
     const why = nightIntlLineError(routeOf(line as { departureStation: string; arrivalStation: string; stops?: string[] }), line.durationMinutes, NIGHT_MIN_DURATION);
@@ -163,6 +166,12 @@ export async function assignTrainToLine(req: AuthRequest, res: Response) {
   }
   if (train.model === "COUCHETTES" && line.durationMinutes < NIGHT_MIN_DURATION) {
     return res.status(409).json({ error: `Une rame couchettes ne fait que les grandes lignes (${NIGHT_MIN_DURATION} min de trajet ou plus)` });
+  }
+
+  if (inWorkshop) {
+    // elle reste à l'atelier ; à sa sortie, la simulation la remet en route sur cette ligne
+    const updated = await prisma.train.update({ where: { id: trainId }, data: { lineId, progress: 0, direction: 0 } });
+    return res.json({ ...updated, afterWorkshop: true });
   }
 
   const updated = await prisma.train.update({

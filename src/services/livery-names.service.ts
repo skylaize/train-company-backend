@@ -55,6 +55,11 @@ const FIXED: [string, string][] = [
   ["#7a1f2b", "Bordeaux (alliance)"],
   ["#0f4c5c", "Bleu pétrole (alliance)"],
   ["#3d2b56", "Violet nuit (alliance)"],
+  // 2.5 : livrées de nuit
+  ["#26345e", "Bleu orage (nuit)"],
+  ["#4a1626", "Velours (nuit)"],
+  ["#1d3b30", "Sapinière (nuit)"],
+  ["#2c3038", "Graphite (nuit)"],
   // cadeaux et événements
   [V2_GIFT_LIVERY, "Bleu lancement (cadeau 2.0)"],
   [LEGEND_LIVERY, "Vert vapeur (Trains de légende)"],

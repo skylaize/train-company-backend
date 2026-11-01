@@ -17,7 +17,7 @@ export type RidershipLine = {
   arrivalStation: string;
   stops: string[];
   priceRatio: number;
-  trains: { model: string; cars: string[]; status: string }[];
+  trains: { model: string; cars: string[]; status: string; workshopUntil?: Date | null }[];
 };
 
 type Events = Awaited<ReturnType<typeof activeStationEvents>>;
@@ -29,7 +29,11 @@ export function lineRidership(l: RidershipLine, companyId: string, events: Event
   const route = routeOf(l);
   const demand = routeDemand(route, events);
   const share = mine?.multiplier ?? 1;
-  const running = l.trains.filter((t) => t.status === "EN_ROUTE");
+  /* 2.5 : une rame en révision programmée reste sur sa ligne et y revient dans
+     quelques minutes : elle compte dans l'estimation. Sans elle, le prix conseillé
+     (et le prix automatique) sautait à chaque passage à l'atelier. */
+  const inWorkshop = l.trains.filter((t) => t.status === "MAINTENANCE" && t.workshopUntil);
+  const running = [...l.trains.filter((t) => t.status === "EN_ROUTE"), ...inWorkshop];
   const n = Math.max(1, running.length);
   const sample = running.length ? running : [{ model: "STANDARD", cars: [] as string[] }];
   // 1.7 : la demande de l'heure en cours (les couchettes ont leur propre service de nuit)
@@ -54,6 +58,7 @@ export function lineRidership(l: RidershipLine, companyId: string, events: Event
       left: Math.round(left),
       fill: Math.round((carried / Math.max(1, seats)) * 100),
       trains: running.length,
+      workshop: inWorkshop.length, // 2.5 : dont en révision
       price: l.priceRatio,
       idealPrice,
       estimated: running.length === 0,
@@ -67,7 +72,7 @@ export async function runAutoPricing() {
     where: { autoPrice: true, company: { isPremium: true } },
     select: {
       id: true, companyId: true, departureStation: true, arrivalStation: true, stops: true, priceRatio: true,
-      trains: { select: { model: true, cars: true, status: true } },
+      trains: { select: { model: true, cars: true, status: true, workshopUntil: true } },
     },
   })) as (RidershipLine & { companyId: string })[];
   if (lines.length === 0) return 0;
