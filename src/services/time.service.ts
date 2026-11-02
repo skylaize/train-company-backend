@@ -62,3 +62,17 @@ export function isNightService(at = new Date()) {
    quatre fois plus élevé. */
 export const NIGHT_MULTIPLIER = 3;
 export const DAY_COUCHETTES_MULTIPLIER = 0.8;
+
+/* 2.5.1 : une durée « dans 45 min », « dans 2 h 10 », « dans 3 j ». Les textes
+   fabriqués par le serveur (incidents, grand livre, messages d'erreur) donnaient
+   des heures de Paris : un joueur d'un autre fuseau lisait une heure fausse. Une
+   durée est juste partout. */
+export function durationLabel(ms: number) {
+  const min = Math.max(1, Math.round(ms / 60_000));
+  if (min < 60) return `${min} min`;
+  const h = Math.floor(min / 60), m = min % 60;
+  if (h < 48) return m ? `${h} h ${String(m).padStart(2, "0")}` : `${h} h`;
+  const d = Math.floor(h / 24), rh = h % 24;
+  return rh ? `${d} j ${rh} h` : `${d} j`;
+}
+export const inHowLong = (at: Date, now = Date.now()) => `dans ${durationLabel(at.getTime() - now)}`;

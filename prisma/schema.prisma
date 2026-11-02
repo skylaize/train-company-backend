@@ -32,6 +32,9 @@ model User {
   // 2.2 : compte suspendu depuis le panneau d'administration (toute l'API lui répond 403)
   bannedAt     DateTime?
   bannedReason String?
+  // 2.5 : notifications du jeu reçues aussi en message privé Discord
+  // (catégories séparées par des virgules, vide = aucune ; réglé avec /notifs)
+  discordDm    String   @default("")
 
   company   Company?
   passwordResets PasswordReset[]

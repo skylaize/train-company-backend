@@ -35,6 +35,12 @@ const PRICES = {
 };
 const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
+/* 2.5.1 : les prix affichés sur la page d'accueil, lus ici plutôt qu'écrits en
+   dur dans le site : changer le prix dans Coolify suffit pour que tout suive. */
+export function publicPremiumPrices() {
+  return { minCents: PRICES.min, suggestedCents: PRICES.suggested, upgradeMinCents: PRICES.upgradeMin };
+}
+
 /* Tant que les variables d'environnement ne sont pas renseignées, la vente est
    simplement fermée : le serveur démarre normalement, l'interface continue
    d'afficher « Bientôt disponible ». */

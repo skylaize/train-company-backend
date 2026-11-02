@@ -780,7 +780,45 @@ export async function shop(_req: AuthRequest, res: Response) {
   const items = [...SHOP_ITEMS.map((i) => view(i)), view(AD_FREE_ITEM), ...DISCORD_ITEMS.map((i) => view(i, true))];
   // les pass de saison n'ont pas d'entrée fixe au catalogue
   for (const [id, s] of sold) if (!items.some((i) => i.id === id)) items.push({ id, kind: "PASS", name: findAnyItem(id)?.name ?? id, description: "", priceCents: 0, season: null, isNew: false, exclusive: false, sold: s.count, revenueCents: s.cents, gifted: given.get(id) ?? 0 });
-  res.json({ items });
+  res.json({ items, creators: await creatorReport() });
+}
+
+/* 2.6 : Série Créateurs — ce que chaque créateur a vendu, et sa part, mois par mois.
+   La part se calcule sur le net (après les frais Stripe : environ 0,25 € + 1,5 %
+   par paiement en Europe) ; le versement se fait à la main. */
+const STRIPE_FIXED_CENTS = 25;
+const STRIPE_RATE = 0.015;
+async function creatorReport() {
+  const items = SHOP_ITEMS.filter((i) => i.creator);
+  if (!items.length) return [];
+  const rows = (await prisma.shopPurchase.findMany({
+    where: { itemId: { in: items.map((i) => i.id) }, amountCents: { gt: 0 } },
+    select: { itemId: true, amountCents: true, purchasedAt: true },
+  })) as { itemId: string; amountCents: number; purchasedAt: Date }[];
+  const byCreator = new Map<string, { name: string; share: number; items: string[]; months: Map<string, { sales: number; grossCents: number; netCents: number; dueCents: number }> }>();
+  for (const i of items) {
+    const c = byCreator.get(i.creator!.name) ?? { name: i.creator!.name, share: i.creator!.share, items: [] as string[], months: new Map<string, { sales: number; grossCents: number; netCents: number; dueCents: number }>() };
+    c.items.push(i.name);
+    byCreator.set(c.name, c);
+  }
+  for (const r of rows) {
+    const item = items.find((i) => i.id === r.itemId)!;
+    const c = byCreator.get(item.creator!.name)!;
+    const month = r.purchasedAt.toISOString().slice(0, 7);
+    const m = c.months.get(month) ?? { sales: 0, grossCents: 0, netCents: 0, dueCents: 0 };
+    const net = Math.max(0, r.amountCents - STRIPE_FIXED_CENTS - Math.round(r.amountCents * STRIPE_RATE));
+    m.sales += 1;
+    m.grossCents += r.amountCents;
+    m.netCents += net;
+    m.dueCents = Math.round(m.netCents * item.creator!.share);
+    c.months.set(month, m);
+  }
+  return [...byCreator.values()].map((c) => ({
+    name: c.name,
+    share: c.share,
+    items: c.items,
+    months: [...c.months.entries()].sort((a, b) => b[0].localeCompare(a[0])).map(([month, m]) => ({ month, ...m })),
+  }));
 }
 
 /* ---------------- giveaways ---------------- */

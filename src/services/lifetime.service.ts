@@ -62,6 +62,8 @@ async function slice(fromTx: string | null, toTx: string | null, fromInc: string
           WHERE i."createdAt" <= ${toInc}::timestamp(3) ${fromInc ? Prisma.sql`AND i."createdAt" > ${fromInc}::timestamp(3)` : Prisma.empty}
             -- 2.5 : ni un conteneur scellé ouvert, ni une rame rentrée faute de contrat ne sont des incidents d'exploitation
             AND i."message" NOT LIKE 'Conteneur scellé ouvert%' AND i."message" NOT LIKE '%sa tournée n''avait plus de contrat%'
+            -- 2.5.1 : les retards de nuit des trains de nuit
+            AND i."message" NOT LIKE 'Retard de nuit signalé%'
           GROUP BY t."companyId"`
       : Promise.resolve([]),
   ]);

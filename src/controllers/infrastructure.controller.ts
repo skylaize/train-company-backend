@@ -38,6 +38,7 @@ import {
   YARD_PAY,
   YARD_TIME,
 } from "../services/infrastructure.service";
+import { inHowLong } from "../services/time.service";
 import {
   hslCost, hslDays, hslLineError, hslOpen, hslBuilding, hslReadyAt,
   HSL_MIN_KM, HSL_PER_KM, HSL_MIN_COST, HSL_MIN_GRADE, HSL_KM_PER_DAY, HSL_MIN_DAYS, HSL_MAX_DAYS,
@@ -354,7 +355,7 @@ export async function buyStation(req: AuthRequest, res: Response) {
     if (resold) {
       const until = new Date(resold.createdAt.getTime() + PROTECTION_MS);
       return res.status(409).json({
-        error: `Vous avez revendu cette gare : vous pourrez la racheter à partir du ${until.toLocaleString("fr-FR", { timeZone: "Europe/Paris", dateStyle: "short", timeStyle: "short" })}`,
+        error: `Vous avez revendu cette gare : vous pourrez la racheter ${inHowLong(until)}`,
       });
     }
     const price = stationPrice(station);
@@ -374,7 +375,7 @@ export async function buyStation(req: AuthRequest, res: Response) {
 
   if (current.companyId === company.id) return res.status(409).json({ error: "Cette gare est déjà à vous" });
   if (new Date(current.protectedUntil).getTime() > Date.now()) {
-    return res.status(409).json({ error: `Rachat impossible avant le ${new Date(current.protectedUntil).toLocaleString("fr-FR", { timeZone: "Europe/Paris", dateStyle: "short", timeStyle: "short" })}` });
+    return res.status(409).json({ error: `Rachat possible ${inHowLong(new Date(current.protectedUntil))}` });
   }
   /* Rachat : le racheteur paie 1,5 fois ce que la gare a coûté, l'ancien
      propriétaire en touche 1,25 fois. Les sommes en attente lui restent dues. */

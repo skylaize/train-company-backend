@@ -42,6 +42,7 @@ export const CHANNELS = {
   SAISONS: "🏆・saisons",
   CLASSEMENTS: "📊・classements",
   CHANTIER: "🏔️・grand-chantier",
+  ENERGIE: "⛽・énergie", // 2.5 : chocs du gazole, vagues de froid, pannes
   LOGS: "📋・logs",
   GENERAL: "💬・général", // 2.3 : les merci aux boosters
 } as const;

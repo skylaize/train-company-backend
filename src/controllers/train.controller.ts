@@ -4,7 +4,7 @@ import { Prisma } from "@prisma/client";
 import { seasonEvent } from "../services/saison.service";
 import { Response } from "express";
 import { AuthRequest } from "../middleware/auth.middleware";
-import { CARS, MAX_CARS, seatsOf } from "../services/ridership.service";
+import { CARS, MAX_CARS, seatsOf, NIGHT_CAR_MODELS } from "../services/ridership.service";
 import { WAGONS, FREIGHT_MODELS, isWagon, freightOnly, isFreightModel } from "../services/freight.service";
 import { prisma } from "../prisma";
 import { staffEffectsFor, repairCostPerPoint } from "../services/staff.service";
@@ -14,6 +14,7 @@ import { DLC_MODELS, ownedDlcs, dlcById } from "../services/dlc.service";
 import { NIGHT_INTL_COST, NIGHT_INTL_MIN_GRADE, isNightIntl, nightIntlLineError } from "../services/night.service";
 import { routeOf } from "../services/route.service";
 import { TGV_MODEL, TGV_COST, TGV_MIN_GRADE, hslOpen, hslBuilding } from "../services/highspeed.service";
+import { inHowLong, durationLabel } from "../services/time.service";
 import {
   ORGANS, Organ, PARTS, RepairMode, EXPRESS_MIN, SERVICE_DISCOUNT, SERVICE_THRESHOLDS,
   freshBias, organWear, readStock, stockLimit, takeFromStock, partPrice, partDelayMs, serviceMinutes, backInService, resaleValue, resaleOutlook,
@@ -198,7 +199,7 @@ export async function changeCars(req: AuthRequest, res: Response) {
   const wagon = isWagon(String(car)) ? WAGONS[String(car) as keyof typeof WAGONS] : null;
   const def = wagon ? { label: wagon.label, price: wagon.price, unique: false } : CARS[String(car)];
   if (!trainId || !def || (action !== "add" && action !== "remove")) {
-    return res.status(400).json({ error: "trainId, car (SECONDE, PREMIERE, BAR ou un wagon) et action (add, remove) sont requis" });
+    return res.status(400).json({ error: "trainId, car (SECONDE, PREMIERE, BAR, COUCHETTE ou un wagon) et action (add, remove) sont requis" });
   }
   const company = await getOwnedCompanyOrFail(req.userId as string);
   if (!company) return res.status(404).json({ error: "Créez d'abord votre compagnie" });
@@ -218,6 +219,10 @@ export async function changeCars(req: AuthRequest, res: Response) {
     } else {
       if (freightOnly(train.model)) return res.status(409).json({ error: "Une rame de fret tire des wagons, pas des voitures voyageurs" });
       if (isFreightModel(train.model) && cars.some((c) => isWagon(c))) return res.status(409).json({ error: "Dételez d'abord ses wagons" });
+    }
+    // 2.5.1 : la voiture-couchettes ne s'attelle qu'aux trains de nuit
+    if (!wagon && (def as { nightOnly?: boolean }).nightOnly && !NIGHT_CAR_MODELS.includes(train.model)) {
+      return res.status(409).json({ error: "La voiture-couchettes s'attelle aux trains de nuit (rame couchettes ou train de nuit international)" });
     }
     if (!wagon && cars.length >= MAX_CARS) return res.status(409).json({ error: `Une rame tire ${MAX_CARS} voitures au plus` });
     if (def.unique && cars.includes(String(car))) return res.status(409).json({ error: `${def.label} : une seule par rame` });
@@ -245,7 +250,7 @@ export async function changeCars(req: AuthRequest, res: Response) {
 }
 
 
-const hhmm = (d: Date) => new Intl.DateTimeFormat("fr-FR", { timeZone: "Europe/Paris", hour: "2-digit", minute: "2-digit" }).format(d);
+// 2.5.1 : des durées plutôt que des heures de Paris (voir time.service)
 
 /* 2.0 : réparer, réviser.
 
@@ -275,7 +280,7 @@ export async function repairTrain(req: AuthRequest, res: Response) {
     return res.status(404).json({ error: "Train introuvable" });
   }
   if (train.workshopUntil) {
-    return res.status(409).json({ error: `${train.name} est déjà en révision, sortie à ${hhmm(train.workshopUntil)}` });
+    return res.status(409).json({ error: `${train.name} est déjà en révision, sortie ${inHowLong(train.workshopUntil)}` });
   }
 
   const costPerPoint = repairCostPerPoint(await staffEffectsFor(company.id));
@@ -285,12 +290,12 @@ export async function repairTrain(req: AuthRequest, res: Response) {
   // une pièce déjà commandée : on peut seulement la faire passer en express
   if (train.partsEta && part) {
     if (mode !== "express") {
-      return res.status(409).json({ error: `${PARTS[part].part} en route, livraison à ${hhmm(train.partsEta)}` });
+      return res.status(409).json({ error: `${PARTS[part].part} en route, livraison ${inHowLong(train.partsEta)}` });
     }
     const extra = partPrice(part, "express") - partPrice(part, "order");
     const expressAt = Date.now() + partDelayMs(part, "express");
     // déjà en express, ou la livraison normale arrive aussi vite : rien à gagner
-    if (train.partsEta.getTime() <= expressAt) return res.status(409).json({ error: `La pièce arrive déjà à ${hhmm(train.partsEta)}` });
+    if (train.partsEta.getTime() <= expressAt) return res.status(409).json({ error: `La pièce arrive déjà ${inHowLong(train.partsEta)}` });
     if (company.balance < extra) return res.status(409).json({ error: `Trésorerie insuffisante (express : ${extra} pièces de plus)` });
     const eta = new Date(expressAt);
     const claimed = await prisma.train.updateMany({ where: { id: train.id, partsEta: train.partsEta }, data: { partsEta: eta } });
@@ -382,7 +387,7 @@ export async function repairTrain(req: AuthRequest, res: Response) {
         companyId: company.id,
         type: "REPARATION",
         amount: -cost,
-        description: `${chosen === "express" ? "Commande express" : "Commande"} : ${PARTS[part].part} pour ${train.name}, livrée à ${hhmm(eta)}`,
+        description: `${chosen === "express" ? "Commande express" : "Commande"} : ${PARTS[part].part} pour ${train.name}, livrée sous ${durationLabel(eta.getTime() - Date.now())}`,
         trainId: train.id,
         lineId: train.lineId,
       },

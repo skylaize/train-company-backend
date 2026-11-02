@@ -66,6 +66,8 @@ export interface ShopItem {
   museum?: boolean;
   uniforms?: string[];
   allianceLiveries?: string[];
+  // 2.6 : Série Créateurs — l'objet est l'œuvre d'un joueur, qui touche une part des ventes
+  creator?: { name: string; company?: string; share: number; note?: string };
   // 2.0 : extension de jeu (voir dlc.service)
   dlc?: { tagline: string; premium: boolean; features: string[]; models: { id: string; label: string; blurb: string }[]; stations: string[] };
 }
@@ -137,6 +139,17 @@ const ALL_ITEMS: ShopItem[] = [
     description: "Quatre emblèmes tirés du monde ferroviaire : le rail, la boussole, l'horloge de gare et le viaduc.",
     priceCents: 299,
     emblems: ["rail", "boussole", "horloge", "viaduc"],
+  },
+  // ---- 2.6 : Série Créateurs ----
+  {
+    id: "habillage-intercites",
+    kind: "CABINE",
+    name: "Intercités",
+    description: "La motrice et ses voitures Intercités (2de, 1re et voiture-restaurant), aux couleurs de votre compagnie, en vue cabine. Dessinées par N0RCAM, joueur du réseau.",
+    priceCents: 299,
+    cabSkins: ["intercites"],
+    creator: { name: "N0RCAM", company: "Compagnie de Minuit", share: 0.3, note: "Le premier habillage dessiné par un joueur. Merci à lui !" },
+    isNew: true,
   },
   // ---- 2.5 : avec les campagnes régionales ----
   {
@@ -472,7 +485,9 @@ export const SHOP_ITEMS: ShopItem[] = [...ALL_ITEMS.filter((i) => (RELEASE_171 |
 const BIG_KINDS = new Set(["COFFRET", "CABINE", "THEME", "PLAQUE", "EMBLEMES"]);
 /* 2.1.1 : l'atelier de prestige ne tourne pas : il reste en vente tout le temps,
    dans sa propre section (sinon on ne le voyait qu'un jour de temps en temps) */
-export const ROTATING = SHOP_ITEMS.filter((i) => i.kind !== "DLC" && i.kind !== "SAISON" && !PRESTIGE_KINDS.has(i.kind));
+// 2.6 : la Série Créateurs reste en vente en permanence, dans sa propre vitrine
+export const ROTATING = SHOP_ITEMS.filter((i) => i.kind !== "DLC" && i.kind !== "SAISON" && !PRESTIGE_KINDS.has(i.kind) && !i.creator);
+export const CREATOR_ITEMS = SHOP_ITEMS.filter((i) => i.creator);
 const FEATURED_POOL = ROTATING.filter((i) => BIG_KINDS.has(i.kind) || (i.liveries?.length ?? 0) > 1 || (i.titles?.length ?? 0) > 1);
 export const FEATURED_COUNT = 2;
 export const DAILY_COUNT = 6;

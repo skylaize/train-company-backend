@@ -14,6 +14,7 @@ import { INTERNATIONAL_STATIONS, FIRST_INTERNATIONAL } from "../services/interna
 import { TGV_MODEL } from "../services/highspeed.service";
 import { bestSouls } from "../services/halloween.service";
 import { buildLeaderRows, rankRows } from "../services/leaderboard.service";
+import { campaignRegions } from "../services/campaign.service";
 
 export async function listMyAchievements(req: AuthRequest, res: Response) {
   const company = await prisma.company.findUnique({
@@ -238,6 +239,9 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     return n > 0 && Object.keys((w.done as Record<string, unknown>) ?? {}).length >= n;
   });
   // 2.5 : campagnes régionales et compagnonnage
+  // 2.5.1 : les campagnes terminées, avec leurs dates (campagne éclair, toutes les régions)
+  const campaignRows251 = (await prisma.regionCampaign.findMany({ where: { companyId: company.id, completedAt: { not: null } }, select: { startedAt: true, completedAt: true } }).catch(() => [])) as { startedAt: Date; completedAt: Date | null }[];
+  const campaignRegions251 = (await campaignRegions(company.id).catch(() => [])).length;
   const [campaignsDone25, graduates25, graduated25] = (await Promise.all([
     prisma.regionCampaign.count({ where: { companyId: company.id, completedAt: { not: null } } }),
     prisma.mentorship.count({ where: { mentorId: company.id, endReason: "DIPLOME" } }),
@@ -918,6 +922,8 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     // ---- 2.5 : campagnes régionales, compagnonnage ----
     { id: "campagne-terminee", name: "Fils du pays", description: "Terminer une campagne régionale", liveMet: campaignsDone25 >= 1 },
     { id: "tour-des-regions", name: "Tour des régions", description: "Terminer cinq campagnes régionales", liveMet: campaignsDone25 >= 5 },
+    { id: "eclair-regional", name: "Éclair régional", description: "Terminer une campagne régionale en moins de sept jours", liveMet: campaignRows251.some((r) => r.completedAt && r.completedAt.getTime() - r.startedAt.getTime() <= 7 * 86_400_000) },
+    { id: "la-france-entiere", name: "La France entière", description: "Terminer toutes les campagnes régionales", liveMet: campaignRegions251 > 0 && campaignsDone25 >= campaignRegions251 },
     { id: "diplome", name: "Diplômé", description: "Atteindre le grade de Baron du rail avec un tuteur", liveMet: graduated25 >= 1 },
     { id: "premier-apprenti", name: "Transmettre", description: "Mener un apprenti jusqu'au diplôme", liveMet: graduates25 >= 1 },
     { id: "maitre-de-quai", name: "Maître de quai", description: "Mener trois apprentis jusqu'au diplôme", liveMet: graduates25 >= 3 },

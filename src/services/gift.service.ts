@@ -76,7 +76,7 @@ export async function grantPrize(companyId: string, prize: Prize, reason: string
     if (!t.ok) return { ok: false, reason: t.reason };
     await prisma.transaction.create({ data: { companyId, type: "PREMIUM", amount: 0, description: `Cadeau de ${GIFT_FROM} : ${prizeLabel(prize)} (${reason})` } });
     const end = new Intl.DateTimeFormat("fr-FR", { timeZone: "Europe/Paris", day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" }).format(t.until);
-    void sendToCompany(companyId, { title: "Premium offert !", body: `L'équipe de Réseau vous offre le Premium jusqu'au ${end}. Vue cabine, veille concurrentielle, bilans… tout est ouvert.`, url: "/dashboard", tag: "cadeau" });
+    void sendToCompany(companyId, { title: "Premium offert !", body: `L'équipe de Réseau vous offre ${prize.days} jour${prize.days > 1 ? "s" : ""} de Premium. Vue cabine, veille concurrentielle, bilans… tout est ouvert.`, url: "/dashboard", tag: "cadeau" });
     return { ok: true, label: `${prizeLabel(prize)} (jusqu'au ${end})` };
   }
 

@@ -1,3 +1,4 @@
+import { notifyCompanyByDm } from "./discord-dm.service";
 import webpush from "web-push";
 import { prisma } from "../prisma";
 
@@ -62,6 +63,8 @@ export interface PushReport {
 }
 
 export async function sendToCompany(companyId: string, message: PushMessage): Promise<PushReport | null> {
+  // 2.5 : aussi en message privé Discord, pour les catégories choisies avec /notifs
+  void notifyCompanyByDm(companyId, message);
   if (!configured) return null;
 
   /* Rien de ce qui se passe ici ne doit pouvoir interrompre l'appelant.

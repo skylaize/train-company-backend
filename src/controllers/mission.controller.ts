@@ -33,7 +33,13 @@ export async function getMyClients(req: AuthRequest, res: Response) {
   const [relations, missions] = await Promise.all([
     prisma.clientRelation.findMany({ where: { companyId: company.id } }),
     prisma.mission.findMany({
-      where: { companyId: company.id, status: { in: ["PROPOSEE", "ACCEPTEE", "ECHOUEE"] } },
+      /* 2.5.1 : les ordres réussis aussi (sinon, après un ordre honoré, la carte
+         montrait la dernière offre expirée comme un « non honoré »), et seulement
+         ceux des trois derniers jours pour les ordres clos : la liste grossissait sans fin */
+      where: {
+        companyId: company.id,
+        OR: [{ status: { in: ["PROPOSEE", "ACCEPTEE"] } }, { status: { in: ["ECHOUEE", "REUSSIE"] }, createdAt: { gte: new Date(Date.now() - 3 * 86_400_000) } }],
+      },
       // 2.0 : du plus ancien au plus récent, l'ordre dans lequel les livraisons sont comptées
       orderBy: { createdAt: "asc" },
     }),
@@ -63,8 +69,11 @@ export async function getMyClients(req: AuthRequest, res: Response) {
        n'est ouvert, on montre le dernier échec : le joueur doit comprendre
        pourquoi sa réputation a bougé plutôt que de le découvrir sans
        explication. */
-    const open = list.filter((m) => m.clientId === client.id && m.status !== "ECHOUEE");
-    const current = open.length > 0 ? open : list.filter((m) => m.clientId === client.id).slice(-1);
+    const open = list.filter((m) => m.clientId === client.id && (m.status === "PROPOSEE" || m.status === "ACCEPTEE"));
+    // 2.5.1 : parmi les ordres clos, un ordre accepté (réussi ou manqué) compte plus qu'une offre laissée passer
+    const closed = list.filter((m) => m.clientId === client.id && (m.status === "ECHOUEE" || m.status === "REUSSIE"));
+    const engaged = closed.filter((m) => m.dueAt);
+    const current = open.length > 0 ? open : (engaged.length ? engaged : closed).slice(-1);
 
     return {
       id: client.id,

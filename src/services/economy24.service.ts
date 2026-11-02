@@ -67,11 +67,21 @@ export async function economyAfterTick(weather: Map<string, StationWeather>, not
   if (carbon && !carbon.trial && carbon.billed > 0) console.log(`[carbone] semaine du ${carbon.week} : ${carbon.billed} compagnies, ${carbon.total} pi.`);
 }
 
-/* Les chocs et pannes : dans #annonces sur Discord, et une notification aux
-   compagnies touchées par une panne de sous-station. */
+/* Les chocs et pannes : dans #⛽・énergie sur Discord (#annonces si le salon
+   n'existe pas encore), et une notification aux compagnies touchées par une
+   panne de sous-station. Les mouvements du gazole mentionnent 🔔 Événements ;
+   la vague de froid et la panne, plus fréquentes, partent sans mention. */
+const ENERGY_COLOR: Record<EnergyAnnouncement["kind"], number> = { "diesel-shock": 0xa8483a, "diesel-drop": 0x3fa45b, cold: 0x4f9fd8, outage: 0xe0b100 };
 async function announceEnergy(n: EnergyAnnouncement, notify: Notify, now: Date) {
   if (botEnabled()) {
-    await postOnce(`energie:${n.kind}:${hourStart(now).toISOString()}`, "ANNONCES", [{ embeds: [{ title: n.title, description: n.body, color: n.kind === "outage" ? 0xe0b100 : n.kind === "cold" ? 0x4f9fd8 : 0xa8483a }] }]);
+    const key = `energie:${n.kind}:${hourStart(now).toISOString()}`;
+    const payload = [{ embeds: [{ title: n.title, description: n.body, color: ENERGY_COLOR[n.kind], footer: { text: "Marché de l'énergie · Réseau" }, timestamp: now.toISOString() }] }];
+    const ping = n.kind === "diesel-shock" || n.kind === "diesel-drop" ? ("EVENEMENTS" as const) : undefined;
+    const sent = await postOnce(key, "ENERGIE", payload, { ping }).catch((err) => {
+      console.error("[discord] énergie :", (err as Error).message);
+      return false;
+    });
+    if (!sent) await postOnce(key, "ANNONCES", payload, { ping }).catch(() => undefined);
   }
   if (n.kind !== "outage") return;
   const o = outageNow(await energyEvents(true), now.getTime());

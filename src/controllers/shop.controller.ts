@@ -42,7 +42,8 @@ export async function getShop(req: AuthRequest, res: Response) {
     items: SHOP_ITEMS.filter((item) => !item.season || seasonOpen(item.season) || unlocked.owned.has(item.id)).map((item) => {
       const ev = item.season ? seasonalEventById(item.season) : null;
       const active = ev && seasonOpen(ev.id);
-      return { ...item, owned: unlocked.owned.has(item.id), includedInPremium: Boolean(item.dlc?.premium && isPremium), availableUntil: active ? nextEdition(ev!).end : null, seasonName: ev?.name ?? null };
+      // 2.6 : le créateur s'affiche, sa part reste dans l'admin
+      return { ...item, creator: item.creator ? { name: item.creator.name, company: item.creator.company, note: item.creator.note } : undefined, owned: unlocked.owned.has(item.id), includedInPremium: Boolean(item.dlc?.premium && isPremium), availableUntil: active ? nextEdition(ev!).end : null, seasonName: ev?.name ?? null };
     }),
     // 2.0 : la boutique du jour
     rotation: dailyRotation(),

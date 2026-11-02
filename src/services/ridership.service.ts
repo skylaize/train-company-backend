@@ -37,11 +37,15 @@ export function perTrainWaiting(perDeparture: number, n: number) {
 
 export const MODEL_SEATS: Record<string, number> = { STANDARD: 400, EXPRESS: 400, FRET_LOURD: 200, COUCHETTES: 250, NUIT_EUROPE: 200, VAPEUR: 300, LUXE: 120, CREMAILLERE: 220, AUTORAIL_CORSE: 180, LOCOTRACTEUR: 0, FRET_RAPIDE: 0, FRET_ELECTRIQUE: 0, TGV: 500 }; // 2.1 : rames de fret sans voyageurs (une Fret lourd déjà en ligne avant la 2.1 garde ses places tant qu'on ne la retire pas) // 2.0 : rames d'extension (dlc.service)
 
-export const CARS: Record<string, { label: string; seats: number; first: boolean; price: number; unique?: boolean }> = {
+export const CARS: Record<string, { label: string; seats: number; first: boolean; price: number; unique?: boolean; nightOnly?: boolean }> = {
   SECONDE: { label: "Voiture de 2de classe", seats: 100, first: false, price: 150 },
   PREMIERE: { label: "Voiture de 1re classe", seats: 60, first: true, price: 300 },
   BAR: { label: "Voiture-bar", seats: 0, first: false, price: 250, unique: true },
+  // 2.5.1 : pour les trains de nuit seulement ; moins de places qu'une voiture assise, mais une couchette se paie plus cher
+  COUCHETTE: { label: "Voiture-couchettes", seats: 60, first: false, price: 300, nightOnly: true },
 };
+export const NIGHT_CAR_MODELS = ["COUCHETTES", "NUIT_EUROPE"];
+export const COUCHETTE_FARE = 1.1;
 
 export type TrainLike = { model: string; cars?: string[] | null };
 
@@ -76,12 +80,15 @@ export function tripLoad(t: TrainLike, perDeparture: number, n: number, priceRat
   const p1 = carried * firstShare;
   const p2 = carried - p1;
   const bar = (t.cars ?? []).includes("BAR") ? BAR_BONUS : 1;
+  // 2.5.1 : les voyageurs des voitures-couchettes paient 10 % de plus
+  const couch = (t.cars ?? []).filter((c) => c === "COUCHETTE").length * CARS.COUCHETTE.seats;
+  const pc = seats.total ? (carried * couch) / seats.total : 0;
   return {
     passengers: Math.round(carried),
     seats: seats.total,
     fill: seats.total ? carried / seats.total : 0,
     left: Math.max(0, Math.round(waiting - carried)), // restés sur le quai
     // recette relative à la référence (300 voyageurs au prix normal)
-    revenueFactor: ((p2 + FIRST_CLASS_FARE * p1) / BASE_PASSENGERS) * priceRatio * bar,
+    revenueFactor: ((p2 - pc + COUCHETTE_FARE * pc + FIRST_CLASS_FARE * p1) / BASE_PASSENGERS) * priceRatio * bar,
   };
 }

@@ -14,6 +14,7 @@ import { createGiveaway, findGiveaway, finishGiveaway, MAX_DURATION_MS, MAX_WINN
 import { BOARDS, BoardId, buildLeaderRows, rankRows } from "../services/leaderboard.service";
 import { allianceRanking, ALLIANCE_MAX } from "../services/alliance.service";
 import { currentSeason, DIVISIONS } from "../services/saison.service";
+import { chantierReply, comparerReply, gareReply, NEW_COMMANDS, notifsReply, saisonReply, stationChoices } from "./discord-commands";
 
 /* ============================================================
    Discord (2.1) : liaison du compte et commandes slash.
@@ -170,6 +171,8 @@ export const COMMANDS = [
     options: [{ type: 3, name: "nom", description: "Le nom de l'alliance (la vôtre par défaut)", required: false }],
   },
   { name: "lier", description: "Lier votre compte Réseau à Discord pour recevoir vos rôles" },
+  // 2.5 : /gare, /chantier, /saison, /comparer, /notifs
+  ...NEW_COMMANDS,
   // 2.1 : réservées au staff (Discord les masque aux autres ; vérifié aussi ici)
   {
     name: "donner",
@@ -268,7 +271,7 @@ type Interaction = {
   data?: {
     name: string;
     custom_id?: string;
-    options?: InteractionOption[];
+    options?: (InteractionOption & { focused?: boolean })[];
     resolved?: { users?: Record<string, { username: string; global_name?: string | null }> };
   };
   member?: { user: { id: string }; permissions?: string };
@@ -293,6 +296,12 @@ export async function discordInteractions(req: Request, res: Response) {
       return "Le réseau ne répond pas, réessaie dans un instant.";
     });
     return res.json({ type: 4, data: { flags: 64, content } });
+  }
+
+  // 2.5 : autocomplétion (le nom des gares pour /gare)
+  if (i.type === 4 && i.data?.name === "gare") {
+    const typed = String(i.data.options?.find((o) => o.focused)?.value ?? "");
+    return res.json({ type: 8, data: { choices: stationChoices(typed) } });
   }
 
   if (i.type !== 2 || !i.data) return res.status(400).end();
@@ -340,13 +349,18 @@ export async function discordInteractions(req: Request, res: Response) {
     });
   }
 
-  // « réfléchit… » tout de suite, la vraie réponse suit
-  res.json({ type: 5 });
+  // « réfléchit… » tout de suite, la vraie réponse suit (/notifs : visible par soi seul)
+  res.json(i.data.name === "notifs" ? { type: 5, data: { flags: 64 } } : { type: 5 });
   try {
     let reply: { content?: string; embeds?: Embed[] };
     if (i.data.name === "profil") reply = await profileReply(opt("joueur") ?? callerId, callerId);
     else if (i.data.name === "classement") reply = await boardReply(opt("tableau") ?? "valeur");
     else if (i.data.name === "alliance") reply = await allianceReply(opt("nom"), callerId);
+    else if (i.data.name === "gare") reply = await gareReply(opt("nom"), callerId);
+    else if (i.data.name === "chantier") reply = await chantierReply(callerId);
+    else if (i.data.name === "saison") reply = await saisonReply(callerId);
+    else if (i.data.name === "comparer") reply = await comparerReply(opt("joueur") ?? "", opt("avec") ?? callerId);
+    else if (i.data.name === "notifs") reply = await notifsReply(callerId, opt("categorie"), opt("etat"));
     else reply = { content: "Commande inconnue." };
     await rest("PATCH", `/webhooks/${APP_ID}/${i.token}/messages/@original`, { bot: false, body: { ...reply, allowed_mentions: { parse: [] } } });
   } catch (err) {

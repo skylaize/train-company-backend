@@ -4,6 +4,7 @@ import { Prisma } from "@prisma/client";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
 import { requiredCargoTypes } from "../services/mission.service";
+import { campaignFreightStations } from "../services/campaign.service";
 import { getCargoIndexMap, freightMultiplier } from "../services/market.service";
 import { distanceKm } from "../services/geography.service";
 import { yardsOf, YARD_TIME } from "../services/infrastructure.service";
@@ -53,6 +54,11 @@ const EXTRA_ROUTES: [string, string, string][] = [
   ["Œuvres d'art", "Avignon", "Montpellier"],
   ["Produits pharmaceutiques réfrigérés", "Tours", "Orléans"],
   ["Produits pharmaceutiques réfrigérés", "Montpellier", "Perpignan"],
+  // 2.5.1 : les Hauts-de-France n'avaient aucun itinéraire de fret
+  ["Céréales", "Amiens", "Paris"],
+  ["Acier", "Lille", "Reims"],
+  ["Conteneurs", "Lille", "Amiens"],
+  ["Automobiles", "Amiens", "Rouen"],
 ];
 
 const CARGO_TEMPLATES = [
@@ -132,8 +138,28 @@ export async function removeExpiredContracts() {
   });
 }
 
+/* 2.5.1 : une offre au moins pour chaque région dont une campagne attend du fret */
+async function ensureCampaignFreight() {
+  const regions = await campaignFreightStations();
+  if (!regions.size) return;
+  const open = (await prisma.contract.findMany({
+    where: { status: "DISPONIBLE", companyId: null, sealed: false },
+    select: { originStation: true, destinationStation: true },
+  })) as { originStation: string; destinationStation: string }[];
+  for (const stations of regions.values()) {
+    const touches = (t: { originStation: string; destinationStation: string }) => stations.includes(t.originStation) || stations.includes(t.destinationStation);
+    if (open.some(touches)) continue;
+    const routes = CARGO_TEMPLATES.filter(touches);
+    if (!routes.length) continue;
+    const t = routes[Math.floor(Math.random() * routes.length)];
+    await prisma.contract.create({ data: { ...t, expiresAt: new Date(Date.now() + EXPIRY_MINUTES * 60_000) } });
+    open.push(t);
+  }
+}
+
 export async function ensureMarketStocked() {
   await maybeOfferSealed().catch((err) => console.error("[fret] conteneur scellé :", (err as Error).message));
+  await ensureCampaignFreight().catch((err) => console.error("[fret] campagnes :", (err as Error).message));
   const availableContracts = await prisma.contract.findMany({
     where: { status: "DISPONIBLE", companyId: null, sealed: false },
     select: { cargoType: true },
@@ -229,6 +255,19 @@ export async function listMarket(req: AuthRequest, res: Response) {
       take: company?.isPremium ? PREMIUM_MARKET_SIZE : MIN_MARKET_SIZE,
     })),
   ];
+  /* 2.5.1 : la campagne en cours attend du fret de sa région : l'offre qui la
+     concerne s'ajoute à la liste, même si elle est plus récente que les autres */
+  if (company) {
+    const mine = [...(await campaignFreightStations(company.id)).values()].flat();
+    const touches = (c: { originStation: string; destinationStation: string }) => mine.includes(c.originStation) || mine.includes(c.destinationStation);
+    if (mine.length && !(contracts as { originStation: string; destinationStation: string }[]).some(touches)) {
+      const extra = await prisma.contract.findFirst({
+        where: { status: "DISPONIBLE", companyId: null, sealed: false, OR: [{ originStation: { in: mine } }, { destinationStation: { in: mine } }] },
+        orderBy: { createdAt: "asc" },
+      });
+      if (extra) contracts.push(extra);
+    }
+  }
 
   /* Le cours du jour est joint à chaque offre : sans lui, le joueur devrait
      ouvrir une autre page pour savoir si la marchandise proposée paie

@@ -24,6 +24,7 @@ import { peakInfo } from "../services/peak.service";
 import { isNightService, NIGHT_FROM, NIGHT_TO, NIGHT_MULTIPLIER, DAY_COUCHETTES_MULTIPLIER } from "../services/time.service";
 import { buildLeaderRows } from "../services/leaderboard.service";
 import { NIGHT_MIN_DURATION } from "./train.controller";
+import { publicPremiumPrices } from "./billing.controller";
 
 export async function getNetworkStats(_req: Request, res: Response) {
   /* 2.4.1 : trajets et incidents viennent des compteurs tenus à jour par
@@ -56,6 +57,7 @@ export async function getNetworkStats(_req: Request, res: Response) {
     season: season && new Date(season.endsAt).getTime() > Date.now() ? { number: season.number, name: season.name, endsAt: season.endsAt } : null,
     // 2.4.1 : la page d'accueil parle du tunnel au passé une fois ouvert
     tunnelOpen: tunnel,
+    premium: publicPremiumPrices(), // 2.5.1
   });
 }
 

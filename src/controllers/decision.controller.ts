@@ -2,6 +2,7 @@ import { Response } from "express";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
 import { listForCompany, lockedReasons, resolveDecision } from "../services/decision.service";
+import { inHowLong } from "../services/time.service";
 import { activeStationEvents, upcomingStationEvents } from "../services/station.service";
 
 async function companyOf(req: AuthRequest) {
@@ -88,8 +89,8 @@ export async function listNews(req: AuthRequest, res: Response) {
     items.push({ id: `e-${e.id}`, at: e.startsAt, text: `${e.label} à ${e.station} : ${pct >= 0 ? "+" : ""}${pct} % de voyageurs`, tone: "reseau" });
   }
   for (const e of soon.slice(0, 2)) {
-    const hour = new Date(e.startsAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Paris" });
-    items.push({ id: `u-${e.id}`, at: new Date(), text: `Annoncé à ${hour} : ${e.label.toLowerCase()} à ${e.station}`, tone: "reseau" });
+    // 2.5.1 : une durée, pas une heure de Paris
+    items.push({ id: `u-${e.id}`, at: new Date(), text: `Annoncé ${inHowLong(new Date(e.startsAt))} : ${e.label.toLowerCase()} à ${e.station}`, tone: "reseau" });
   }
   for (const d of decisions as { id: string; title: string; status: string; createdAt: Date; resolvedAt: Date | null }[]) {
     if (d.status === "OUVERTE") items.push({ id: `d-${d.id}`, at: d.createdAt, text: `Décision à prendre : ${d.title}`, tone: "alerte" });

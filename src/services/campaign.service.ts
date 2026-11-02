@@ -23,6 +23,8 @@ import { ownedDlcs, DLCS } from "./dlc.service";
 
 export const CAMPAIGN_REWARDS = [150, 250, 350, 450, 600, 800, 1000, 1500];
 const FREIGHT_TARGET = 3;
+const NO_FREIGHT = new Set(["corse"]);
+export const FREIGHT_STEP = 3; // index de l'étape « Les marchandises suivent »
 const TRIPS_TARGET = 100;
 
 // la Corse s'ouvre avec son extension ; Paris (une seule gare) et l'étranger n'ont pas de campagne
@@ -90,7 +92,10 @@ export function campaignSteps(region: string): CampaignStep[] {
     { kind: "SERVE", title: "Premier quai", text: `Desservir une gare ${of} (un arrêt intermédiaire compte).`, target: 1 },
     { kind: "LINK", title: `${a} – ${b}`, text: `Ouvrir une ligne qui passe par ${a} et par ${b}.`, target: 1 },
     { kind: "TRAINS", title: "Du monde sur les quais", text: `Faire rouler 2 rames sur des lignes qui passent dans la région.`, target: 2 },
-    { kind: "FREIGHT", title: "Les marchandises suivent", text: `Livrer ${FREIGHT_TARGET} cargaisons au départ ou à destination d'une gare ${of}.`, target: FREIGHT_TARGET },
+    // 2.5.1 : la Corse n'a pas de fret (l'île n'a que l'autorail) : l'étape devient une 3e rame
+    NO_FREIGHT.has(region)
+      ? { kind: "TRAINS", title: "Toute l'île roule", text: "Faire rouler 3 rames sur des lignes qui passent dans la région.", target: 3 }
+      : { kind: "FREIGHT", title: "Les marchandises suivent", text: `Livrer ${FREIGHT_TARGET} cargaisons au départ ou à destination d'une gare ${of}.`, target: FREIGHT_TARGET },
     { kind: "SPREAD", title: "Le réseau s'étend", text: `Desservir ${spread} gares ${of}.`, target: spread },
     { kind: "ELECTRIC", title: "Sous caténaire", text: `Électrifier une ligne qui passe dans la région.`, target: 1 },
     { kind: "STATION", title: "Une gare à soi", text: `Posséder une gare ${of}.`, target: 1 },
@@ -154,6 +159,19 @@ export async function stepProgress(companyId: string, region: string, stepIndex:
       return { ...cap(served.size + Math.min(trips, TRIPS_TARGET)), detail: `${served.size} / ${S.length} gares · ${Math.min(trips, TRIPS_TARGET)} / ${TRIPS_TARGET} trajets` };
     }
   }
+}
+
+/* 2.5.1 : le marché du fret est commun et ne compte que quelques offres ; une
+   région comme les Hauts-de-France pouvait n'en voir aucune pendant des jours.
+   Les gares des campagnes arrêtées à l'étape du fret, pour que le marché en
+   garantisse au moins une offre. */
+export async function campaignFreightStations(companyId?: string): Promise<Map<string, string[]>> {
+  const rows = (await prisma.regionCampaign.findMany({
+    where: { active: true, completedAt: null, step: FREIGHT_STEP, ...(companyId ? { companyId } : {}) },
+    select: { region: true },
+    distinct: ["region"],
+  }).catch(() => [])) as { region: string }[];
+  return new Map(rows.filter((r) => !NO_FREIGHT.has(r.region)).map((r) => [r.region, stationsOf(r.region)]));
 }
 
 /* ---------------- ce que voit le joueur ---------------- */

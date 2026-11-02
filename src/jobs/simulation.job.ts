@@ -42,7 +42,7 @@ import { runDiscordFeed, announceSeasonEnd } from "../services/discord-feed.serv
 import { syncAllRoles } from "../services/discord-roles.service";
 import { runGiveaways } from "../services/giveaway.service";
 import { runTrialExpiry } from "../services/trial.service";
-import { parisHour } from "../services/time.service";
+import { parisHour, durationLabel } from "../services/time.service";
 import { TGV_MODEL, TGV_SPEED, TGV_FARE, TGV_WEAR, TGV_CLASSIC_SPEED, TGV_CLASSIC_FARE, hslOpen, runHighSpeedOpenings } from "../services/highspeed.service";
 import { collectSouls, flushSouls, runHalloween } from "../services/halloween.service";
 import { regionBonusMap, regionMultiplier, runRegions, RegionBonuses } from "../services/regions.service";
@@ -575,7 +575,10 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
         prisma.incident.create({
           data: {
             trainId: train.id,
-            message: `Retard signalé : ${train.name} sur ${train.line.departureStation} → ${train.line.arrivalStation}${wx.effect && wx.at ? ` (${wx.label.toLowerCase()} à ${wx.at})` : ""}`,
+            /* 2.5.1 : un train de nuit en retard la nuit ne compte pas contre la réputation
+               (les voyageurs dorment, et ces rames roulent de longues heures) : le message
+               le dit, et lifetime.service le met de côté */
+            message: `${["COUCHETTES", "NUIT_EUROPE"].includes(train.model) && isNightService() ? "Retard de nuit signalé" : "Retard signalé"} : ${train.name} sur ${train.line.departureStation} → ${train.line.arrivalStation}${wx.effect && wx.at ? ` (${wx.label.toLowerCase()} à ${wx.at})` : ""}`,
           },
         }),
       ]);
@@ -1111,14 +1114,15 @@ async function tryAutoRepair(
   if (company.balance < cost) return false;
   const eta = new Date(Date.now() + partDelayMs(part, "order"));
   consumePart(part); // 2.4 : la pièce sort du stock national
-  const hhmm = new Intl.DateTimeFormat("fr-FR", { timeZone: "Europe/Paris", hour: "2-digit", minute: "2-digit" }).format(eta);
+  // 2.5.1 : une durée, juste dans tous les fuseaux (une heure de Paris trompait les autres)
+  const hhmm = `sous ${durationLabel(eta.getTime() - Date.now())}`;
   await prisma.$transaction([
     prisma.train.update({ where: { id: train.id }, data: { ...breakdownData(train, part), partsEta: eta } }),
     prisma.company.update({ where: { id: train.companyId }, data: { balance: { decrement: cost } } }),
     prisma.transaction.create({
-      data: { companyId: train.companyId, type: "REPARATION", amount: -cost, description: `Réparation automatique de ${train.name} : pièce commandée (${PARTS[part].part.toLowerCase()}), livrée à ${hhmm}`, trainId: train.id, lineId },
+      data: { companyId: train.companyId, type: "REPARATION", amount: -cost, description: `Réparation automatique de ${train.name} : pièce commandée (${PARTS[part].part.toLowerCase()}), livrée ${hhmm}`, trainId: train.id, lineId },
     }),
-    prisma.incident.create({ data: { trainId: train.id, message: `${train.name} est en panne (${PARTS[part].label.toLowerCase()}) : pièce commandée, livrée à ${hhmm}` } }),
+    prisma.incident.create({ data: { trainId: train.id, message: `${train.name} est en panne (${PARTS[part].label.toLowerCase()}) : pièce commandée, livrée ${hhmm}` } }),
   ]);
   return "ordered";
 }
