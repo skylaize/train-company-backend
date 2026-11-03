@@ -66,10 +66,11 @@ export const ROLES: Record<string, RoleDef> = {
   // 2.0 : équipages, affectés à une rame (voir crew.service)
   CONTROLEUR: {
     label: "Contrôleur",
-    baseSalary: 2,
+    // 2.6 : 120 pi./h au lieu de 240 au niveau 1 ; il coûtait plus qu'il ne rapportait presque partout
+    baseSalary: 1,
     minGradeId: 0,
     unique: false,
-    effect: (l) => `À bord d'une rame : +${4 + (l - 1)} % de recette, et de la réputation pour la compagnie`,
+    effect: (l) => `À bord d'une rame : +${10 + (l - 1)} % de recette, et de la réputation pour la compagnie`,
   },
   CONDUCTEUR: {
     label: "Conducteur",

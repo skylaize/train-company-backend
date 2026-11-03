@@ -22,9 +22,10 @@ import { prisma } from "../prisma";
 export const CREW_ROLES = ["CONTROLEUR", "CONDUCTEUR"] as const;
 export type CrewRole = (typeof CREW_ROLES)[number];
 
+// 2.6 : +10 % au niveau 1, jusqu'à +14 % au niveau 5 (au lieu de +4 à +8 %)
 export function controllerBonus(level?: number) {
   if (!level) return 1;
-  return 1.04 + 0.01 * (level - 1);
+  return 1.1 + 0.01 * (level - 1);
 }
 
 export function driverEffects(level?: number) {

@@ -3,7 +3,7 @@ import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
 import { buildLeaderRows } from "../services/leaderboard.service";
 import { RANK_DEFINITIONS } from "../services/career.service";
-import { CREW_ROLES, controllerBonus, driverEffects } from "../services/crew.service";
+import { CREW_ROLES, controllerBonus, driverEffects, CONTROLLER_REPUTATION_MAX } from "../services/crew.service";
 import {
   ROLES,
   salaryFor,
@@ -60,7 +60,7 @@ export async function getStaffOverview(req: AuthRequest, res: Response) {
     return res.status(404).json({ error: "Créez d'abord votre compagnie" });
   }
 
-  const [staff, trainCount, revenue24h, byTrain24h] = await Promise.all([
+  const [staff, trainCount, revenue24h, byTrain24h, lineTrains] = await Promise.all([
     prisma.staff.findMany({ where: { companyId: company.id }, orderBy: { hiredAt: "asc" } }),
     prisma.train.count({ where: { companyId: company.id } }),
     prisma.transaction.aggregate({
@@ -78,6 +78,8 @@ export async function getStaffOverview(req: AuthRequest, res: Response) {
       where: { companyId: company.id, type: "REVENU_LIGNE", amount: { gt: 0 }, trainId: { not: null }, createdAt: { gte: new Date(Date.now() - 24 * 3600_000) } },
       _sum: { amount: true },
     }),
+    // 2.6 : rames en ligne, pour la part de réputation qu'apportent les contrôleurs
+    prisma.train.count({ where: { companyId: company.id, lineId: { not: null } } }),
   ]);
   const trainRevenuePerHour = new Map(
     (byTrain24h as { trainId: string | null; _sum: { amount: number | null } }[]).map((r) => [r.trainId ?? "", (r._sum.amount ?? 0) / 24])
@@ -100,7 +102,14 @@ export async function getStaffOverview(req: AuthRequest, res: Response) {
     if (!trainId) return 0;
     if (s.role === "CONTROLEUR") {
       const b = controllerBonus(s.level);
-      return ((trainRevenuePerHour.get(trainId) ?? 0) * (b - 1)) / b;
+      const own = ((trainRevenuePerHour.get(trainId) ?? 0) * (b - 1)) / b;
+      /* 2.6 : et sa part de la réputation. Les contrôleurs à bord donnent
+         jusqu'à 6 points (selon la part des rames en ligne couvertes) ; un
+         point vaut environ 0,5 % de toutes les recettes de la compagnie. */
+      const onBoard = rows.filter((r) => r.role === "CONTROLEUR" && (r as StaffRow & { trainId?: string | null }).trainId).length;
+      const points = lineTrains > 0 && onBoard > 0 ? Math.round(CONTROLLER_REPUTATION_MAX * Math.min(1, onBoard / lineTrains)) : 0;
+      const reputation = onBoard > 0 ? (revenuePerHour * 0.005 * points) / onBoard : 0;
+      return own + reputation;
     }
     const saved = 1 - driverEffects(s.level).wear;
     return WEAR_PER_TICK * effects.wearMultiplier * saved * repairCostPerPoint(effects) * TICKS_PER_HOUR;
