@@ -138,7 +138,7 @@ export const RANK_DEFINITIONS: { name: string; reward: string | null; requiremen
     name: "Bâtisseur de gares",
     reward: "Titre « Bâtisseur de gares » au classement",
     requirements: [
-      req("Posséder 3 gares", (c) => c.stationsOwned ?? 0, 3),
+      req("Posséder 3 gares (2 commerces comptent pour 1)", (c) => c.stationsOwned ?? 0, 3),
       req("Ouvrir 2 ateliers régionaux", (c) => c.workshops ?? 0, 2),
       req("Avoir généré 1 500 000 pi. de recettes cumulées", (c) => c.totalRevenue, 1500000),
     ],
@@ -158,7 +158,7 @@ export const RANK_DEFINITIONS: { name: string; reward: string | null; requiremen
     reward: "Titre « Magnat européen » au classement",
     requirements: [
       req("Desservir 6 gares étrangères", (c) => c.foreignStations ?? 0, 6),
-      req("Posséder 6 gares", (c) => c.stationsOwned ?? 0, 6),
+      req("Posséder 6 gares (2 commerces comptent pour 1)", (c) => c.stationsOwned ?? 0, 6),
       req("Réputation d'au moins 92 %", (c) => c.reputation, 92),
       req("Avoir généré 4 000 000 pi. de recettes cumulées", (c) => c.totalRevenue, 4000000),
     ],
@@ -168,7 +168,7 @@ export const RANK_DEFINITIONS: { name: string; reward: string | null; requiremen
     reward: "Titre « Empereur du rail » au classement",
     requirements: [
       req("Posséder au moins 18 rames", (c) => c.trainCount, 18),
-      req("Posséder 10 gares", (c) => c.stationsOwned ?? 0, 10),
+      req("Posséder 10 gares (2 commerces comptent pour 1)", (c) => c.stationsOwned ?? 0, 10),
       req("Employer au moins 8 membres du personnel", (c) => c.staffCount, 8),
       req("Avoir généré 7 500 000 pi. de recettes cumulées", (c) => c.totalRevenue, 7500000),
     ],
@@ -209,11 +209,14 @@ export async function computeCareerStatus(companyId: string) {
     computeReputation(companyId),
     prisma.company.findUnique({ where: { id: companyId }, select: { maxTrains: true } }),
   ]);
-  const [stationsOwned, workshops, electrifiedLines] = (await Promise.all([
+  const [stationsHeld, workshops, electrifiedLines, shops] = (await Promise.all([
     prisma.stationOwnership.count({ where: { companyId } }),
     prisma.workshop.count({ where: { companyId } }),
     prisma.line.count({ where: { companyId, electrified: true } }),
-  ])) as [number, number, number];
+    prisma.stationShop.count({ where: { companyId } }),
+  ])) as [number, number, number, number];
+  // 2.6 : deux commerces comptent pour une gare
+  const stationsOwned = stationsHeld + Math.floor(shops / 2);
 
   const lineList = lines as { departureStation: string; arrivalStation: string; stops?: string[] }[];
   const ctx: CareerContext = {

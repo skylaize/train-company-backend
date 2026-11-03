@@ -2,6 +2,7 @@ import { prisma } from "../prisma";
 import { economy, inTrial } from "./settings.service";
 import { buildLeaderRows } from "./leaderboard.service";
 import { parisDate, startOfParisWeek } from "./time.service";
+import { sendToCompany } from "./push.service";
 
 /* ============================================================
    2.4 : la taxe carbone, progressive.
@@ -97,7 +98,24 @@ export async function runCarbonWeek(now = new Date()) {
       billed++;
       total += amount;
     }
-    await prisma.$transaction(ops as never).catch((err: Error) => console.error("[carbone] facture :", err.message));
+    const ok = await prisma.$transaction(ops as never).then(
+      () => true,
+      (err: Error) => {
+        console.error("[carbone] facture :", err.message);
+        return false;
+      }
+    );
+    /* 2.5.1 : la facture prévient. Prélevée d'un coup la nuit du lundi, elle
+       passait inaperçue : le joueur voyait juste sa trésorerie moins monter. */
+    if (ok && !trial && amount > 0) {
+      const fr = (n: number) => Math.round(n).toLocaleString("fr-FR");
+      void sendToCompany(c.id, {
+        title: `Taxe carbone de la semaine : −${fr(amount)} pi.`,
+        body: `${fr(c.co2Week)} t émises, ${fr(t.quota)} t de quota gratuit, ${fr(t.rate)} pi. la tonne au-delà.${amount < t.amount ? ` Votre trésorerie n'en couvrait que ${fr(amount)} pi.` : ""} Le détail : Énergie & entretien → Carbone.`,
+        url: "/dashboard",
+        tag: "carbone",
+      }).catch(() => undefined);
+    }
   }
   await prisma.company.updateMany({ data: { co2Week: 0 } });
   await prisma.gameSetting.upsert({ where: { key: "carbonWeek" }, create: { key: "carbonWeek", value: { week: lastWeek } }, update: { value: { week: lastWeek } } });

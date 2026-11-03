@@ -71,6 +71,10 @@ export async function deleteAccount(req: AuthRequest, res: Response) {
       prisma.decision.deleteMany({ where: { companyId: company.id } }),
       // 1.7 : infrastructures et finances (actions détenues ET actions de la compagnie chez les autres)
       prisma.stationOwnership.deleteMany({ where: { companyId: company.id } }),
+      // 2.6
+      prisma.stationShop.deleteMany({ where: { companyId: company.id } }),
+      prisma.stationWatch.deleteMany({ where: { companyId: company.id } }),
+      prisma.dailyBalance.deleteMany({ where: { companyId: company.id } }),
       prisma.workshop.deleteMany({ where: { companyId: company.id } }),
       prisma.yard.deleteMany({ where: { companyId: company.id } }),
       prisma.customAlert.deleteMany({ where: { companyId: company.id } }),

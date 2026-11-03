@@ -47,11 +47,18 @@ export const CARS: Record<string, { label: string; seats: number; first: boolean
 export const NIGHT_CAR_MODELS = ["COUCHETTES", "NUIT_EUROPE"];
 export const COUCHETTE_FARE = 1.1;
 
-export type TrainLike = { model: string; cars?: string[] | null };
+export type TrainLike = { model: string; cars?: string[] | null; heritage?: unknown };
+
+// 2.6 : une rame de collection peut avoir plus de places que son modèle (la VB2N, à deux niveaux)
+export const HERITAGE_SEATS: Record<string, number> = { DUPLEX: 1.25 };
+const heritageSeats = (h: unknown) => {
+  const kind = h && typeof h === "object" ? (h as { kind?: string }).kind : undefined;
+  return (kind && HERITAGE_SEATS[kind]) || 1;
+};
 
 export function seatsOf(t: TrainLike) {
   const cars = t.cars ?? [];
-  const second = (MODEL_SEATS[t.model] ?? 400) + cars.reduce((n, c) => n + (CARS[c] && !CARS[c].first ? CARS[c].seats : 0), 0);
+  const second = Math.round((MODEL_SEATS[t.model] ?? 400) * heritageSeats(t.heritage)) + cars.reduce((n, c) => n + (CARS[c] && !CARS[c].first ? CARS[c].seats : 0), 0);
   const first = cars.reduce((n, c) => n + (CARS[c]?.first ? CARS[c].seats : 0), 0);
   return { second, first, total: second + first };
 }

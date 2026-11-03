@@ -34,7 +34,8 @@ export interface WreckKind {
 
 export const WRECK_KINDS: Record<string, WreckKind> = {
   MICHELINE: { id: "MICHELINE", label: "Autorail Micheline", rarity: "COMMUNE", model: "STANDARD", skin: "micheline", livery: "#b8322a", years: [1932, 1953], serial: "ZZ", price: 250, prestige: 1.1, workMin: 15 },
-  DUPLEX: { id: "DUPLEX", label: "Rame à deux niveaux", rarity: "COMMUNE", model: "STANDARD", skin: "duplex", livery: "#3c6e9e", years: [1975, 1990], serial: "VB2N", price: 250, prestige: 1.1, workMin: 15 },
+  // 2.6 : la VB2N n'a plus le billet +10 % mais 25 % de places en plus (ridership.service, HERITAGE_SEATS)
+  DUPLEX: { id: "DUPLEX", label: "Rame à deux niveaux", rarity: "COMMUNE", model: "STANDARD", skin: "duplex", livery: "#3c6e9e", years: [1975, 1990], serial: "VB2N", price: 250, prestige: 1, workMin: 15 },
   TRAIN_BLEU: { id: "TRAIN_BLEU", label: "Voitures-lits du Train bleu", rarity: "RARE", model: "COUCHETTES", skin: "train-bleu", livery: "#1d2f5c", years: [1922, 1938], serial: "WL", price: 650, prestige: 1.18, workMin: 30 },
   ORANGE: { id: "ORANGE", label: "Rame orange de 1981", rarity: "RARE", model: "EXPRESS", skin: "grande-vitesse", livery: "#e36a12", years: [1978, 1984], serial: "Rame n°", price: 650, prestige: 1.18, workMin: 30 },
   VAPEUR_141R: { id: "VAPEUR_141R", label: "Locomotive 141 R", rarity: "LEGENDAIRE", model: "STANDARD", skin: "vapeur", livery: "#1f1f1f", years: [1945, 1947], serial: "141 R", price: 1400, prestige: 1.3, workMin: 60 },
@@ -74,6 +75,13 @@ export interface Heritage {
   livery: string;
   prestige: number;
   value: number; // tout ce qui a été investi : rachat et pièces
+}
+
+/* 2.6 : le prestige se lit dans le catalogue quand il existe : les VB2N déjà
+   restaurées gardaient le billet +10 % inscrit sur leur fiche. */
+export function heritagePrestige(h: Heritage | null) {
+  if (!h) return 1;
+  return WRECK_KINDS[h.kind]?.prestige ?? h.prestige ?? 1;
 }
 
 export function heritageOf(train: { heritage?: unknown }): Heritage | null {

@@ -56,6 +56,43 @@ export function stationPrice(station: string) {
   return STATION_PRICE[stationSize(station)] ?? STATION_PRICE[2];
 }
 
+/* ---------------- 2.6 : rachat qui ne s'accumule plus, et commerces ----------------
+
+   Le rachat se payait 1,5 × le dernier prix payé, et ce prix devenait la
+   nouvelle base : une gare rachetée dix fois coûtait 57 fois son prix. Il se
+   calcule maintenant sur la valeur de la gare (son prix de base et ses
+   agrandissements), qui ne bouge plus d'un rachat à l'autre. Les gares
+   achetées avant la 2.6 (legacy) gardent la mise de leur propriétaire. */
+export function stationValue(station: string, level: number) {
+  const base = stationPrice(station);
+  return base + (level >= 2 ? upgradeCost(station, 2) : 0) + (level >= 3 ? upgradeCost(station, 3) : 0);
+}
+export function buyoutPrice(o: { station: string; level: number }) {
+  return Math.round(stationValue(o.station, o.level) * BUYOUT_COST);
+}
+export function buyoutPayout(o: { station: string; level: number; invested: number; legacy?: boolean }) {
+  return Math.round(Math.max(stationValue(o.station, o.level), o.legacy ? o.invested : 0) * BUYOUT_PAYOUT);
+}
+
+// emplacements de commerce, selon la taille de la gare (environ 380 sur le réseau)
+export const SHOP_SLOTS: Record<number, number> = { 5: 16, 4: 12, 3: 8, 2: 6, 1: 4 };
+// 3 commerces au plus par compagnie : avec plus de 400 joueurs, les places doivent tourner (Premium compris)
+export const MAX_SHOPS = 3;
+export const SHOP_PRICE_SHARE = 0.4; // un emplacement : 40 % du prix de base de la gare
+export const SHOP_SELL_BACK = 0.6;
+export const SHOP_RENT = 0.15; // le loyer du propriétaire de la gare
+export const SHOPS_PER_RANK_STATION = 2; // pour les grades, deux commerces comptent pour une gare
+export const shopSlots = (station: string) => SHOP_SLOTS[stationSize(station)] ?? 3;
+export const shopPrice = (station: string) => Math.round(stationPrice(station) * SHOP_PRICE_SHARE);
+
+/* Les commerçants de chaque gare, chargés une fois par tour (la table est petite). */
+export async function stationShops(): Promise<Map<string, string[]>> {
+  const rows = (await prisma.stationShop.findMany({ select: { station: true, companyId: true } })) as { station: string; companyId: string }[];
+  const out = new Map<string, string[]>();
+  for (const r of rows) out.set(r.station, [...(out.get(r.station) ?? []), r.companyId]);
+  return out;
+}
+
 // agrandissement vers le niveau `to` (2 ou 3) : la moitié puis la totalité du prix d'achat
 export function upgradeCost(station: string, to: number) {
   return Math.round(stationPrice(station) * (to === 2 ? 0.5 : 1));
@@ -80,17 +117,19 @@ export function stationEffects(
   revenue: number,
   passengers: number,
   owners: Map<string, OwnerInfo>,
-  allies?: Set<string> // 2.0 : pas de redevance de quai entre alliés
+  allies?: Set<string>, // 2.0 : pas de redevance de quai entre alliés
+  shopkeepers?: Map<string, string[]> // 2.6 : des commerces peuvent tourner dans une gare sans propriétaire
 ) {
   let own = 0;
   const fees: { station: string; ownerId: string; amount: number }[] = [];
   const shops: { station: string; amount: number }[] = [];
   for (const st of new Set(route)) {
     const o = owners.get(st);
-    if (!o) continue;
-    if (o.companyId === companyId) own += 1;
-    else if (!allies?.has(o.companyId)) fees.push({ station: st, ownerId: o.companyId, amount: Math.round(revenue * PLATFORM_FEE) });
-    const shop = Math.round(passengers * SHOP_PER_PASSENGER * (SHOP_LEVEL_MULT[o.level] ?? 1));
+    if (o) {
+      if (o.companyId === companyId) own += 1;
+      else if (!allies?.has(o.companyId)) fees.push({ station: st, ownerId: o.companyId, amount: Math.round(revenue * PLATFORM_FEE) });
+    } else if (!shopkeepers?.get(st)?.length) continue;
+    const shop = Math.round(passengers * SHOP_PER_PASSENGER * (SHOP_LEVEL_MULT[o?.level ?? 1] ?? 1));
     if (shop > 0) shops.push({ station: st, amount: shop });
   }
   return { homeBonus: 1 + Math.min(HOME_BONUS_CAP, HOME_BONUS_STEP * own), fees, shops };
@@ -98,7 +137,26 @@ export function stationEffects(
 
 /* Les sommes dues aux propriétaires s'accumulent pendant l'heure et sont
    versées d'un coup : une écriture par heure plutôt qu'une par train. */
-export async function accruePending(pending: Map<string, { fees: number; shops: number }>) {
+export async function accruePending(pending: Map<string, { fees: number; shops: number }>, shopkeepers?: Map<string, string[]>, owners?: Map<string, OwnerInfo>) {
+  /* 2.6 : ce que dépensent les voyageurs va aux commerçants de la gare, à
+     parts égales, moins le loyer du propriétaire. Sans commerçant, le
+     propriétaire tient les commerces lui-même et garde tout. Les sommes d'un
+     tour sont regroupées par gare avant d'être partagées : une requête. */
+  const toShops: [string, string, number][] = [];
+  for (const [station, p] of pending) {
+    const keepers = shopkeepers?.get(station) ?? [];
+    if (!keepers.length || p.shops <= 0) continue;
+    const rent = owners?.has(station) ? Math.round(p.shops * SHOP_RENT) : 0; // sans propriétaire, pas de loyer
+    const each = Math.floor((p.shops - rent) / keepers.length);
+    if (each > 0) for (const c of keepers) toShops.push([station, c, each]);
+    p.shops = rent;
+  }
+  for (const part of chunk(toShops, 500)) {
+    await prisma.$executeRaw`
+      UPDATE "StationShop" AS s SET "pendingIncome" = s."pendingIncome" + v.amount::int
+      FROM (VALUES ${Prisma.join(part.map((r) => row(r)))}) AS v(station, company, amount)
+      WHERE s."station" = v.station::text AND s."companyId" = v.company::text`;
+  }
   // 2.4 : toutes les gares en une requête
   const rows = [...pending.entries()].filter(([, p]) => p.fees > 0 || p.shops > 0);
   for (const part of chunk(rows, 500)) {
@@ -133,6 +191,21 @@ export async function payStationIncome() {
       ops.push(prisma.transaction.create({ data: { companyId: r.companyId, type: "COMMERCES", amount: r.pendingShops, description: `Commerces : gare de ${r.station}` } }));
     await prisma.$transaction(ops);
   } }, "revenus des gares");
+
+  // 2.6 : les commerces, une écriture par compagnie et par heure (toutes ses gares ensemble)
+  const shops = (await prisma.stationShop.findMany({ where: { pendingIncome: { gt: 0 } }, select: { id: true, station: true, companyId: true, pendingIncome: true } })) as {
+    id: string; station: string; companyId: string; pendingIncome: number;
+  }[];
+  await pool([...groupBy(shops, (r) => r.companyId).values()], SIM_CONCURRENCY, async (mine) => {
+    const total = mine.reduce((a, r) => a + r.pendingIncome, 0);
+    await prisma.$transaction([
+      ...mine.map((r) => prisma.stationShop.update({ where: { id: r.id }, data: { pendingIncome: { decrement: r.pendingIncome }, totalIncome: { increment: r.pendingIncome } } })),
+      prisma.company.update({ where: { id: mine[0].companyId }, data: { balance: { increment: total } } }),
+      prisma.transaction.create({
+        data: { companyId: mine[0].companyId, type: "COMMERCES", amount: total, description: mine.length === 1 ? `Votre commerce : gare de ${mine[0].station}` : `Vos commerces : ${mine.length} gares` },
+      }),
+    ] as never);
+  }, "revenus des commerces");
 }
 
 /* ---------------- 2.1 : double voie ----------------
@@ -205,19 +278,22 @@ export async function workshopsByCompany(): Promise<Map<string, Set<string>>> {
    et ce qui est dû à la banque, qui se retranche — sans quoi un emprunt ferait
    grimper la valeur d'autant. */
 export async function extraWorth(): Promise<Map<string, number>> {
-  const [stations, workshops, loans, holdings, hsl] = (await Promise.all([
+  const [stations, workshops, loans, holdings, hsl, shops] = (await Promise.all([
     prisma.stationOwnership.findMany({ select: { companyId: true, invested: true } }),
     prisma.workshop.findMany({ select: { companyId: true } }),
     prisma.loan.findMany({ where: { closedAt: null }, select: { companyId: true, remaining: true } }),
     prisma.shareholding.findMany({ select: { holderId: true, shares: true, issuer: { select: { sharePrice: true } } } }),
     // 2.2 : une LGV, même en chantier, compte pour moitié de son prix
     prisma.line.findMany({ where: { highSpeedCost: { gt: 0 } }, select: { companyId: true, highSpeedCost: true } }),
+    // 2.6 : un commerce vaut ce qu'il se revend
+    prisma.stationShop.findMany({ select: { companyId: true, price: true } }),
   ])) as [
     { companyId: string; invested: number }[],
     { companyId: string }[],
     { companyId: string; remaining: number }[],
     { holderId: string; shares: number; issuer: { sharePrice: number } | null }[],
-    { companyId: string; highSpeedCost: number }[]
+    { companyId: string; highSpeedCost: number }[],
+    { companyId: string; price: number }[]
   ];
   const m = new Map<string, number>();
   const add = (id: string, v: number) => m.set(id, (m.get(id) ?? 0) + v);
@@ -226,5 +302,6 @@ export async function extraWorth(): Promise<Map<string, number>> {
   for (const l of loans) add(l.companyId, -l.remaining);
   for (const h of holdings) add(h.holderId, Math.round(h.shares * (h.issuer?.sharePrice ?? 0)));
   for (const l of hsl) add(l.companyId, Math.round(l.highSpeedCost * 0.5));
+  for (const sh of shops) add(sh.companyId, Math.round(sh.price * SHOP_SELL_BACK));
   return m;
 }

@@ -17,7 +17,7 @@ export const DM_CATEGORIES = {
   flotte: { label: "Flotte", emoji: "🚂", detail: "pannes, incidents, chantiers, personnel, énergie, LGV, épaves" },
   fret: { label: "Fret", emoji: "📦", detail: "tournées livrées, conteneurs scellés" },
   competition: { label: "Compétition", emoji: "🏆", detail: "saison, alliance, régions, concurrence, appels d'offres" },
-  finances: { label: "Finances", emoji: "💰", detail: "banque, bourse, alertes, rapports, décisions, gares" },
+  finances: { label: "Finances", emoji: "💰", detail: "banque, bourse, alertes, rapports, décisions, gares, taxe carbone" },
   cadeaux: { label: "Cadeaux", emoji: "🎁", detail: "cadeaux reçus, Premium d'essai, boost" },
   autres: { label: "Autres", emoji: "🔔", detail: "événements du jeu et tout le reste" },
 } as const;
@@ -28,9 +28,10 @@ const TAG_CATEGORY: Record<string, DmCategory> = {
   incident: "flotte", energie: "flotte", chantier: "flotte", personnel: "flotte", lgv: "flotte",
   fret: "fret",
   saison: "competition", regions: "competition", alliance: "competition", compagnonnage: "competition", concurrence: "competition", appels: "competition",
-  banque: "finances", bourse: "finances", alerte: "finances", ordre: "finances", rapport: "finances", bilan: "finances", decision: "finances", gares: "finances",
+  banque: "finances", bourse: "finances", alerte: "finances", ordre: "finances", rapport: "finances", bilan: "finances", decision: "finances", gares: "finances", carbone: "finances",
   cadeau: "cadeaux", "premium-essai": "cadeaux", boost: "cadeaux",
   epave: "flotte",
+  gare: "competition", // 2.6 : gares surveillées (« gare-<nom> »)
 };
 // certaines étiquettes portent un suffixe (« alerte-CEREALES », « ordre-ACIER », « epave-<id> ») : on regarde aussi le début
 export const categoryOfTag = (tag: string | undefined): DmCategory => {

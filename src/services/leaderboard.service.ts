@@ -99,7 +99,7 @@ async function computeLeaderRows(): Promise<LeaderRow[]> {
   // le cache ne doit pas survivre au passage du lundi, sinon l'ancienne semaine reste affichée
   if (rowsCache && Date.now() - rowsCache.at < ROWS_TTL_MS && rowsCache.at >= weekStart.getTime()) return rowsCache.rows;
 
-  const [companies, trains, life, delivered, freightWeek, stationLines, referrals, extra, owned17, workshops17, electrified17] =
+  const [companies, trains, life, delivered, freightWeek, stationLines, referrals, extra, owned17, shops26, workshops17, electrified17] =
     await Promise.all([
       prisma.company.findMany({
         select: {
@@ -139,12 +139,15 @@ async function computeLeaderRows(): Promise<LeaderRow[]> {
       extraWorth(),
       // 1.7 : pour les grades de l'infrastructure
       prisma.stationOwnership.groupBy({ by: ["companyId"], _count: { _all: true } }),
+      // 2.6 : deux commerces comptent pour une gare
+      prisma.stationShop.groupBy({ by: ["companyId"], _count: { _all: true } }),
       prisma.workshop.groupBy({ by: ["companyId"], _count: { _all: true } }),
       prisma.line.groupBy({ by: ["companyId"], where: { electrified: true }, _count: { _all: true } }),
     ]);
   const hslKm = await hslKmByCompany().catch(() => new Map<string, number>());
   const countBy = (rows: unknown) => new Map((rows as { companyId: string; _count: { _all: number } }[]).map((r) => [r.companyId, r._count._all]));
   const ownedBy = countBy(owned17);
+  const shopsBy = countBy(shops26);
   const workshopsBy = countBy(workshops17);
   const electrifiedBy = countBy(electrified17);
 
@@ -211,7 +214,7 @@ async function computeLeaderRows(): Promise<LeaderRow[]> {
       reputation: ponctualite,
       maxTrains: c.maxTrains,
       distinctStations: stationsBy.get(c.id)?.size ?? 0,
-      stationsOwned: ownedBy.get(c.id) ?? 0,
+      stationsOwned: (ownedBy.get(c.id) ?? 0) + Math.floor((shopsBy.get(c.id) ?? 0) / 2),
       workshops: workshopsBy.get(c.id) ?? 0,
       electrifiedLines: electrifiedBy.get(c.id) ?? 0,
       foreignStations: [...(stationsBy.get(c.id) ?? [])].filter(isInternational).length,

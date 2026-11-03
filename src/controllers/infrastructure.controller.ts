@@ -37,6 +37,17 @@ import {
   MAX_YARDS,
   YARD_PAY,
   YARD_TIME,
+  buyoutPrice,
+  buyoutPayout,
+  stationValue,
+  SHOP_SLOTS,
+  SHOP_PRICE_SHARE,
+  SHOP_SELL_BACK,
+  SHOP_RENT,
+  SHOPS_PER_RANK_STATION,
+  MAX_SHOPS,
+  shopSlots,
+  shopPrice,
 } from "../services/infrastructure.service";
 import { inHowLong } from "../services/time.service";
 import {
@@ -67,8 +78,40 @@ async function stationCap(companyId: string) {
 }
 
 async function companyOf(req: AuthRequest) {
-  return prisma.company.findUnique({ where: { ownerId: req.userId as string } }) as Promise<{ id: string; name: string; balance: number } | null>;
+  return prisma.company.findUnique({ where: { ownerId: req.userId as string } }) as Promise<{ id: string; name: string; balance: number; isPremium: boolean } | null>;
 }
+
+/* 2.6 : trafic et voyageurs des dernières 24 h par gare, toutes compagnies.
+   Lu dans le remplissage heure par heure (une ligne par ligne et par heure)
+   plutôt que dans les écritures : quelques centaines de lignes au lieu de
+   dizaines de milliers. Gardé une minute en mémoire. */
+let trafficCache: { at: number; traffic: Map<string, number>; passengers: Map<string, number> } | null = null;
+async function stationTraffic() {
+  if (trafficCache && Date.now() - trafficCache.at < 60_000) return trafficCache;
+  const since = new Date(Date.now() - 24 * 3600_000);
+  const perLine = (await prisma.lineLoadHour.groupBy({ by: ["lineId"], where: { hour: { gte: since } }, _sum: { trips: true, passengers: true } })) as {
+    lineId: string; _sum: { trips: number | null; passengers: number | null };
+  }[];
+  const byId = new Map(perLine.map((r) => [r.lineId, r._sum]));
+  const routes = (await prisma.line.findMany({ where: { id: { in: [...byId.keys()] } }, select: { id: true, departureStation: true, arrivalStation: true, stops: true } })) as {
+    id: string; departureStation: string; arrivalStation: string; stops: string[];
+  }[];
+  const traffic = new Map<string, number>();
+  const passengers = new Map<string, number>();
+  for (const l of routes) {
+    const sum = byId.get(l.id);
+    for (const st of new Set(routeOf(l))) {
+      traffic.set(st, (traffic.get(st) ?? 0) + (sum?.trips ?? 0));
+      passengers.set(st, (passengers.get(st) ?? 0) + (sum?.passengers ?? 0));
+    }
+  }
+  trafficCache = { at: Date.now(), traffic, passengers };
+  return trafficCache;
+}
+
+// 2.6 : gares surveillées
+const MAX_WATCHES = 1;
+const MAX_WATCHES_PREMIUM = 5;
 
 // débit conditionnel : deux clics simultanés ne peuvent pas passer sous zéro
 async function debit(companyId: string, amount: number) {
@@ -86,32 +129,32 @@ export async function getInfrastructure(req: AuthRequest, res: Response) {
     prisma.stationOwnership.findMany({ where: { companyId: company.id }, orderBy: { boughtAt: "asc" } }),
     prisma.workshop.findMany({ where: { companyId: company.id }, orderBy: { createdAt: "asc" } }),
     prisma.line.findMany({ where: { companyId: company.id }, select: { id: true, departureStation: true, arrivalStation: true, stops: true, electrified: true, doubleTrack: true, highSpeedAt: true, highSpeedCost: true, _count: { select: { trains: true } } }, orderBy: { createdAt: "asc" } }),
-    prisma.stationOwnership.findMany({ select: { station: true, companyId: true, level: true, invested: true, protectedUntil: true, company: { select: { name: true, emblem: true, liveryColor: true } } } }),
+    prisma.stationOwnership.findMany({ select: { station: true, companyId: true, level: true, invested: true, legacy: true, protectedUntil: true, company: { select: { name: true, emblem: true, liveryColor: true } } } }),
     prisma.yard.findMany({ where: { companyId: company.id }, orderBy: { createdAt: "asc" } }),
   ])) as [
     { station: string; level: number; invested: number; protectedUntil: Date; totalFees: number; totalShops: number; pendingFees: number; pendingShops: number; boughtAt: Date }[],
     { id: string; station: string; createdAt: Date }[],
     { id: string; departureStation: string; arrivalStation: string; stops: string[]; electrified: boolean; doubleTrack: boolean; highSpeedAt: Date | null; highSpeedCost: number; _count: { trains: number } }[],
-    { station: string; companyId: string; level: number; invested: number; protectedUntil: Date; company: { name: string; emblem: string | null; liveryColor: string } }[],
+    { station: string; companyId: string; level: number; invested: number; legacy: boolean; protectedUntil: Date; company: { name: string; emblem: string | null; liveryColor: string } }[],
     { id: string; station: string; createdAt: Date }[]
   ];
 
   // trafic des dernières 24 h par gare (toutes compagnies), pour juger d'un achat
-  const since = new Date(Date.now() - 24 * 3600_000);
-  const trips = (await prisma.transaction.findMany({
-    where: { type: "REVENU_LIGNE", createdAt: { gte: since } },
-    select: { lineId: true },
-  })) as { lineId: string | null }[];
-  const perLine = new Map<string, number>();
-  for (const t of trips) if (t.lineId) perLine.set(t.lineId, (perLine.get(t.lineId) ?? 0) + 1);
-  const routes = (await prisma.line.findMany({ where: { id: { in: [...perLine.keys()] } }, select: { id: true, departureStation: true, arrivalStation: true, stops: true } })) as {
-    id: string; departureStation: string; arrivalStation: string; stops: string[];
-  }[];
-  const traffic = new Map<string, number>();
-  for (const l of routes) for (const st of new Set(routeOf(l))) traffic.set(st, (traffic.get(st) ?? 0) + (perLine.get(l.id) ?? 0));
+  const { traffic, passengers } = await stationTraffic();
 
   const myStations = new Set(lines.flatMap((l) => routeOf(l)));
   const now = Date.now();
+
+  // 2.6 : les commerces (la table est petite : on la lit en entier)
+  const shopRows = (await prisma.stationShop.findMany({ select: { id: true, station: true, companyId: true, price: true, totalIncome: true, pendingIncome: true, boughtAt: true } })) as {
+    id: string; station: string; companyId: string; price: number; totalIncome: number; pendingIncome: number; boughtAt: Date;
+  }[];
+  const takenAt = new Map<string, number>();
+  for (const r of shopRows) takenAt.set(r.station, (takenAt.get(r.station) ?? 0) + 1);
+  const myShops = shopRows.filter((r) => r.companyId === company.id);
+  const myShopAt = new Set(myShops.map((r) => r.station));
+  const watches = (await prisma.stationWatch.findMany({ where: { companyId: company.id }, select: { station: true } })) as { station: string }[];
+  const shopInfo = (st: string) => ({ slots: shopSlots(st), taken: takenAt.get(st) ?? 0, price: shopPrice(st), mine: myShopAt.has(st) });
 
   const cap = await stationCap(company.id);
   // 2.2 : grade, et chantier de LGV déjà en cours
@@ -130,6 +173,15 @@ export async function getInfrastructure(req: AuthRequest, res: Response) {
       homeBonusCap: HOME_BONUS_CAP,
       buyoutCost: BUYOUT_COST,
       buyoutPayout: BUYOUT_PAYOUT,
+      // 2.6 : commerces
+      shopSlots: SHOP_SLOTS,
+      shopPriceShare: SHOP_PRICE_SHARE,
+      shopSellBack: SHOP_SELL_BACK,
+      shopRent: SHOP_RENT,
+      shopsPerRankStation: SHOPS_PER_RANK_STATION,
+      maxShops: MAX_SHOPS,
+      maxWatches: company.isPremium ? MAX_WATCHES_PREMIUM : MAX_WATCHES,
+      isPremium: Boolean(company.isPremium),
       sellBack: SELL_BACK,
       protectionHours: PROTECTION_MS / 3600_000,
       workshopCost: WORKSHOP_COST,
@@ -167,7 +219,23 @@ export async function getInfrastructure(req: AuthRequest, res: Response) {
       sellValue: Math.round(o.invested * SELL_BACK),
       traffic24h: traffic.get(o.station) ?? 0,
       served: myStations.has(o.station),
+      // 2.6 : ce que toucherait l'ancien propriétaire en cas de rachat, et les commerces de sa gare
+      buyoutPayout: buyoutPayout({ station: o.station, level: o.level, invested: o.invested, legacy: (o as { legacy?: boolean }).legacy }),
+      shops: shopInfo(o.station),
     })),
+    // 2.6 : mes commerces
+    shops: myShops.map((r) => ({
+      id: r.id,
+      station: r.station,
+      sizeLabel: SIZE_LABEL[stationSize(r.station)],
+      paid: r.price,
+      totalIncome: r.totalIncome + r.pendingIncome,
+      boughtAt: r.boughtAt,
+      sellValue: Math.round(r.price * SHOP_SELL_BACK),
+      traffic24h: traffic.get(r.station) ?? 0,
+      ...shopInfo(r.station),
+    })),
+    watches: watches.map((w) => w.station),
     // le marché : gares de mon réseau et gares les plus fréquentées, avec leur propriétaire éventuel
     market: [...new Set([...myStations, ...[...traffic.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([s]) => s)])]
       .filter((s) => isKnownStation(s))
@@ -178,12 +246,14 @@ export async function getInfrastructure(req: AuthRequest, res: Response) {
           station: s,
           size: stationSize(s),
           sizeLabel: SIZE_LABEL[stationSize(s)],
-          price: o ? Math.round(o.invested * BUYOUT_COST) : stationPrice(s),
+          price: o ? buyoutPrice(o) : stationPrice(s),
           traffic24h: traffic.get(s) ?? 0,
           served: myStations.has(s),
           owner: o && !mine ? { name: o.company.name, emblem: o.company.emblem, liveryColor: o.company.liveryColor, level: o.level } : null,
           mine,
           protectedUntil: o && !mine && new Date(o.protectedUntil).getTime() > now ? o.protectedUntil : null,
+          shops: shopInfo(s),
+          watched: watches.some((w) => w.station === s),
         };
       })
       .filter((m) => !m.mine)
@@ -339,7 +409,7 @@ export async function buyStation(req: AuthRequest, res: Response) {
     });
 
   const current = (await prisma.stationOwnership.findUnique({ where: { station }, include: { company: { select: { name: true } } } })) as
-    | { station: string; companyId: string; invested: number; protectedUntil: Date; company: { name: string } }
+    | { station: string; companyId: string; level: number; invested: number; legacy: boolean; protectedUntil: Date; company: { name: string } }
     | null;
 
   if (!current) {
@@ -379,12 +449,13 @@ export async function buyStation(req: AuthRequest, res: Response) {
   }
   /* Rachat : le racheteur paie 1,5 fois ce que la gare a coûté, l'ancien
      propriétaire en touche 1,25 fois. Les sommes en attente lui restent dues. */
-  const price = Math.round(current.invested * BUYOUT_COST);
-  const payout = Math.round(current.invested * BUYOUT_PAYOUT);
+  // 2.6 : sur la valeur de la gare, qui ne s'accumule plus ; un propriétaire d'avant la 2.6 garde sa mise
+  const price = buyoutPrice(current);
+  const payout = buyoutPayout(current);
   if (!(await debit(company.id, price))) return res.status(409).json({ error: `Trésorerie insuffisante (${price.toLocaleString("fr-FR")} pi.)` });
   const moved = await prisma.stationOwnership.updateMany({
     where: { station, companyId: current.companyId },
-    data: { companyId: company.id, invested: price, protectedUntil: new Date(Date.now() + PROTECTION_MS), boughtAt: new Date(), totalFees: 0, totalShops: 0, protectionNotified: false },
+    data: { companyId: company.id, invested: price, legacy: false, protectedUntil: new Date(Date.now() + PROTECTION_MS), boughtAt: new Date(), totalFees: 0, totalShops: 0, protectionNotified: false },
   });
   if (moved.count === 0) {
     await prisma.company.update({ where: { id: company.id }, data: { balance: { increment: price } } });
@@ -438,6 +509,123 @@ export async function sellStation(req: AuthRequest, res: Response) {
     prisma.transaction.create({ data: { companyId: company.id, type: "GARE", amount: value, description: `Revente de la gare de ${station}` } }),
   ]);
   return res.json({ ok: true, value });
+}
+
+/* ---------------- 2.6 : commerces ---------------- */
+
+export async function buyShop(req: AuthRequest, res: Response) {
+  const company = await companyOf(req);
+  if (!company) return res.status(404).json({ error: "Créez d'abord votre compagnie" });
+  const station = String(req.body?.station ?? "");
+  if (!isKnownStation(station)) return res.status(400).json({ error: "Gare inconnue du réseau" });
+  const price = shopPrice(station);
+  const slots = shopSlots(station);
+  if ((await prisma.stationShop.count({ where: { companyId: company.id } })) >= MAX_SHOPS)
+    return res.status(409).json({ error: `${MAX_SHOPS} commerces au plus par compagnie : revendez-en un pour en ouvrir un autre` });
+  if ((await prisma.stationShop.count({ where: { station } })) >= slots) return res.status(409).json({ error: `Les ${slots} emplacements de la gare de ${station} sont pris` });
+  if (!(await debit(company.id, price))) return res.status(409).json({ error: `Trésorerie insuffisante (${price.toLocaleString("fr-FR")} pi.)` });
+  try {
+    await prisma.$transaction([
+      prisma.stationShop.create({ data: { station, companyId: company.id, price } }),
+      prisma.transaction.create({ data: { companyId: company.id, type: "GARE", amount: -price, description: `Commerce ouvert : gare de ${station}` } }),
+    ]);
+  } catch {
+    // déjà un commerce dans cette gare (deux clics), ou la dernière place prise à la même seconde
+    await prisma.company.update({ where: { id: company.id }, data: { balance: { increment: price } } });
+    return res.status(409).json({ error: "Vous avez déjà un commerce dans cette gare" });
+  }
+  // la dernière place a pu partir à la même seconde : le dernier arrivé est remboursé
+  if ((await prisma.stationShop.count({ where: { station } })) > slots) {
+    const removed = await prisma.stationShop.deleteMany({ where: { station, companyId: company.id } });
+    if (removed.count) {
+      await prisma.$transaction([
+        prisma.company.update({ where: { id: company.id }, data: { balance: { increment: price } } }),
+        prisma.transaction.create({ data: { companyId: company.id, type: "GARE", amount: price, description: `Commerce remboursé : gare de ${station} (complet)` } }),
+      ]);
+      return res.status(409).json({ error: "La dernière place vient d'être prise" });
+    }
+  }
+  return res.json({ ok: true, price });
+}
+
+export async function sellShop(req: AuthRequest, res: Response) {
+  const company = await companyOf(req);
+  if (!company) return res.status(404).json({ error: "Créez d'abord votre compagnie" });
+  const station = String(req.body?.station ?? "");
+  const shop = (await prisma.stationShop.findUnique({ where: { station_companyId: { station, companyId: company.id } } })) as { id: string; price: number; pendingIncome: number } | null;
+  if (!shop) return res.status(404).json({ error: "Vous n'avez pas de commerce dans cette gare" });
+  const gone = await prisma.stationShop.deleteMany({ where: { id: shop.id } });
+  if (!gone.count) return res.status(409).json({ error: "Commerce déjà revendu" });
+  const value = Math.round(shop.price * SHOP_SELL_BACK) + shop.pendingIncome;
+  await prisma.$transaction([
+    prisma.company.update({ where: { id: company.id }, data: { balance: { increment: value } } }),
+    prisma.transaction.create({ data: { companyId: company.id, type: "GARE", amount: value, description: `Commerce revendu : gare de ${station}` } }),
+  ]);
+  return res.json({ ok: true, value });
+}
+
+/* ---------------- 2.6 : surveiller une gare ---------------- */
+
+export async function toggleWatch(req: AuthRequest, res: Response) {
+  const company = await companyOf(req);
+  if (!company) return res.status(404).json({ error: "Créez d'abord votre compagnie" });
+  const station = String(req.body?.station ?? "");
+  if (!isKnownStation(station)) return res.status(400).json({ error: "Gare inconnue du réseau" });
+  const key = { companyId_station: { companyId: company.id, station } };
+  if (await prisma.stationWatch.findUnique({ where: key })) {
+    await prisma.stationWatch.delete({ where: key });
+    return res.json({ ok: true, watching: false });
+  }
+  const max = company.isPremium ? MAX_WATCHES_PREMIUM : MAX_WATCHES;
+  if ((await prisma.stationWatch.count({ where: { companyId: company.id } })) >= max) {
+    return res.status(409).json({ error: company.isPremium ? `${max} gares surveillées au plus` : `Une gare surveillée à la fois (cinq avec le Premium)` });
+  }
+  await prisma.stationWatch.create({ data: { companyId: company.id, station } });
+  return res.json({ ok: true, watching: true });
+}
+
+/* ---------------- 2.6 (Premium) : le conseiller des commerces ----------------
+   Pour chaque gare : ce que rapporterait une place de plus, d'après les
+   voyageurs des dernières 24 h, et en combien de jours elle serait payée. */
+export async function shopAdvisor(req: AuthRequest, res: Response) {
+  const company = await companyOf(req);
+  if (!company) return res.status(404).json({ error: "Créez d'abord votre compagnie" });
+  if (!company.isPremium) return res.json({ locked: true });
+  const [{ passengers }, owners, shops] = (await Promise.all([
+    stationTraffic(),
+    prisma.stationOwnership.findMany({ select: { station: true, level: true, companyId: true } }),
+    prisma.stationShop.groupBy({ by: ["station"], _count: { _all: true } }),
+  ])) as [Awaited<ReturnType<typeof stationTraffic>>, { station: string; level: number; companyId: string }[], { station: string; _count: { _all: number } }[]];
+  const ownerOf = new Map(owners.map((o) => [o.station, o]));
+  const taken = new Map(shops.map((r) => [r.station, r._count._all]));
+  const mine = new Set(((await prisma.stationShop.findMany({ where: { companyId: company.id }, select: { station: true } })) as { station: string }[]).map((r) => r.station));
+  const rows = [...passengers.entries()]
+    .filter(([st]) => isKnownStation(st))
+    .map(([st, pax]) => {
+      const o = ownerOf.get(st);
+      const pool = pax * SHOP_PER_PASSENGER * (SHOP_LEVEL_MULT[o?.level ?? 1] ?? 1);
+      const n = taken.get(st) ?? 0;
+      const slots = shopSlots(st);
+      const keepers = mine.has(st) ? n : n + 1;
+      const perDay = Math.round((pool * (o ? 1 - SHOP_RENT : 1)) / Math.max(1, keepers));
+      const price = shopPrice(st);
+      return {
+        station: st,
+        sizeLabel: SIZE_LABEL[stationSize(st)],
+        passengers24h: pax,
+        slots,
+        taken: n,
+        mine: mine.has(st),
+        price,
+        perDay,
+        paybackDays: perDay > 0 ? Math.round((price / perDay) * 10) / 10 : null,
+        ownerLevel: o?.level ?? null,
+      };
+    })
+    .filter((r) => r.mine || r.taken < r.slots)
+    .sort((a, b) => (a.paybackDays ?? 1e9) - (b.paybackDays ?? 1e9))
+    .slice(0, 25);
+  return res.json({ locked: false, rows });
 }
 
 /* ---------------- ateliers ---------------- */

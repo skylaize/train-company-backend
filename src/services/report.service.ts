@@ -264,20 +264,22 @@ async function dailySeries(companyId: string, from: Date) {
     SELECT to_char(date_trunc('day', ("createdAt" AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Paris'), 'YYYY-MM-DD') AS day,
            COALESCE(SUM(CASE WHEN type IN ('REVENU_LIGNE', 'FRET') AND amount > 0 THEN amount WHEN type = 'PEAGE' THEN amount ELSE 0 END), 0)::int AS revenue,
            COALESCE(SUM(CASE WHEN type = 'REPARATION' THEN -amount ELSE 0 END), 0)::int AS repairs,
-           COALESCE(SUM(CASE WHEN type = 'ENTRETIEN' THEN -amount ELSE 0 END), 0)::int AS upkeep
+           COALESCE(SUM(CASE WHEN type = 'ENTRETIEN' THEN -amount ELSE 0 END), 0)::int AS upkeep,
+           -- 2.5.1 : énergie (moins le courant revendu), taxe carbone, péages de voie et redevances de quai, payés ou encaissés
+           COALESCE(SUM(CASE WHEN type IN ('ENERGIE', 'ENERGIE_VENTE', 'CARBONE', 'PEAGE_VOIE', 'REDEVANCE_QUAI') THEN -amount ELSE 0 END), 0)::int AS charges
     FROM "Transaction"
     WHERE "companyId" = ${companyId} AND "createdAt" >= ${from}
     GROUP BY 1
     ORDER BY 1
-  `) as { day: string; revenue: number; repairs: number; upkeep: number }[];
+  `) as { day: string; revenue: number; repairs: number; upkeep: number; charges: number }[];
 
   // sept cases, même les jours sans écriture : un trou dans la série serait illisible
   const byDay = new Map(rows.map((r) => [r.day, r]));
-  const out: { day: string; revenue: number; repairs: number; upkeep: number }[] = [];
+  const out: { day: string; revenue: number; repairs: number; upkeep: number; charges: number }[] = [];
   for (let i = 6; i >= 0; i--) {
     const d = parisDay(new Date(Date.now() - i * DAY_MS));
     const r = byDay.get(d);
-    out.push({ day: d, revenue: Number(r?.revenue ?? 0), repairs: Number(r?.repairs ?? 0), upkeep: Number(r?.upkeep ?? 0) });
+    out.push({ day: d, revenue: Number(r?.revenue ?? 0), repairs: Number(r?.repairs ?? 0), upkeep: Number(r?.upkeep ?? 0), charges: Number(r?.charges ?? 0) });
   }
   return out;
 }
@@ -295,7 +297,7 @@ function parisHour(d: Date) {
 export async function windowReport(companyId: string, from: Date, to: Date) {
   const where = { companyId, createdAt: { gte: from, lte: to } };
 
-  const [byType, autoRepairs, trainIds, constructions, staffLeft, raises, broken] = await Promise.all([
+  const [byType, autoRepairs, trainIds, constructions, staffLeft, raises, broken, allTx] = await Promise.all([
     // sans les primes d'assurance, pour que « fret » compte des livraisons et non des primes
     prisma.transaction.groupBy({
       by: ["type"],
@@ -314,6 +316,8 @@ export async function windowReport(companyId: string, from: Date, to: Date) {
     prisma.transaction.count({ where: { ...where, type: "PERSONNEL", description: { contains: "quitté" } } }),
     prisma.staff.findMany({ where: { companyId, raiseRequested: true }, select: { name: true } }),
     prisma.train.findMany({ where: { companyId, status: "MAINTENANCE" }, select: { name: true } }),
+    // 2.5.1 : toutes les écritures de la fenêtre, pour que le détail retombe sur le solde
+    prisma.transaction.aggregate({ where, _sum: { amount: true } }),
   ]);
 
   const ids = (trainIds as { id: string }[]).map((t) => t.id);
@@ -361,6 +365,20 @@ export async function windowReport(companyId: string, from: Date, to: Date) {
     raiseRequests: (raises as { name: string }[]).map((r) => r.name || "Un employé"),
     brokenNow: (broken as { name: string }[]).map((b) => b.name),
     bestLine,
+    /* 2.5.1 : ce que le détail ne montrait pas. Les salaires ne sont pas des
+       écritures (prélevés à chaque tour) : c'est l'écart entre le solde et la
+       somme des écritures, calculé côté page avec le solde réel. */
+    energy: get("ENERGIE").sum + get("ENERGIE_VENTE").sum,
+    carbon: get("CARBONE").sum,
+    tolls: get("PEAGE_VOIE").sum + get("REDEVANCE_QUAI").sum,
+    otherOps:
+      ((allTx as { _sum: { amount: number | null } })._sum.amount ?? 0) -
+      [
+        "REVENU_LIGNE", "PEAGE", "REPARATION", "ENTRETIEN", "ACHAT_FRET", "VENTE_FRET",
+        "ENERGIE", "ENERGIE_VENTE", "CARBONE", "PEAGE_VOIE", "REDEVANCE_QUAI",
+      ].reduce((sum, k) => sum + get(k).sum, 0) -
+      get("FRET").sum, // le fret livré est déjà compté ; ses primes d'assurance restent dans « autres »
+    txTotal: (allTx as { _sum: { amount: number | null } })._sum.amount ?? 0,
   };
 }
 

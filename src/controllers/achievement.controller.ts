@@ -242,6 +242,22 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
   // 2.5.1 : les campagnes terminées, avec leurs dates (campagne éclair, toutes les régions)
   const campaignRows251 = (await prisma.regionCampaign.findMany({ where: { companyId: company.id, completedAt: { not: null } }, select: { startedAt: true, completedAt: true } }).catch(() => [])) as { startedAt: Date; completedAt: Date | null }[];
   const campaignRegions251 = (await campaignRegions(company.id).catch(() => [])).length;
+  // 2.6 : commerces en gare, gares surveillées, trésorerie du soir, VB2N
+  const [shops26, watches26, balances26, trains26, ownedStations26] = (await Promise.all([
+    prisma.stationShop.findMany({ where: { companyId: company.id }, select: { station: true, totalIncome: true, pendingIncome: true } }).catch(() => []),
+    prisma.stationWatch.count({ where: { companyId: company.id } }).catch(() => 0),
+    prisma.dailyBalance.findMany({ where: { companyId: company.id }, orderBy: { day: "desc" }, take: 8, select: { balance: true } }).catch(() => []),
+    prisma.train.findMany({ where: { companyId: company.id, lineId: { not: null } }, select: { heritage: true } }),
+    prisma.stationOwnership.findMany({ where: { companyId: company.id }, select: { station: true } }),
+  ])) as [{ station: string; totalIncome: number; pendingIncome: number }[], number, { balance: number }[], { heritage: unknown }[], { station: string }[]];
+  // une gare à vous où au moins trois autres compagnies tiennent commerce
+  const tenants26 = ownedStations26.length
+    ? ((await prisma.stationShop.groupBy({ by: ["station"], where: { station: { in: ownedStations26.map((o) => o.station) }, companyId: { not: company.id } }, _count: { _all: true } }).catch(() => [])) as { _count: { _all: number } }[])
+    : [];
+  const shopIncome26 = shops26.reduce((a, s) => a + s.totalIncome + s.pendingIncome, 0);
+  // sept soirs de suite en hausse (les soldes sont du plus récent au plus ancien)
+  const greenWeek26 = balances26.length >= 8 && balances26.slice(0, 7).every((b, i) => b.balance > balances26[i + 1].balance);
+  const duplexRunning26 = trains26.some((t) => (t.heritage as { kind?: string } | null)?.kind === "DUPLEX");
   const [campaignsDone25, graduates25, graduated25] = (await Promise.all([
     prisma.regionCampaign.count({ where: { companyId: company.id, completedAt: { not: null } } }),
     prisma.mentorship.count({ where: { mentorId: company.id, endReason: "DIPLOME" } }),
@@ -927,6 +943,15 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     { id: "diplome", name: "Diplômé", description: "Atteindre le grade de Baron du rail avec un tuteur", liveMet: graduated25 >= 1 },
     { id: "premier-apprenti", name: "Transmettre", description: "Mener un apprenti jusqu'au diplôme", liveMet: graduates25 >= 1 },
     { id: "maitre-de-quai", name: "Maître de quai", description: "Mener trois apprentis jusqu'au diplôme", liveMet: graduates25 >= 3 },
+    // ---- 2.6 : commerces en gare, gares surveillées, trésorerie du soir ----
+    { id: "pignon-sur-rue", name: "Pignon sur rue", description: "Ouvrir un commerce dans une gare", liveMet: shops26.length >= 1 },
+    { id: "galerie-marchande", name: "Galerie marchande", description: "Tenir trois commerces en même temps", liveMet: shops26.length >= 3 },
+    { id: "grands-boulevards", name: "Sur les grands boulevards", description: "Ouvrir un commerce dans une capitale", liveMet: shops26.some((s) => stationSize(s.station) === 5) },
+    { id: "rentier", name: "Rentier", description: "Gagner 50 000 pi. avec vos commerces", liveMet: shopIncome26 >= 50_000 },
+    { id: "bailleur", name: "Bailleur", description: "Louer des emplacements à trois autres compagnies dans l'une de vos gares", liveMet: tenants26.some((t) => t._count._all >= 3) },
+    { id: "aux-aguets", name: "Aux aguets", description: "Surveiller une gare", liveMet: watches26 >= 1 },
+    { id: "dans-le-vert", name: "Dans le vert", description: "Finir sept soirs de suite avec plus d'argent que la veille", liveMet: greenWeek26 },
+    { id: "deux-etages", name: "Deux étages", description: "Faire rouler une VB2N restaurée", liveMet: duplexRunning26 },
   ];
 
   /* 1.6 : « Premiers pas » récompense la liste de départ au complet. Chaque étape

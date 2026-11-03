@@ -17,7 +17,7 @@ export type RidershipLine = {
   arrivalStation: string;
   stops: string[];
   priceRatio: number;
-  trains: { model: string; cars: string[]; status: string; workshopUntil?: Date | null }[];
+  trains: { model: string; cars: string[]; status: string; workshopUntil?: Date | null; heritage?: unknown }[];
 };
 
 type Events = Awaited<ReturnType<typeof activeStationEvents>>;
@@ -72,7 +72,7 @@ export async function runAutoPricing() {
     where: { autoPrice: true, company: { isPremium: true } },
     select: {
       id: true, companyId: true, departureStation: true, arrivalStation: true, stops: true, priceRatio: true,
-      trains: { select: { model: true, cars: true, status: true, workshopUntil: true } },
+      trains: { select: { model: true, cars: true, status: true, workshopUntil: true, heritage: true } },
     },
   })) as (RidershipLine & { companyId: string })[];
   if (lines.length === 0) return 0;

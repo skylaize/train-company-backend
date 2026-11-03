@@ -246,7 +246,7 @@ export async function changeCars(req: AuthRequest, res: Response) {
       prisma.transaction.create({ data: { companyId: company.id, type: "COMPOSITION", amount: refund, description: `${def.label} ${wagon ? "dételé" : "retirée"} de ${train.name}`, trainId: train.id } }),
     ]);
   }
-  return res.json({ cars, seats: seatsOf({ model: train.model, cars }) });
+  return res.json({ cars, seats: seatsOf({ model: train.model, cars, heritage: (train as { heritage?: unknown }).heritage }) });
 }
 
 

@@ -131,6 +131,9 @@ model Company {
   decisions    Decision[]
   // 1.7 : infrastructures, emprunts, bourse
   stationsOwned StationOwnership[]
+  stationShops  StationShop[] // 2.6 : commerces loués dans les gares
+  stationWatches StationWatch[] // 2.6 : gares surveillées
+  dailyBalances DailyBalance[] // 2.6 : solde noté chaque soir
   workshops    Workshop[]
   customAlerts CustomAlert[] // 2.1.1 (Premium)
   yards        Yard[]       // 2.1 : gares de triage
@@ -877,6 +880,8 @@ model StationOwnership {
   totalShops     Int      @default(0)
   boughtAt       DateTime @default(now())
   protectionNotified Boolean @default(false) // Premium : fin de protection déjà signalée
+  // 2.6 : achetée avant la refonte (le rachat ne s'accumule plus) : son propriétaire garde sa mise, 1,25 × ce qu'il a payé
+  legacy         Boolean  @default(false)
 
   company        Company  @relation(fields: [companyId], references: [id])
   companyId      String
@@ -1363,4 +1368,49 @@ model MentorNote {
   createdAt    DateTime @default(now())
 
   @@index([mentorshipId, createdAt])
+}
+
+// 2.6 : un emplacement de commerce dans une gare. Plusieurs compagnies par gare
+// (selon sa taille), une seule place par compagnie et par gare. Les commerces
+// se partagent ce que dépensent les voyageurs ; le propriétaire de la gare
+// en touche un loyer.
+model StationShop {
+  id            String   @id @default(uuid())
+  station       String
+  price         Int
+  boughtAt      DateTime @default(now())
+  pendingIncome Int      @default(0) // en attente de versement (versé toutes les heures)
+  totalIncome   Int      @default(0)
+
+  company       Company  @relation(fields: [companyId], references: [id])
+  companyId     String
+
+  @@unique([station, companyId])
+  @@index([station])
+}
+
+// 2.6 : une gare surveillée. Tous les surveillants sont prévenus au même
+// moment : 10 minutes avant la fin de la protection, puis à la fin.
+model StationWatch {
+  station   String
+  createdAt DateTime  @default(now())
+  soonFor   DateTime? // fin de protection déjà annoncée « dans 10 min »
+  freeFor   DateTime? // fin de protection déjà annoncée « libre »
+
+  company   Company   @relation(fields: [companyId], references: [id])
+  companyId String
+
+  @@id([companyId, station])
+  @@index([station])
+}
+
+// 2.6 : le solde de chaque compagnie, noté chaque soir à minuit (heure de Paris)
+model DailyBalance {
+  day       String // AAAA-MM-JJ, le jour qui se termine
+  balance   Int
+
+  company   Company @relation(fields: [companyId], references: [id])
+  companyId String
+
+  @@id([companyId, day])
 }

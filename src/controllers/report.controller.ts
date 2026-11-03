@@ -56,3 +56,15 @@ export async function dismissAbsenceReport(req: AuthRequest, res: Response) {
   });
   return res.json({ ok: true });
 }
+
+/* 2.6 : la trésorerie réelle, pour tous. Le solde noté chaque soir à minuit,
+   et celui de maintenant : l'écart d'un jour à l'autre compte tout (salaires,
+   énergie, taxe carbone, achats), sans rien estimer. */
+export async function getBalanceHistory(req: AuthRequest, res: Response) {
+  const company = await companyOf(req);
+  if (!company) return res.status(404).json({ error: "Créez d'abord votre compagnie" });
+  const rows = (await prisma.dailyBalance.findMany({ where: { companyId: company.id }, orderBy: { day: "desc" }, take: 8, select: { day: true, balance: true } })) as {
+    day: string; balance: number;
+  }[];
+  return res.json({ days: rows.reverse(), now: company.balance });
+}

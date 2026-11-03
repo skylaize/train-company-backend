@@ -3,7 +3,7 @@ import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
 import { buildLeaderRows } from "../services/leaderboard.service";
 import { RANK_DEFINITIONS } from "../services/career.service";
-import { CREW_ROLES } from "../services/crew.service";
+import { CREW_ROLES, controllerBonus, driverEffects } from "../services/crew.service";
 import {
   ROLES,
   salaryFor,
@@ -17,6 +17,8 @@ import {
   TICKS_PER_HOUR,
   coverageAllocation,
   estimatedSavingsPerHour,
+  WEAR_PER_TICK,
+  repairCostPerPoint,
 } from "../services/staff.service";
 
 async function getOwnedCompanyOrFail(userId: string) {
@@ -58,7 +60,7 @@ export async function getStaffOverview(req: AuthRequest, res: Response) {
     return res.status(404).json({ error: "Créez d'abord votre compagnie" });
   }
 
-  const [staff, trainCount, revenue24h] = await Promise.all([
+  const [staff, trainCount, revenue24h, byTrain24h] = await Promise.all([
     prisma.staff.findMany({ where: { companyId: company.id }, orderBy: { hiredAt: "asc" } }),
     prisma.train.count({ where: { companyId: company.id } }),
     prisma.transaction.aggregate({
@@ -70,7 +72,16 @@ export async function getStaffOverview(req: AuthRequest, res: Response) {
       },
       _sum: { amount: true },
     }),
+    // 2.5.1 : la recette de chaque rame, pour estimer l'apport d'un contrôleur à bord
+    prisma.transaction.groupBy({
+      by: ["trainId"],
+      where: { companyId: company.id, type: "REVENU_LIGNE", amount: { gt: 0 }, trainId: { not: null }, createdAt: { gte: new Date(Date.now() - 24 * 3600_000) } },
+      _sum: { amount: true },
+    }),
   ]);
+  const trainRevenuePerHour = new Map(
+    (byTrain24h as { trainId: string | null; _sum: { amount: number | null } }[]).map((r) => [r.trainId ?? "", (r._sum.amount ?? 0) / 24])
+  );
   const rows = staff as StaffRow[];
   const trainNames = new Map(
     ((await prisma.train.findMany({ where: { companyId: company.id }, select: { id: true, name: true } })) as { id: string; name: string }[]).map((t) => [t.id, t.name])
@@ -79,6 +90,21 @@ export async function getStaffOverview(req: AuthRequest, res: Response) {
   const allocation = coverageAllocation(rows, trainCount);
   const revenuePerHour = ((revenue24h as { _sum: { amount: number | null } })._sum.amount ?? 0) / 24;
 
+  /* 2.5.1 : un équipier à bord affichait « ~0 pi./h » : l'estimation ne
+     connaissait que les postes de dépôt. Un contrôleur rapporte sa part de la
+     recette de sa rame (la recette est déjà majorée de son bonus) ; un
+     conducteur fait économiser l'usure qu'il évite. Sans rame, il n'apporte rien. */
+  const crewValue = (s: StaffRow) => {
+    if (!(CREW_ROLES as readonly string[]).includes(s.role)) return null;
+    const trainId = (s as StaffRow & { trainId?: string | null }).trainId;
+    if (!trainId) return 0;
+    if (s.role === "CONTROLEUR") {
+      const b = controllerBonus(s.level);
+      return ((trainRevenuePerHour.get(trainId) ?? 0) * (b - 1)) / b;
+    }
+    const saved = 1 - driverEffects(s.level).wear;
+    return WEAR_PER_TICK * effects.wearMultiplier * saved * repairCostPerPoint(effects) * TICKS_PER_HOUR;
+  };
   const members = rows.map((s) => {
     const nextLevel = s.level < MAX_LEVEL ? s.level + 1 : null;
     const nextThreshold = nextLevel ? LEVEL_THRESHOLDS[nextLevel - 1] : null;
@@ -100,7 +126,7 @@ export async function getStaffOverview(req: AuthRequest, res: Response) {
       nextEffect: nextLevel ? ROLES[s.role]?.effect(nextLevel) ?? null : null,
       // rames réellement prises en charge (les plus expérimentés servent en premier)
       covered: allocation.get(s.id) ?? null,
-      savingsPerHour: Math.round(estimatedSavingsPerHour(s, allocation.get(s.id) ?? 0, effects, revenuePerHour)),
+      savingsPerHour: Math.round(crewValue(s) ?? estimatedSavingsPerHour(s, allocation.get(s.id) ?? 0, effects, revenuePerHour)),
       hiredAt: s.hiredAt,
       // 2.0 : la rame où l'équipier est affecté
       crew: (CREW_ROLES as readonly string[]).includes(s.role),

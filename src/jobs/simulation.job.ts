@@ -14,7 +14,8 @@ import { runMorningDigest } from "../services/report.service";
 import { activeStationEvents, competitionMap, routeDemand, routeHasBoost, maybeSpawnStationEvent, pairKey, watchCompetition } from "../services/station.service";
 import { routeOf, routeInDirection } from "../services/route.service";
 import { passengersPerDeparture, tripLoad, speedFactor } from "../services/ridership.service";
-import { stationOwners, stationEffects, accruePending, payStationIncome, workshopsByCompany, WORKSHOP_WEAR, ELECTRIC_SPEED, ELECTRIC_WEAR, DOUBLE_SPEED, DOUBLE_DELAY, cadenceBonus, yardsByCompany, YARD_PAY } from "../services/infrastructure.service";
+import { runStationWatches, runDailyBalance } from "../services/watch.service";
+import { stationOwners, stationShops, stationEffects, accruePending, payStationIncome, workshopsByCompany, WORKSHOP_WEAR, ELECTRIC_SPEED, ELECTRIC_WEAR, DOUBLE_SPEED, DOUBLE_DELAY, cadenceBonus, yardsByCompany, YARD_PAY } from "../services/infrastructure.service";
 import { runLoanPayments, runSharePrices, runDividends, runWeeklyReports, runStockOrders, runPremiumAlerts } from "../services/finance.service";
 import { runAutoPricing } from "../services/pricing.service";
 import { isFreightModel, modelBonus } from "../services/freight.service";
@@ -51,7 +52,7 @@ import { openContainer, outcomeText } from "../services/sealed.service";
 let lastPricingHour = -1;
 import { checkPriceAlerts, runStandingOrders } from "../controllers/market.controller";
 import { DLC_MODELS, MOUNTAIN_STATIONS, MOUNTAIN_WEAR, mountainDemand, isWeekend, CORSICA_STATIONS, CORSICA_WEAR, CORSICA_RAILCAR, corsicaDemand, ferryMultiplier } from "../services/dlc.service";
-import { runWrecks, heritageOf, HERITAGE_WEAR } from "../services/wreck.service";
+import { runWrecks, heritageOf, heritagePrestige, HERITAGE_WEAR } from "../services/wreck.service";
 import { reconcilePayments } from "../controllers/billing.controller";
 import { refreshWeather, weatherMap, routeWeather, StationWeather } from "../services/realweather.service";
 import {
@@ -265,6 +266,9 @@ async function runSimulationTick(timer: TickTimer) {
       await sendToCompany(companyId, { title, body, url: "/dashboard", tag: "decision" });
     })).catch((err) => console.error("[décisions] échec :", (err as Error).message));
   }
+  // 2.6 : gares surveillées (chaque tour, pour prévenir tout le monde au même moment) et solde du soir
+  await T("gares surveillées", () => runStationWatches()).catch((err) => console.error("[surveillance] échec :", (err as Error).message));
+  await T("solde du soir", () => runDailyBalance()).catch((err) => console.error("[solde du soir] échec :", (err as Error).message));
   // 1.7 : revenus des gares (toutes les heures), échéances d'emprunt, cours de bourse, dividendes, rapport hebdo
   if (tickCount % 120 === 0) await T("revenus des gares", () => payStationIncome()).catch((err) => console.error("[gares] échec :", (err as Error).message));
   await T("emprunts", () => runLoanPayments(async (companyId, title, body) => {
@@ -498,7 +502,7 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
   // gares et concurrence : calculées une fois pour tout le tour
   /* 1.5 : les gares d'un temps fort de saison s'ajoutent aux événements du
      moment, et les correspondances de chaque compagnie sont comptées une fois. */
-  const [liveEvents, competition, hubCounts, decisionEffects, owners, workshops, regionBonuses] = await Promise.all([
+  const [liveEvents, competition, hubCounts, decisionEffects, owners, workshops, regionBonuses, shopkeepers] = await Promise.all([
     activeStationEvents(),
     competitionMap(),
     allStationCounts(),
@@ -507,6 +511,8 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
     workshopsByCompany(),
     // 2.3 : les régions tenues par chaque alliance cette semaine
     regionBonusMap().catch(() => new Map() as RegionBonuses),
+    // 2.6 : les commerçants de chaque gare
+    stationShops().catch(() => new Map<string, string[]>()),
   ]);
   // 1.7 : redevances et commerces dus aux propriétaires de gares, versés d'un bloc chaque heure
   const pending = new Map<string, { fees: number; shops: number }>();
@@ -729,7 +735,7 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
           // 2.0 : le billet du matériel d'extension, le contrôleur à bord
           (dlcModel?.fare ?? 1) *
           // 2.0 : le prestige d'une rame de collection
-          (heritage?.prestige ?? 1) *
+          heritagePrestige(heritage) *
           controllerBonus(crew?.CONTROLEUR) *
           // 2.1 : double voie, le cadencement attire du monde
           (doubled ? cadenceBonus(runningOnLine.get(train.lineId as string) ?? 1) : 1) *
@@ -742,7 +748,7 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
       /* 1.7 : gares achetées. Chez soi, le trajet rapporte un peu plus ; chez
          les autres, il leur doit une redevance de quai ; partout où il y a des
          commerces, ses voyageurs y dépensent. */
-      const infra = stationEffects(route, train.companyId, revenue, load.passengers, owners, alliesFor(train.companyId));
+      const infra = stationEffects(route, train.companyId, revenue, load.passengers, owners, alliesFor(train.companyId), shopkeepers);
       // 2.4 : +3 % pour les co-financeurs d'une liaison rénovée
       const revenueHome = Math.round(revenue * infra.homeBonus * cofunderMultiplier(route, train.companyId));
       // 2.4 : péages des liaisons concédées à d'autres compagnies
@@ -854,7 +860,7 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
     for (const t of trains) await runTrain(t);
   }, "lignes voyageurs");
   await flushProgress(progressUpdates);
-  await accruePending(pending).catch((err) => console.error("[gares] redevances non enregistrées :", (err as Error).message));
+  await accruePending(pending, shopkeepers, owners).catch((err) => console.error("[gares] redevances non enregistrées :", (err as Error).message));
 }
 
 export async function runFreightContracts(weather: Map<string, StationWeather> = new Map()) {
