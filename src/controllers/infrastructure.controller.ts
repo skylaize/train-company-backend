@@ -89,9 +89,9 @@ let trafficCache: { at: number; traffic: Map<string, number>; passengers: Map<st
 async function stationTraffic() {
   if (trafficCache && Date.now() - trafficCache.at < 60_000) return trafficCache;
   const since = new Date(Date.now() - 24 * 3600_000);
-  const perLine = (await prisma.lineLoadHour.groupBy({ by: ["lineId"], where: { hour: { gte: since } }, _sum: { trips: true, passengers: true } })) as {
-    lineId: string; _sum: { trips: number | null; passengers: number | null };
-  }[];
+  // le résultat est lu à part puis typé : un « as » directement sur groupBy trompe l'inférence de Prisma
+  const grouped = await prisma.lineLoadHour.groupBy({ by: ["lineId"], where: { hour: { gte: since } }, _sum: { trips: true, passengers: true } });
+  const perLine = grouped as unknown as { lineId: string; _sum: { trips: number | null; passengers: number | null } }[];
   const byId = new Map(perLine.map((r) => [r.lineId, r._sum]));
   const routes = (await prisma.line.findMany({ where: { id: { in: [...byId.keys()] } }, select: { id: true, departureStation: true, arrivalStation: true, stops: true } })) as {
     id: string; departureStation: string; arrivalStation: string; stops: string[];
