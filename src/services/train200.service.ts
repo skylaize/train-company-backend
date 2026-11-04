@@ -70,7 +70,7 @@ export function planRoute(stations: string[], start: Date, durationMs = TRAIN200
   });
 }
 
-async function servedStations() {
+export async function servedStations() {
   const lines = await prisma.line.findMany({ select: { departureStation: true, arrivalStation: true, stops: true } });
   return lines.flatMap((l) => [l.departureStation, ...(l.stops ?? []), l.arrivalStation]);
 }
@@ -132,5 +132,79 @@ export async function runTrain200(notify: Notify) {
     }
     // on avance gare par gare : un tour interrompu reprend où il s'était arrêté
     await prisma.specialTrain.update({ where: { id: TRAIN200_ID }, data: { lastStop: i } });
+  }
+}
+
+/* ============================================================
+   2.6 : le Train des 500.
+
+   Même voyage que le Train des 200, pour fêter les 500 compagnies. Il se
+   prépare tout seul : dès que la 500e compagnie est fondée, son départ est
+   fixé 24 heures plus tard (à l'heure pile), son trajet est tracé sur les
+   lignes du moment et l'annonce part sur Discord. TRAIN500_START (date ISO)
+   permet de choisir l'heure de départ à la main.
+   ============================================================ */
+
+export const TRAIN500_ID = "train-500";
+export const TRAIN500_GOAL = 500;
+export const TRAIN500_REWARD = 5_000;
+const TRAIN500_NOTICE_MS = 24 * 3_600_000;
+
+let train500Checked = 0;
+export async function ensureTrain500() {
+  const existing = await prisma.specialTrain.findUnique({ where: { id: TRAIN500_ID } });
+  if (existing) return existing;
+  // le compte des compagnies n'est relu qu'une fois par minute
+  if (Date.now() - train500Checked < 60_000) return null;
+  train500Checked = Date.now();
+  const fromEnv = process.env.TRAIN500_START ? new Date(process.env.TRAIN500_START) : null;
+  const manual = fromEnv && !Number.isNaN(fromEnv.getTime()) ? fromEnv : null;
+  if (!manual && (await prisma.company.count()) < TRAIN500_GOAL) return null;
+  // départ dans 24 h, à l'heure pile : le temps de prévenir tout le monde
+  const start = manual ?? new Date(Math.ceil((Date.now() + TRAIN500_NOTICE_MS) / 3_600_000) * 3_600_000);
+  const route = planRoute(await servedStations(), start);
+  if (route.length < 2) return null;
+  try {
+    return await prisma.specialTrain.create({
+      data: { id: TRAIN500_ID, startsAt: start, endsAt: new Date(start.getTime() + TRAIN200_DURATION_MS), route: route as unknown as object },
+    });
+  } catch {
+    return prisma.specialTrain.findUnique({ where: { id: TRAIN500_ID } });
+  }
+}
+
+export async function runTrain500(notify: Notify) {
+  const train = await ensureTrain500();
+  if (!train) return;
+  const route = train.route as unknown as Stop[];
+  const now = Date.now();
+  if (now < new Date(train.startsAt).getTime() || train.lastStop >= route.length - 1) return;
+  let reached = -1;
+  for (let i = 0; i < route.length; i++) if (new Date(route[i].at).getTime() <= now) reached = i;
+  if (reached <= train.lastStop) return;
+
+  for (let i = train.lastStop + 1; i <= reached; i++) {
+    const station = route[i].station;
+    const lines: { companyId: string }[] = await prisma.line.findMany({
+      where: { OR: [{ departureStation: station }, { arrivalStation: station }, { stops: { has: station } }] },
+      select: { companyId: true },
+    });
+    for (const companyId of [...new Set(lines.map((l) => l.companyId))]) {
+      try {
+        await prisma.specialTrainVisit.create({ data: { trainId: TRAIN500_ID, companyId, station, reward: TRAIN500_REWARD } });
+      } catch {
+        continue; // une prime par compagnie pour tout le voyage
+      }
+      await prisma.$transaction([
+        prisma.company.update({ where: { id: companyId }, data: { balance: { increment: TRAIN500_REWARD } } }),
+        prisma.transaction.create({ data: { companyId, type: "TRAIN_500", amount: TRAIN500_REWARD, description: `Le Train des 500 est passé à ${station}` } }),
+      ]);
+      await notify(
+        companyId,
+        "Le Train des 500 est passé chez vous",
+        `En gare de ${station} : +${TRAIN500_REWARD.toLocaleString("fr-FR")} pi., et le nom de votre compagnie est peint sur ses voitures.`
+      ).catch(() => undefined);
+    }
+    await prisma.specialTrain.update({ where: { id: TRAIN500_ID }, data: { lastStop: i } });
   }
 }

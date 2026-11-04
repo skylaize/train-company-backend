@@ -25,7 +25,7 @@ import { economy, inTrial } from "../services/settings.service";
 import { meterAdd, routeInOutage, tripEnergy } from "../services/energy.service";
 import { cofunderMultiplier, routeTrack, tollsFor, wearTrack } from "../services/track.service";
 import { economyAfterTick, economyBeforeTick } from "../services/economy24.service";
-import { runTrain200 } from "../services/train200.service";
+import { runTrain200, runTrain500 } from "../services/train200.service";
 import { seasonalStationEvents } from "../services/season.service";
 import { allStationCounts, hubMultiplier } from "../services/hub.service";
 import { runTenders } from "../services/tender.service";
@@ -260,6 +260,10 @@ async function runSimulationTick(timer: TickTimer) {
   await T("train des 200", () => runTrain200(async (companyId, title, body) => {
     await sendToCompany(companyId, { title, body, url: "/dashboard", tag: "train200" });
   })).catch((err) => console.error("[train des 200] échec :", (err as Error).message));
+  // 2.6 : le Train des 500, préparé tout seul à la 500e compagnie
+  await T("train des 500", () => runTrain500(async (companyId, title, body) => {
+    await sendToCompany(companyId, { title, body, url: "/dashboard", tag: "train500" });
+  })).catch((err) => console.error("[train des 500] échec :", (err as Error).message));
   // décisions du directeur (1.6) : échéances, promesses, nouvelles situations
   if (tickCount % 10 === 0) {
     await T("décisions", () => runDecisions(async (companyId, title, body) => {

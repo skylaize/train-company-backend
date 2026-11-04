@@ -1,7 +1,7 @@
 import { Response } from "express";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
-import { Stop, TRAIN200_ID, TRAIN200_REWARD } from "../services/train200.service";
+import { Stop, TRAIN200_ID, TRAIN200_REWARD, TRAIN500_ID, TRAIN500_REWARD } from "../services/train200.service";
 
 /* 2.1.2 : le Train des 200, vu du joueur — son trajet et son horaire, les
    noms déjà peints sur ses voitures, et quand il passe chez soi. */
@@ -12,11 +12,15 @@ export async function getTrain200(req: AuthRequest, res: Response) {
   });
   if (!company) return res.status(404).json({ error: "Créez d'abord votre compagnie" });
 
-  const train = await prisma.specialTrain.findUnique({ where: { id: TRAIN200_ID } });
+  // 2.6 : le Train des 500 prend la place du Train des 200 dès qu'il existe
+  const t500 = await prisma.specialTrain.findUnique({ where: { id: TRAIN500_ID } });
+  const train = t500 ?? (await prisma.specialTrain.findUnique({ where: { id: TRAIN200_ID } }));
   if (!train) return res.json({ exists: false });
+  const TRAIN_ID = train.id;
+  const goal = t500 ? 500 : 200;
 
   const route = train.route as unknown as Stop[];
-  const visits = await prisma.specialTrainVisit.findMany({ where: { trainId: TRAIN200_ID }, orderBy: { at: "asc" } });
+  const visits = await prisma.specialTrainVisit.findMany({ where: { trainId: TRAIN_ID }, orderBy: { at: "asc" } });
   const names = await prisma.company.findMany({
     where: { id: { in: visits.map((v) => v.companyId) } },
     select: { id: true, name: true, liveryColor: true },
@@ -33,7 +37,9 @@ export async function getTrain200(req: AuthRequest, res: Response) {
     exists: true,
     startsAt: train.startsAt,
     endsAt: train.endsAt,
-    reward: TRAIN200_REWARD,
+    reward: t500 ? TRAIN500_REWARD : TRAIN200_REWARD,
+    goal,
+    label: `Train des ${goal}`,
     route,
     painted: visits
       .map((v) => ({ name: byId.get(v.companyId)?.name ?? "", livery: byId.get(v.companyId)?.liveryColor ?? "#c99a3e", station: v.station, at: v.at }))

@@ -257,6 +257,8 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
   const shopIncome26 = shops26.reduce((a, s) => a + s.totalIncome + s.pendingIncome, 0);
   // sept soirs de suite en hausse (les soldes sont du plus récent au plus ancien)
   const greenWeek26 = balances26.length >= 8 && balances26.slice(0, 7).every((b, i) => b.balance > balances26[i + 1].balance);
+  // le Train des 500 est passé chez vous
+  const painted500 = (await prisma.specialTrainVisit.count({ where: { trainId: "train-500", companyId: company.id } }).catch(() => 0)) as number;
   const duplexRunning26 = trains26.some((t) => (t.heritage as { kind?: string } | null)?.kind === "DUPLEX");
   const [campaignsDone25, graduates25, graduated25] = (await Promise.all([
     prisma.regionCampaign.count({ where: { companyId: company.id, completedAt: { not: null } } }),
@@ -952,6 +954,7 @@ export async function listMyAchievements(req: AuthRequest, res: Response) {
     { id: "aux-aguets", name: "Aux aguets", description: "Surveiller une gare", liveMet: watches26 >= 1 },
     { id: "dans-le-vert", name: "Dans le vert", description: "Finir sept soirs de suite avec plus d'argent que la veille", liveMet: greenWeek26 },
     { id: "deux-etages", name: "Deux étages", description: "Faire rouler une VB2N restaurée", liveMet: duplexRunning26 },
+    { id: "train-des-500", name: "Peint sur le Train des 500", description: "Avoir le nom de votre compagnie sur les voitures du Train des 500", liveMet: painted500 >= 1 },
   ];
 
   /* 1.6 : « Premiers pas » récompense la liste de départ au complet. Chaque étape

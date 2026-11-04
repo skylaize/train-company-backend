@@ -243,7 +243,7 @@ export async function topHunters(year: number, take = 10) {
 /* ---------------- la vue du joueur ---------------- */
 
 const SHOW_BEFORE_MS = 7 * MS.day;
-const SHOW_AFTER_MS = 4 * MS.day;
+const SHOW_AFTER_MS = 2 * MS.day; // 2.6 : deux jours de résultats après la fin, plus quatre
 
 export async function halloweenView(companyId: string | null, now = new Date()) {
   const ed = currentEdition(now);

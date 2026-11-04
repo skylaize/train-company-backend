@@ -5,7 +5,7 @@ import { allianceRanking } from "./alliance.service";
 import { currentSeason, DIVISIONS } from "./saison.service";
 import { ensureProject, TUNNEL_NAME, TUNNEL_STATIONS } from "./world.service";
 import { pruneLogKeys } from "./discord-modlog.service";
-import { Stop, TRAIN200_ID, TRAIN200_REWARD } from "./train200.service";
+import { Stop, TRAIN200_ID, TRAIN200_REWARD, TRAIN500_ID, TRAIN500_REWARD } from "./train200.service";
 import { REGIONS } from "./regions.service";
 import { startOfParisWeek } from "./time.service";
 import { currentEdition, HAUNT_MINUTES, HAUNT_DEMAND, TIERS, topHunters, hauntSchedule, NIGHT_SOULS_FROM, NIGHT_SOULS_TO } from "./halloween.service";
@@ -388,6 +388,78 @@ async function checkTrain200() {
   }
 }
 
+/* ---------------- 2.6 : le Train des 500 ----------------
+   Trois messages dans #annonces : l'annonce dès que la 500e compagnie est
+   fondée (départ 24 h plus tard), le départ avec l'horaire, le terminus. */
+async function checkTrain500() {
+  const train = await prisma.specialTrain.findUnique({ where: { id: TRAIN500_ID } });
+  if (!train) return;
+  const route = train.route as unknown as Stop[];
+  const site = SITE_URL || undefined;
+  const now = Date.now();
+  const reward = TRAIN500_REWARD.toLocaleString("fr-FR");
+
+  await postOnce("fete-500:annonce", "ANNONCES", [
+    {
+      embeds: [
+        {
+          title: "🎉 500 compagnies sur le réseau !",
+          url: site,
+          description: [
+            "Vous êtes **500** à faire rouler des trains sur Réseau. **Merci à toutes et à tous.**",
+            "",
+            `🚆 **Le Train des 500** fait le tour de France en **48 heures**, par les ${route.length} gares que vous desservez. Quand il passe par l'une de vos gares, vous touchez **${reward} pi.** et le nom de votre compagnie est peint sur ses voitures.`,
+            `Départ de ${esc(route[0].station)} **${parisTime(train.startsAt)}**. Une gare de plus sur votre réseau d'ici là, c'est une chance de plus qu'il s'y arrête : son trajet est déjà tracé, regardez la carte !`,
+          ].join("\n"),
+          color: 0xd4a017,
+          image: site ? { url: `${site}/og-image.png?v=6` } : undefined,
+          footer: { text: "Réseau · 500 compagnies" },
+        },
+      ],
+    },
+  ], { crosspost: true, ping: "EVENEMENTS" });
+
+  if (now >= train.startsAt.getTime()) {
+    const lines = route.map((st) => `\`${parisHour(new Date(st.at))}\` ${esc(st.station)}`);
+    const fields: Embed["fields"] = [];
+    for (let i = 0; i < lines.length && fields.length < 6; i += 14) {
+      fields.push({ name: i === 0 ? "L'horaire" : "\u200b", value: lines.slice(i, i + 14).join("\n"), inline: true });
+    }
+    await postOnce("fete-500:depart", "ANNONCES", [
+      {
+        embeds: [
+          {
+            title: "🚆 Le Train des 500 est parti !",
+            url: site ? `${site}/dashboard` : undefined,
+            description: [
+              `Il a quitté ${esc(route[0].station)} pour **${route.length} gares** en 48 heures. Arrivée à ${esc(route[route.length - 1].station)} ${parisTime(train.endsAt)}.`,
+              `Chaque compagnie qui dessert une gare de son trajet touche **${reward} pi.** à son passage, et son nom rejoint ses voitures.`,
+            ].join("\n"),
+            color: 0xd4a017,
+            fields,
+          },
+        ],
+      },
+    ], { crosspost: true, ping: "EVENEMENTS" });
+  }
+
+  if (now >= train.endsAt.getTime() && train.lastStop >= route.length - 1) {
+    const visits = await prisma.specialTrainVisit.count({ where: { trainId: TRAIN500_ID } });
+    await postOnce("fete-500:arrivee", "ANNONCES", [
+      {
+        embeds: [
+          {
+            title: "🏁 Terminus pour le Train des 500",
+            url: site ? `${site}/dashboard` : undefined,
+            description: `Après 48 heures et ${route.length} gares, il est arrivé à ${esc(route[route.length - 1].station)} avec **${visits} compagnies** peintes sur ses voitures. Merci à toutes, et rendez-vous à 1 000 !`,
+            color: 0xd4a017,
+          },
+        ],
+      },
+    ], { crosspost: true });
+  }
+}
+
 /* ---------------- 2.2 : Halloween ---------------- */
 
 const HALLOWEEN_COLOR = 0x6b4c9a;
@@ -458,6 +530,7 @@ export async function runDiscordFeed() {
     ["chantier", updateWorldPost],
     ["chantier, paliers", checkWorld],
     ["fête des 200", checkTrain200],
+    ["fête des 500", checkTrain500],
     ["halloween", checkHalloween],
     ["régions", checkRegions],
     ["ménage du journal", pruneLogKeys],
