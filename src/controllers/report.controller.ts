@@ -1,6 +1,7 @@
 import { Response } from "express";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
+import { isYoung } from "../services/newcomer.service";
 import { profitability, windowReport, marketMovers } from "../services/report.service";
 
 async function companyOf(req: AuthRequest) {
@@ -39,6 +40,10 @@ export async function getAbsenceReport(req: AuthRequest, res: Response) {
     to,
     hours: Math.round((to.getTime() - from.getTime()) / 3600_000),
     net: (c.absenceToBalance ?? company.balance) - (c.absenceFromBalance ?? company.balance),
+    /* 2.6.1 : pour tous, le nombre de trajets de la période, et si la compagnie
+       est nouvelle : le bilan s'ouvre alors sur une phrase simple, pas un tableau */
+    tripsAll: await prisma.transaction.count({ where: { companyId: company.id, type: "REVENU_LIGNE", createdAt: { gte: from, lte: to } } }),
+    young: isYoung((company as { createdAt: Date }).createdAt),
   };
 
   if (!company.isPremium) return res.json({ ...base, locked: true });

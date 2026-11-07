@@ -1022,3 +1022,51 @@ export async function updateEconomySettingsAdmin(req: AuthRequest, res: Response
   await logAdmin(actor(req), "ECONOMIE", null, Object.keys(clean).join(", "));
   res.json({ ok: true, settings: next });
 }
+
+/* ---------------- 2.6.1 : l'entonnoir des nouveaux venus ----------------
+   Les compagnies fondées sur les N derniers jours (14 par défaut) : combien
+   ont franchi chaque premier pas, et combien sont revenues le lendemain et
+   au bout de trois jours. Une requête par marche, sur une petite population. */
+export async function onboardingFunnel(req: AuthRequest, res: Response) {
+  const days = Math.min(60, Math.max(1, Number((req.query as { days?: string }).days) || 14));
+  const since = new Date(Date.now() - days * 86_400_000);
+  const companies = (await prisma.company.findMany({
+    where: { createdAt: { gte: since } },
+    select: { id: true, createdAt: true, lastActiveAt: true },
+  })) as { id: string; createdAt: Date; lastActiveAt: Date | null }[];
+  const ids = companies.map((c) => c.id);
+  if (!ids.length) return res.json({ days, total: 0, steps: [], back: [] });
+  const [lines, trains, unlocks, delivered] = (await Promise.all([
+    prisma.line.groupBy({ by: ["companyId"], where: { companyId: { in: ids } } }),
+    prisma.train.groupBy({ by: ["companyId"], where: { companyId: { in: ids } } }),
+    prisma.achievementUnlock.findMany({ where: { companyId: { in: ids }, achievementId: { in: ["premier-trace", "sur-les-rails", "entrepreneur-fret", "premiere-correspondance", "premiers-pas"] } }, select: { companyId: true, achievementId: true } }),
+    prisma.contract.groupBy({ by: ["companyId"], where: { companyId: { in: ids }, status: "LIVREE" } }),
+  ])) as [{ companyId: string }[], { companyId: string }[], { companyId: string; achievementId: string }[], { companyId: string | null }[]];
+  const has = (id: string) => new Set(unlocks.filter((u) => u.achievementId === id).map((u) => u.companyId));
+  const lineSet = new Set([...lines.map((l) => l.companyId), ...has("premier-trace")]);
+  const trainSet = new Set(trains.map((t) => t.companyId));
+  const serviceSet = has("sur-les-rails");
+  const fretSet = new Set([...delivered.map((d) => d.companyId ?? ""), ...has("entrepreneur-fret")]);
+  const corrSet = has("premiere-correspondance");
+  const doneSet = has("premiers-pas");
+  const count = (s: Set<string>) => ids.filter((id) => s.has(id)).length;
+  // revenus : vus au moins 20 h après la fondation (le lendemain), et 3 jours après — parmi ceux qui ont l'âge
+  const back = [1, 3, 7].map((d) => {
+    const old = companies.filter((c) => Date.now() - c.createdAt.getTime() >= d * 86_400_000);
+    const came = old.filter((c) => c.lastActiveAt && c.lastActiveAt.getTime() - c.createdAt.getTime() >= (d === 1 ? 20 * 3_600_000 : d * 86_400_000)).length;
+    return { days: d, eligible: old.length, back: came };
+  });
+  return res.json({
+    days,
+    total: ids.length,
+    steps: [
+      { label: "Ligne tracée", n: count(lineSet) },
+      { label: "Rame achetée", n: count(trainSet) },
+      { label: "Rame en service", n: count(serviceSet) },
+      { label: "Correspondance ouverte", n: count(corrSet) },
+      { label: "Fret livré", n: count(fretSet) },
+      { label: "Premiers pas terminés", n: count(doneSet) },
+    ],
+    back,
+  });
+}

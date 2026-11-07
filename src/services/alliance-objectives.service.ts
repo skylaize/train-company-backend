@@ -142,7 +142,8 @@ async function drawWeek(allianceId: string, weekStart: Date) {
   const objectives = kinds.map((k) => buildObjective(k, ids.length, last[k]));
   try {
     return await prisma.allianceWeek.create({
-      data: { allianceId, weekStart, objectives: objectives as any, baseline: { shared: shared.length } as any },
+      // 2.6.1 : la liste des gares communes du lundi, pour ne compter ensuite que les nouvelles
+      data: { allianceId, weekStart, objectives: objectives as any, baseline: { shared: shared.length, sharedList: shared.map(([st]) => st) } as any },
     });
   } catch {
     // tiré en même temps par un autre serveur
@@ -180,9 +181,14 @@ async function refreshWeek(week: WeekRow, allianceName: string, push: Push, now:
     if (o.kind === "SHARED") {
       const shared = await sharedStations(members.map((m) => m.companyId));
       progress.SHARED = Math.max(0, shared.length - Number(week.baseline?.shared ?? 0));
-      // tous ceux qui desservent une gare commune y ont mis du leur
+      /* 2.6.1 : la part de chacun, sur les seules gares communes nouvelles de
+         la semaine, partagée entre les membres qui la desservent. On comptait
+         toutes les gares communes, anciennes comprises, une fois par membre :
+         « 2 350 % » pour un objectif de deux gares. */
+      const before = new Set<string>((week.baseline?.sharedList as string[] | undefined) ?? []);
+      const fresh = week.baseline?.sharedList ? shared.filter(([st]) => !before.has(st)) : shared;
       const part: Record<string, number> = {};
-      for (const [, set] of shared) for (const id of set) part[id] = (part[id] ?? 0) + 1;
+      for (const [, set] of fresh) for (const id of set) part[id] = (part[id] ?? 0) + 1 / set.size;
       shares.SHARED = part;
     } else {
       const m = await measure(o.kind, windows, now);

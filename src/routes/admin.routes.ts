@@ -10,6 +10,7 @@ adminRouter.use(requireAuth, requireAdmin);
 
 adminRouter.get("/me", admin.adminMe);
 adminRouter.get("/overview", admin.overview);
+adminRouter.get("/onboarding", admin.onboardingFunnel); // 2.6.1
 
 adminRouter.get("/players", admin.listPlayers);
 adminRouter.get("/players/:id", admin.playerDetail);

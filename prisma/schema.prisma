@@ -656,6 +656,8 @@ model Contract {
   // 2.3 : conteneur scellé. Son contenu n'est révélé qu'à la livraison
   sealed            Boolean        @default(false)
   sealedOutcome     String?
+  // 2.6.1 : contrat de bienvenue, réservé 24 h à une nouvelle compagnie
+  reservedFor       String?
 
   createdAt         DateTime       @default(now())
 

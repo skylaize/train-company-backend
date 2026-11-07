@@ -33,7 +33,7 @@ export async function runCustomAlerts(notify: Notify, modelCost: (model: string)
     prisma.company.findMany({ where: { id: { in: companyIds } }, select: { id: true, balance: true } }),
     prisma.train.findMany({ where: { companyId: { in: companyIds } }, select: { id: true, companyId: true, name: true, model: true, wear: true, cars: true, purchasedAt: true, brokenPart: true, heritage: true } }),
     alerts.some((a) => a.kind === "FRET")
-      ? prisma.contract.findMany({ where: { status: "DISPONIBLE", companyId: null }, select: { id: true, cargoType: true, reward: true, originStation: true, destinationStation: true }, orderBy: { reward: "desc" }, take: 30 })
+      ? prisma.contract.findMany({ where: { status: "DISPONIBLE", companyId: null, reservedFor: null }, select: { id: true, cargoType: true, reward: true, originStation: true, destinationStation: true }, orderBy: { reward: "desc" }, take: 30 })
       : Promise.resolve([]),
   ])) as [
     { id: string; balance: number }[],

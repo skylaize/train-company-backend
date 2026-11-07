@@ -3,6 +3,7 @@ import { Response } from "express";
 import { Prisma } from "@prisma/client";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
+import { isNewcomer, WELCOME_WAGON } from "../services/newcomer.service";
 import { requiredCargoTypes } from "../services/mission.service";
 import { campaignFreightStations } from "../services/campaign.service";
 import { getCargoIndexMap, freightMultiplier } from "../services/market.service";
@@ -143,7 +144,7 @@ async function ensureCampaignFreight() {
   const regions = await campaignFreightStations();
   if (!regions.size) return;
   const open = (await prisma.contract.findMany({
-    where: { status: "DISPONIBLE", companyId: null, sealed: false },
+    where: { status: "DISPONIBLE", companyId: null, sealed: false, reservedFor: null },
     select: { originStation: true, destinationStation: true },
   })) as { originStation: string; destinationStation: string }[];
   for (const stations of regions.values()) {
@@ -161,7 +162,7 @@ export async function ensureMarketStocked() {
   await maybeOfferSealed().catch((err) => console.error("[fret] conteneur scellé :", (err as Error).message));
   await ensureCampaignFreight().catch((err) => console.error("[fret] campagnes :", (err as Error).message));
   const availableContracts = await prisma.contract.findMany({
-    where: { status: "DISPONIBLE", companyId: null, sealed: false },
+    where: { status: "DISPONIBLE", companyId: null, sealed: false, reservedFor: null },
     select: { cargoType: true },
   });
   const presentTypes = new Set(availableContracts.map((c) => c.cargoType));
@@ -236,21 +237,53 @@ async function ordersByCargo(companyId: string) {
   return map;
 }
 
+/* ---------------- 2.6.1 : le contrat de bienvenue ----------------
+   Le fret était l'étape où les nouveaux décrochaient : un Locotracteur, une
+   offre qui expire en cinq minutes, le bon wagon à atteler. Une compagnie de
+   moins de sept jours qui n'a encore rien livré trouve donc sur le marché une
+   offre réservée pour elle, valable 24 h, payée moitié plus, sur un wagon
+   plat — celui que son premier Locotracteur reçoit en cadeau (train.controller). */
+const WELCOME_HOURS = 24;
+
+async function ensureWelcomeContract(company: { id: string; createdAt: Date }) {
+  if (!(await isNewcomer(company.id, company.createdAt))) return;
+  // une seule à la fois, et pas pendant qu'une tournée roule déjà
+  const pending = await prisma.contract.count({
+    where: { OR: [{ reservedFor: company.id, status: "DISPONIBLE" }, { companyId: company.id, status: "EN_COURS" }] },
+  });
+  if (pending) return;
+  const lines = (await prisma.line.findMany({ where: { companyId: company.id }, select: { departureStation: true, arrivalStation: true, stops: true } })) as {
+    departureStation: string; arrivalStation: string; stops: string[];
+  }[];
+  const mine = new Set(lines.flatMap((l) => [l.departureStation, ...(l.stops ?? []), l.arrivalStation]));
+  const flat = CARGO_TEMPLATES.filter((t) => wagonFor(t.cargoType) === WELCOME_WAGON);
+  const near = flat.filter((t) => mine.has(t.originStation) || mine.has(t.destinationStation));
+  const pool = near.length ? near : flat;
+  if (!pool.length) return;
+  const t = pool[Math.floor(Math.random() * pool.length)];
+  await prisma.contract.create({
+    data: { ...t, reward: Math.round((t.reward * 1.5) / 5) * 5, risky: false, reservedFor: company.id, expiresAt: new Date(Date.now() + WELCOME_HOURS * 3_600_000) },
+  });
+}
+
 export async function listMarket(req: AuthRequest, res: Response) {
   await removeExpiredContracts();
   await ensureMarketStocked();
 
   const company = await prisma.company.findUnique({
     where: { ownerId: req.userId as string },
-    select: { id: true, isPremium: true },
+    select: { id: true, isPremium: true, createdAt: true },
   });
   const orders = company ? await ordersByCargo(company.id) : new Map();
+  if (company) await ensureWelcomeContract(company).catch((err) => console.error("[fret] contrat de bienvenue :", (err as Error).message));
 
   const contracts = [
+    // 2.6.1 : le contrat de bienvenue, en tête
+    ...(company ? await prisma.contract.findMany({ where: { status: "DISPONIBLE", companyId: null, reservedFor: company.id } }) : []),
     // 2.3 : le conteneur scellé passe devant, pour tout le monde
-    ...(await prisma.contract.findMany({ where: { status: "DISPONIBLE", companyId: null, sealed: true } })),
+    ...(await prisma.contract.findMany({ where: { status: "DISPONIBLE", companyId: null, sealed: true, reservedFor: null } })),
     ...(await prisma.contract.findMany({
-      where: { status: "DISPONIBLE", companyId: null, sealed: false },
+      where: { status: "DISPONIBLE", companyId: null, sealed: false, reservedFor: null },
       orderBy: { createdAt: "asc" },
       take: company?.isPremium ? PREMIUM_MARKET_SIZE : MIN_MARKET_SIZE,
     })),
@@ -262,7 +295,7 @@ export async function listMarket(req: AuthRequest, res: Response) {
     const touches = (c: { originStation: string; destinationStation: string }) => mine.includes(c.originStation) || mine.includes(c.destinationStation);
     if (mine.length && !(contracts as { originStation: string; destinationStation: string }[]).some(touches)) {
       const extra = await prisma.contract.findFirst({
-        where: { status: "DISPONIBLE", companyId: null, sealed: false, OR: [{ originStation: { in: mine } }, { destinationStation: { in: mine } }] },
+        where: { status: "DISPONIBLE", companyId: null, sealed: false, reservedFor: null, OR: [{ originStation: { in: mine } }, { destinationStation: { in: mine } }] },
         orderBy: { createdAt: "asc" },
       });
       if (extra) contracts.push(extra);
@@ -343,7 +376,7 @@ export async function acceptContract(req: AuthRequest, res: Response) {
   const contracts = (await prisma.contract.findMany({ where: { id: { in: ids } } })) as {
     id: string; status: string; companyId: string | null; expiresAt: Date | null; cargoType: string; risky: boolean; reward: number; durationMinutes: number; originStation: string; destinationStation: string;
   }[];
-  if (contracts.length !== ids.length || contracts.some((c) => c.status !== "DISPONIBLE" || c.companyId)) {
+  if (contracts.length !== ids.length || contracts.some((c) => c.status !== "DISPONIBLE" || c.companyId || ((c as { reservedFor?: string | null }).reservedFor && (c as { reservedFor?: string | null }).reservedFor !== company.id))) {
     // 2.4 : le marché est commun à tous les joueurs, un autre a pu le prendre entre-temps
     return res.status(409).json({ error: ids.length > 1 ? "Un des contrats vient d'être pris par une autre compagnie ou a expiré : la liste est mise à jour" : "Ce contrat vient d'être pris par une autre compagnie ou a expiré : la liste est mise à jour" });
   }

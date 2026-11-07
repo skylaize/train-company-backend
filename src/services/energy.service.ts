@@ -1,4 +1,5 @@
 import { prisma } from "../prisma";
+import { isYoung } from "./newcomer.service";
 import { Prisma } from "@prisma/client";
 import { randomUUID } from "crypto";
 import { chunk, row, pool, SIM_CONCURRENCY } from "./batch.service";
@@ -474,7 +475,7 @@ export async function settleEnergy(weather: Map<string, StationWeather>, now = n
     if (ids.length === 0) continue;
     const companies = (await prisma.company.findMany({
       where: { id: { in: ids } },
-      select: { id: true, balance: true, dieselLiters: true, dieselFixedPrice: true, dieselFixedUntil: true, powerFixedPrice: true, powerFixedUntil: true, batteryKwh: true, batteryOffPeak: true, powerOfferPrice: true },
+      select: { id: true, createdAt: true, balance: true, dieselLiters: true, dieselFixedPrice: true, dieselFixedUntil: true, powerFixedPrice: true, powerFixedUntil: true, batteryKwh: true, batteryOffPeak: true, powerOfferPrice: true },
     })) as CompanyEnergy[];
 
     // alerte tension : vague de froid et heure de pointe
@@ -502,7 +503,12 @@ export async function settleEnergy(weather: Map<string, StationWeather>, now = n
       if (!trial) {
         const net = income - cost;
         const paid = net < 0 ? Math.min(-net, Math.max(0, c.balance)) : 0;
-        blocked = net < 0 && paid < -net;
+        /* 2.6.1 : la première semaine, une facture impayée ne bloque pas les
+           rames : le reste est offert. Le débutant apprend sans voir sa
+           compagnie s'arrêter pour quelques pièces. */
+        const young = isYoung((c as { createdAt?: Date }).createdAt ?? new Date(0));
+        const forgiven = net < 0 && young ? -net - paid : 0;
+        blocked = net < 0 && paid < -net && !young;
         const delta = net < 0 ? -paid : net;
         if (delta !== 0) ops.push(prisma.company.update({ where: { id: c.id }, data: { balance: { increment: delta } } }));
         const parts = [
@@ -511,7 +517,12 @@ export async function settleEnergy(weather: Map<string, StationWeather>, now = n
           b.soldToPlayers + b.soldToGrid > 0 ? `${Math.round(b.soldToPlayers + b.soldToGrid)} kWh revendus` : null,
           b.bonus > 0 ? `prime d'effacement ${Math.round(b.bonus)} pi.` : null,
         ].filter(Boolean);
-        if (cost > 0) ops.push(prisma.transaction.create({ data: { companyId: c.id, type: "ENERGIE", amount: -cost, description: `Énergie, ${label} : ${parts.join(", ")}` } }));
+        if (cost > 0)
+          ops.push(
+            prisma.transaction.create({
+              data: { companyId: c.id, type: "ENERGIE", amount: -(cost - forgiven), description: `Énergie, ${label} : ${parts.join(", ")}${forgiven > 0 ? ` (${forgiven} pi. offertes : première semaine)` : ""}` },
+            })
+          );
         if (income > 0) ops.push(prisma.transaction.create({ data: { companyId: c.id, type: "ENERGIE_VENTE", amount: income, description: `Énergie revendue, ${label} : ${parts.join(", ")}` } }));
       }
       ops.push(

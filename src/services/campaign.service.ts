@@ -141,12 +141,24 @@ export async function stepProgress(companyId: string, region: string, stepIndex:
           ? await prisma.train.count({ where: { companyId, status: "EN_ROUTE", lineId: { in: regionLines.map((l) => l.id) } } })
           : 0
       );
-    case "FREIGHT":
-      return cap(
-        await prisma.contract.count({
-          where: { companyId, status: "LIVREE", acceptedAt: { gte: since }, OR: [{ originStation: { in: S } }, { destinationStation: { in: S } }] },
-        })
-      );
+    case "FREIGHT": {
+      /* 2.6.1 : une livraison compte si elle arrive après le début de l'étape.
+         On comptait les contrats ACCEPTÉS après : une tournée prise juste avant
+         d'atteindre l'étape, ou une longue tournée commencée plus tôt, ne
+         comptait jamais. L'heure de livraison, c'est l'acceptation plus la
+         durée de la tournée (on remonte d'un jour pour les plus longues). */
+      const rows = (await prisma.contract.findMany({
+        where: {
+          companyId,
+          status: "LIVREE",
+          acceptedAt: { gte: new Date(since.getTime() - 24 * 3600_000) },
+          OR: [{ originStation: { in: S } }, { destinationStation: { in: S } }],
+        },
+        select: { acceptedAt: true, durationMinutes: true, tourMinutes: true },
+      })) as { acceptedAt: Date | null; durationMinutes: number; tourMinutes: number | null }[];
+      const delivered = rows.filter((r) => r.acceptedAt && r.acceptedAt.getTime() + (r.tourMinutes ?? r.durationMinutes) * 60_000 >= since.getTime()).length;
+      return cap(delivered);
+    }
     case "ELECTRIC":
       return cap(regionLines.some((l) => l.electrified) ? 1 : 0);
     case "STATION":

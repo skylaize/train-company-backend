@@ -6,6 +6,7 @@ import { Response } from "express";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { CARS, MAX_CARS, seatsOf, NIGHT_CAR_MODELS } from "../services/ridership.service";
 import { WAGONS, FREIGHT_MODELS, isWagon, freightOnly, isFreightModel } from "../services/freight.service";
+import { isNewcomer, WELCOME_WAGON } from "../services/newcomer.service";
 import { prisma } from "../prisma";
 import { staffEffectsFor, repairCostPerPoint } from "../services/staff.service";
 import { buildLeaderRows } from "../services/leaderboard.service";
@@ -96,8 +97,16 @@ export async function buyTrain(req: AuthRequest, res: Response) {
     return res.status(409).json({ error: `Trésorerie insuffisante (achat : ${TRAIN_COST} pièces)` });
   }
 
+  /* 2.6.1 : la première locomotive de fret d'une nouvelle compagnie arrive avec
+     un wagon plat attelé, celui du contrat de bienvenue (contract.controller) */
+  let giftCars: string[] = [];
+  if (isFreightModel(chosenModel) && (await isNewcomer(company.id, (company as { createdAt: Date }).createdAt))) {
+    const freightAlready = ((await prisma.train.findMany({ where: { companyId: company.id }, select: { model: true } })) as { model: string }[]).some((t) => isFreightModel(t.model));
+    if (!freightAlready) giftCars = [WELCOME_WAGON];
+  }
+
   const [train] = await prisma.$transaction([
-    prisma.train.create({ data: { name, model: chosenModel, companyId: company.id, organs: freshBias() as unknown as Prisma.InputJsonValue } }),
+    prisma.train.create({ data: { name, model: chosenModel, companyId: company.id, cars: giftCars, organs: freshBias() as unknown as Prisma.InputJsonValue } }),
     prisma.company.update({ where: { id: company.id }, data: { balance: { decrement: TRAIN_COST } } }),
     prisma.transaction.create({
       data: {
@@ -109,7 +118,7 @@ export async function buyTrain(req: AuthRequest, res: Response) {
     }),
   ]);
 
-  return res.status(201).json(train);
+  return res.status(201).json({ ...train, giftWagon: giftCars.length > 0 });
 }
 
 export async function assignTrainToLine(req: AuthRequest, res: Response) {
