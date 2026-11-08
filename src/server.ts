@@ -6,6 +6,7 @@ import express, { NextFunction, Request, Response } from "express";
    gestionnaire d'erreurs plus bas. */
 import "express-async-errors";
 import cors from "cors";
+import { maintenance, maintenanceActive, maintenanceGate } from "./services/maintenance.service";
 import { authRouter } from "./routes/auth.routes";
 import { userRouter } from "./routes/user.routes";
 import { companyRouter } from "./routes/company.routes";
@@ -43,6 +44,7 @@ import { pioneerRouter } from "./routes/pioneer.routes"; // 2.1.2
 import { economyRouter } from "./routes/economy.routes"; // 2.4
 import { halloweenRouter } from "./routes/halloween.routes"; // 2.2
 import { v25Router } from "./routes/v25.routes"; // 2.5
+import { voteRouter } from "./routes/vote.routes"; // 2.6.1
 import { startMentorJob } from "./services/mentor.service";
 import { adminRouter } from "./routes/admin.routes"; // 2.2
 import { warmBanList } from "./services/admin.service";
@@ -67,6 +69,8 @@ const corsOptions = {
   origin: true,
   methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
+  // maintenance annoncée : le site lit cet en-tête pour afficher le bandeau
+  exposedHeaders: ["X-Maintenance"],
 };
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
@@ -82,6 +86,12 @@ app.post("/api/discord/interactions", express.raw({ type: "application/json" }),
 // 2.2 : le panneau d'administration envoie le visuel des annonces (image en base64)
 app.use("/api/admin", express.json({ limit: "8mb" }));
 app.use(express.json());
+// maintenance : avant le cache, pour qu'une réponse gardée ne passe pas pendant
+app.use(maintenanceGate);
+app.get("/api/status", (_req, res) => {
+  const m = maintenance();
+  res.json({ maintenance: m ? { ...m, active: maintenanceActive(m) } : null });
+});
 // 2.0 : réponses lourdes gardées quelques secondes par joueur (voir responseCache)
 app.use(responseCache);
 
@@ -128,6 +138,7 @@ app.use("/api", pioneerRouter);
 app.use("/api", economyRouter);
 app.use("/api", halloweenRouter);
 app.use("/api", v25Router);
+app.use("/api", voteRouter);
 
 /* 2.1.2 : toute erreur de route finit ici, avec une vraie réponse 500 et
    une ligne lisible dans les journaux de Coolify. */

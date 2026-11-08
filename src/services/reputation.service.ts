@@ -77,3 +77,38 @@ export async function reputationMap(): Promise<Map<string, number>> {
   }
   return out;
 }
+
+/* Le détail de la note, pour la fenêtre « D'où vient ma réputation ».
+   Lu seulement quand le joueur ouvre la fenêtre : comptages en cache, plus
+   les incidents des sept derniers jours (bornés par la date, index createdAt). */
+export async function reputationDetail(companyId: string) {
+  const since = new Date(Date.now() - 7 * 86_400_000);
+  const [map, company, lineTrains, controlled, recent] = (await Promise.all([
+    allCounts().catch(() => null),
+    prisma.company.findUnique({ where: { id: companyId }, select: { reputationAdjust: true } }),
+    prisma.train.count({ where: { companyId, lineId: { not: null } } }),
+    prisma.staff.count({ where: { companyId, role: "CONTROLEUR", trainId: { not: null } } }),
+    prisma.incident.findMany({
+      where: { createdAt: { gte: since }, train: { companyId } },
+      select: { message: true, createdAt: true, train: { select: { name: true } } },
+      orderBy: { createdAt: "desc" },
+      take: 50,
+    }),
+  ])) as [Map<string, Counts> | null, { reputationAdjust: number } | null, number, number, { message: string; createdAt: Date; train: { name: string } }[]];
+  const c = map?.get(companyId) ?? { good: 0, incidents: 0 };
+  const base = baseOf(c);
+  const adjust = company?.reputationAdjust ?? 0;
+  const crew = lineTrains === 0 || controlled === 0 ? 0 : Math.round(CONTROLLER_REPUTATION_MAX * Math.min(1, controlled / lineTrains));
+  const total = Math.max(0, Math.min(100, base + adjust + crew));
+  return {
+    total,
+    trips: c.good,
+    incidents: c.incidents,
+    base,
+    adjust,
+    crew: { points: crew, max: CONTROLLER_REPUTATION_MAX, controlled, lineTrains },
+    // même formule que la simulation : la recette des voyageurs va de ×0,5 à ×1
+    revenue: Math.round((0.5 + total / 200) * 100),
+    week: { incidents: recent.length, latest: recent.slice(0, 5).map((r) => ({ train: r.train.name, message: r.message, at: r.createdAt })) },
+  };
+}

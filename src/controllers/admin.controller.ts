@@ -4,6 +4,7 @@ import { Response } from "express";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
 import { adminConfigured, logAdmin, markBanned } from "../services/admin.service";
+import { maintenance, maintenanceActive, setMaintenance } from "../services/maintenance.service";
 import { buildLeaderRows } from "../services/leaderboard.service";
 import { currentSeason, DIVISIONS, invalidateSeason } from "../services/saison.service";
 import { allianceRanking, invalidateAlliances } from "../services/alliance.service";
@@ -266,7 +267,7 @@ export async function playerDetail(req: AuthRequest, res: Response) {
   const c = (await prisma.company.findUnique({
     where: { id },
     include: {
-      owner: { select: { id: true, email: true, pseudo: true, createdAt: true, discordId: true, discordName: true, bannedAt: true, bannedReason: true } },
+      owner: { select: { id: true, email: true, pseudo: true, createdAt: true, discordId: true, discordName: true, bannedAt: true, bannedReason: true, bannedUntil: true, warning: true, warnedAt: true, warnCount: true } },
       trains: {
         select: {
           id: true, name: true, model: true, status: true, wear: true, brokenPart: true, cars: true, purchasedAt: true, heritage: true,
@@ -468,21 +469,65 @@ export async function banPlayer(req: AuthRequest, res: Response) {
   if (!c) return;
   if (c.ownerId === req.admin!.id) return bad(res, 400, "Vous ne pouvez pas suspendre votre propre compte");
   const reason = str(req.body?.reason, 200) || "non précisée";
-  const user = await prisma.user.update({ where: { id: c.ownerId }, data: { bannedAt: new Date(), bannedReason: reason }, select: { discordId: true } });
-  markBanned(c.ownerId, true);
+  // durée en jours ; absente ou 0 : jusqu'à ce qu'un admin lève la suspension
+  const days = int(req.body?.days);
+  if (Number.isFinite(days) && (days < 0 || days > 365)) return bad(res, 400, "Durée entre 1 et 365 jours");
+  const until = Number.isFinite(days) && days > 0 ? new Date(Date.now() + days * 86_400_000) : null;
+  const user = await prisma.user.update({ where: { id: c.ownerId }, data: { bannedAt: new Date(), bannedReason: reason, bannedUntil: until }, select: { discordId: true } });
+  markBanned(c.ownerId, true, reason, until);
   // plus de rôles de joueur sur Discord tant que la suspension dure
   if (user.discordId) void clearRoles(user.discordId).catch(() => undefined);
-  await logAdmin(actor(req), "BAN", { id: c.id, label: c.name }, `compte suspendu : ${reason}`);
+  await logAdmin(actor(req), "BAN", { id: c.id, label: c.name }, `compte suspendu ${until ? `${days} jour${days > 1 ? "s" : ""}` : "sans date de fin"} : ${reason}`);
   res.json({ ok: true });
 }
 
 export async function unbanPlayer(req: AuthRequest, res: Response) {
   const c = await companyOr404(res, req.params.id);
   if (!c) return;
-  await prisma.user.update({ where: { id: c.ownerId }, data: { bannedAt: null, bannedReason: null } });
+  await prisma.user.update({ where: { id: c.ownerId }, data: { bannedAt: null, bannedReason: null, bannedUntil: null } });
   markBanned(c.ownerId, false);
   void syncCompany(c.id).catch(() => undefined);
   await logAdmin(actor(req), "BAN", { id: c.id, label: c.name }, "suspension levée");
+  res.json({ ok: true });
+}
+
+/* Avertissement : le joueur le lit à sa prochaine ouverture du jeu et doit
+   cliquer « J'ai compris ». Le compteur reste visible dans la fiche. */
+export async function warnPlayer(req: AuthRequest, res: Response) {
+  const c = await companyOr404(res, req.params.id);
+  if (!c) return;
+  const message = str(req.body?.message, 500);
+  if (!message) return bad(res, 400, "Écrivez le message d'avertissement");
+  await prisma.user.update({ where: { id: c.ownerId }, data: { warning: message, warnedAt: new Date(), warnCount: { increment: 1 } } });
+  await logAdmin(actor(req), "AVERTISSEMENT", { id: c.id, label: c.name }, message);
+  res.json({ ok: true });
+}
+
+/* ---------------- maintenance ---------------- */
+
+export async function maintenanceAdmin(_req: AuthRequest, res: Response) {
+  const m = maintenance();
+  res.json({ maintenance: m ? { ...m, active: maintenanceActive(m) } : null });
+}
+
+/* Annonce ou lance une maintenance. startsAt absent : tout de suite. */
+export async function startMaintenance(req: AuthRequest, res: Response) {
+  const message = str(req.body?.message, 300);
+  const raw = req.body?.startsAt ? Date.parse(String(req.body.startsAt)) : Date.now();
+  if (!Number.isFinite(raw)) return bad(res, 400, "Heure de début invalide");
+  const minutes = int(req.body?.minutes);
+  const startsAt = new Date(raw);
+  const endsAt = Number.isFinite(minutes) && minutes > 0 ? new Date(raw + Math.min(minutes, 24 * 60) * 60_000) : null;
+  await setMaintenance({ message, startsAt: startsAt.toISOString(), endsAt: endsAt?.toISOString() ?? null });
+  const soon = raw > Date.now() + 30_000;
+  await logAdmin(actor(req), "MAINTENANCE", null, `${soon ? `annoncée pour ${startsAt.toLocaleString("fr-FR", { timeZone: "Europe/Paris" })}` : "lancée"}${endsAt ? `, fin prévue ${endsAt.toLocaleTimeString("fr-FR", { timeZone: "Europe/Paris", hour: "2-digit", minute: "2-digit" })}` : ""}${message ? ` : ${message}` : ""}`);
+  res.json({ ok: true });
+}
+
+export async function endMaintenance(req: AuthRequest, res: Response) {
+  const was = maintenance();
+  await setMaintenance(null);
+  if (was) await logAdmin(actor(req), "MAINTENANCE", null, maintenanceActive(was) ? "terminée" : "annonce retirée");
   res.json({ ok: true });
 }
 

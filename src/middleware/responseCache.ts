@@ -18,6 +18,7 @@ const RULES: { path: RegExp; ttl: number; shared?: boolean }[] = [
   { path: /^\/api\/achievements\/mine$/, ttl: 60_000 },
   { path: /^\/api\/career\/mine$/, ttl: 60_000 },
   { path: /^\/api\/referral\/mine$/, ttl: 120_000 },
+  { path: /^\/api\/vote\/mine$/, ttl: 30_000 }, // 2.6.1
   { path: /^\/api\/leaderboard$/, ttl: 20_000 },
   { path: /^\/api\/daily-challenge\/mine$/, ttl: 20_000 },
   { path: /^\/api\/summary\/today$/, ttl: 20_000 },

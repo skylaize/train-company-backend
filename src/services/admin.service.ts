@@ -33,14 +33,38 @@ export function adminConfigured() {
 /* ---------------- comptes suspendus ---------------- */
 
 const REFRESH_MS = 60_000;
-let banned = new Set<string>();
+// motif, date et fin éventuelle gardés avec l'identifiant : l'écran
+// « compte suspendu » les affiche
+type Ban = { reason: string | null; since: Date; until: Date | null };
+let banned = new Map<string, Ban>();
 let loadedAt = 0;
 let loading: Promise<void> | null = null;
 
+/* Suspensions temporaires arrivées à leur fin : levées en base et rôles
+   Discord rendus. Fait au rafraîchissement de la liste, une fois par minute. */
+async function liftExpired() {
+  const rows = (await prisma.user.findMany({
+    where: { bannedAt: { not: null }, bannedUntil: { lte: new Date() } },
+    select: { id: true, company: { select: { id: true, name: true } } },
+  })) as { id: string; company: { id: string; name: string } | null }[];
+  if (!rows.length) return;
+  await prisma.user.updateMany({ where: { id: { in: rows.map((r) => r.id) } }, data: { bannedAt: null, bannedReason: null, bannedUntil: null } });
+  const { syncCompany } = await import("./discord-roles.service");
+  for (const r of rows) {
+    banned.delete(r.id);
+    if (r.company) void syncCompany(r.company.id).catch(() => undefined);
+    void logStaff(`🛠️ Fin de suspension${r.company ? ` · ${esc(r.company.name)}` : ""} (levée automatiquement)`);
+  }
+}
+
 async function reload() {
   try {
-    const rows = (await prisma.user.findMany({ where: { bannedAt: { not: null } }, select: { id: true } })) as { id: string }[];
-    banned = new Set(rows.map((r) => r.id));
+    await liftExpired().catch((err: Error) => console.error("[admin] fin des suspensions :", err.message));
+    const rows = (await prisma.user.findMany({
+      where: { bannedAt: { not: null } },
+      select: { id: true, bannedAt: true, bannedReason: true, bannedUntil: true },
+    })) as { id: string; bannedAt: Date; bannedReason: string | null; bannedUntil: Date | null }[];
+    banned = new Map(rows.map((r) => [r.id, { reason: r.bannedReason, since: r.bannedAt, until: r.bannedUntil }]));
     loadedAt = Date.now();
   } catch (err) {
     // base injoignable : on garde la liste connue, on réessaiera
@@ -52,15 +76,30 @@ async function reload() {
 }
 
 /* Vrai si le compte est suspendu. Ne bloque jamais : la liste se rafraîchit
-   en arrière-plan, et une suspension faite ici est prise en compte aussitôt. */
+   en arrière-plan, et une suspension faite ici est prise en compte aussitôt.
+   Une suspension temporaire finie ne bloque plus, même avant d'être levée en base. */
 export function isBanned(userId: string) {
   if (Date.now() - loadedAt > REFRESH_MS && !loading) loading = reload();
-  return banned.has(userId);
+  const b = banned.get(userId);
+  if (!b) return false;
+  return !b.until || b.until.getTime() > Date.now();
 }
 
-export function markBanned(userId: string, on: boolean) {
-  if (on) banned.add(userId);
+export function markBanned(userId: string, on: boolean, reason?: string, until?: Date | null) {
+  if (on) banned.set(userId, { reason: reason ?? null, since: new Date(), until: until ?? null });
   else banned.delete(userId);
+}
+
+/* Réponse 403 d'un compte suspendu : le site s'en sert pour afficher le motif. */
+export function bannedBody(userId: string) {
+  const b = banned.get(userId);
+  return {
+    error: "Ce compte est suspendu. Contactez l'équipe de Réseau sur Discord.",
+    banned: true,
+    reason: b?.reason ?? null,
+    since: b?.since?.toISOString() ?? null,
+    until: b?.until?.toISOString() ?? null,
+  };
 }
 
 export function warmBanList() {

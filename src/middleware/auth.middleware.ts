@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { prisma } from "../prisma";
-import { isAdminEmail, isBanned } from "../services/admin.service";
+import { bannedBody, isAdminEmail, isBanned } from "../services/admin.service";
 
 const JWT_SECRET = process.env.JWT_SECRET as string;
 
@@ -29,7 +29,7 @@ export function requireAuth(req: AuthRequest, res: Response, next: NextFunction)
 
   // 2.2 : compte suspendu depuis le panneau d'administration
   if (isBanned(req.userId)) {
-    return res.status(403).json({ error: "Ce compte est suspendu. Contactez l'équipe de Réseau sur Discord.", banned: true });
+    return res.status(403).json(bannedBody(req.userId));
   }
   next();
 }

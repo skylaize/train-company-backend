@@ -21,6 +21,7 @@ adminRouter.post("/players/:id/items", admin.grantItem);
 adminRouter.delete("/players/:id/items/:itemId", admin.revokeItem);
 adminRouter.post("/players/:id/ban", admin.banPlayer);
 adminRouter.delete("/players/:id/ban", admin.unbanPlayer);
+adminRouter.post("/players/:id/warn", admin.warnPlayer);
 adminRouter.post("/players/:id/season-points", admin.adjustSeasonPoints);
 adminRouter.post("/players/:id/trains/:trainId/reset", admin.resetTrain);
 adminRouter.delete("/players/:id/trains/:trainId", admin.removeTrain);
@@ -48,3 +49,7 @@ adminRouter.get("/announcements", admin.listAnnouncements);
 adminRouter.post("/announcements", admin.createAnnouncement);
 
 adminRouter.get("/logs", admin.adminLogs);
+
+adminRouter.get("/maintenance", admin.maintenanceAdmin);
+adminRouter.post("/maintenance", admin.startMaintenance);
+adminRouter.delete("/maintenance", admin.endMaintenance);

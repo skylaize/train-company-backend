@@ -32,6 +32,13 @@ model User {
   // 2.2 : compte suspendu depuis le panneau d'administration (toute l'API lui répond 403)
   bannedAt     DateTime?
   bannedReason String?
+  // suspension temporaire : levée toute seule à cette date (null = sans fin)
+  bannedUntil  DateTime?
+  // avertissement de l'équipe, affiché à la prochaine ouverture du jeu ;
+  // remis à null quand le joueur clique « J'ai compris »
+  warning      String?
+  warnedAt     DateTime?
+  warnCount    Int       @default(0)
   // 2.5 : notifications du jeu reçues aussi en message privé Discord
   // (catégories séparées par des virgules, vide = aucune ; réglé avec /notifs)
   discordDm    String   @default("")
@@ -80,6 +87,9 @@ model Company {
   referredById String?  // compagnie qui a parrainé celle-ci, si un code a été renseigné à l'inscription
   referralRewardGranted Boolean @default(false) // évite de verser deux fois la récompense au parrain
   referralMilestone Int  @default(0) // plus haut palier de parrainage déjà accordé (3, 5, 10 filleuls)
+  // 2.6.1 : vote Top-Serveurs — série de jours consécutifs, et dernier jour (heure de Paris) récompensé
+  voteStreak   Int      @default(0)
+  lastVoteDay  String?
   title        String?  // titre affiché au classement : gagné (palier 5) ou choisi parmi ceux de la boutique
   emblem       String?  // emblème porté devant le nom de la compagnie, choisi parmi ceux débloqués
   plate        String?  // 1.7.1 : plaque d'honneur portée au classement (laiton, email, or)
@@ -109,6 +119,7 @@ model Company {
 
   referredBy   Company? @relation("Referrals", fields: [referredById], references: [id])
   referrals    Company[] @relation("Referrals")
+  voteRewards  VoteReward[]
 
   trains       Train[]
   lines        Line[]
@@ -683,7 +694,7 @@ model Incident {
 
 model Transaction {
   id          String   @id @default(uuid())
-  type        String   // ACHAT_TRAIN | REPARATION | FRET | FONDATION | PERSONNEL | REVENU_LIGNE | PARRAINAGE | PUBLICITE
+  type        String   // ACHAT_TRAIN | REPARATION | FRET | FONDATION | PERSONNEL | REVENU_LIGNE | PARRAINAGE | PUBLICITE | VOTE
   amount      Int      // positif = recette, négatif = dépense
   description String
   // rame et ligne concernées, pour la rentabilité détaillée (sans clé étrangère :
@@ -1413,6 +1424,20 @@ model DailyBalance {
 
   company   Company @relation(fields: [companyId], references: [id])
   companyId String
+
+  @@id([companyId, day])
+}
+
+/* 2.6.1 : un vote Top-Serveurs récompensé par compagnie et par jour (heure de
+   Paris). La clé composée rend le double versement impossible, même si deux
+   réclamations arrivent en même temps. */
+model VoteReward {
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  companyId String
+  day       String   // AAAA-MM-JJ, heure de Paris
+  amount    Int
+  streak    Int
+  createdAt DateTime @default(now())
 
   @@id([companyId, day])
 }
