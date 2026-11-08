@@ -1428,9 +1428,9 @@ model DailyBalance {
   @@id([companyId, day])
 }
 
-/* 2.6.1 : un vote Top-Serveurs récompensé par compagnie et par jour (heure de
-   Paris). La clé composée rend le double versement impossible, même si deux
-   réclamations arrivent en même temps. */
+// 2.6.1 : un vote Top-Serveurs récompensé par compagnie et par jour (heure de
+// Paris). La clé composée rend le double versement impossible, même si deux
+// réclamations arrivent en même temps.
 model VoteReward {
   company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
   companyId String
@@ -1442,9 +1442,9 @@ model VoteReward {
   @@id([companyId, day])
 }
 
-/* Voteurs du mois : chaque vote Top-Serveurs validé dans le jeu compte, même
-   ceux qui ne paient pas (une prime par jour seulement). lastAt départage les
-   ex æquo : le premier arrivé à ce total passe devant. */
+// Voteurs du mois : chaque vote Top-Serveurs validé dans le jeu compte, même
+// ceux qui ne paient pas (une prime par jour seulement). lastAt départage les
+// ex æquo : le premier arrivé à ce total passe devant.
 model VoteMonth {
   companyId String
   month     String   // AAAA-MM, heure de Paris
@@ -1455,8 +1455,8 @@ model VoteMonth {
   @@index([month, votes])
 }
 
-/* Les trois premiers d'un mois, une fois les lots versés depuis l'admin :
-   l'emblème « Tampon de contrôle » pour toujours, le rôle Discord le mois suivant. */
+// Les trois premiers d'un mois, une fois les lots versés depuis l'admin :
+// l'emblème « Tampon de contrôle » pour toujours, le rôle Discord le mois suivant.
 model VoteWinner {
   month     String
   rank      Int
