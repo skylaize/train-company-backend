@@ -26,6 +26,7 @@ export const ROLES = {
   PREMIUM: "💎 Premium",
   CHEF: "🤝 Chef d'alliance",
   CHAMPION: "🏆 Champion de saison",
+  VOTEUR: "🗳️ Voteur du mois", // podium des votes Top-Serveurs du mois précédent
 } as const;
 export type ManagedRole = keyof typeof ROLES;
 

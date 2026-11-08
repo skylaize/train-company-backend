@@ -1,6 +1,7 @@
 import { prisma } from "../prisma";
 import { botEnabled, DiscordError, GUILD_ID, managedRoleIds, ManagedRole, rest } from "./discord.service";
 import { recordBoost } from "./boost.service";
+import { voteRoleHolders } from "./vote.service";
 
 /* ============================================================
    Rôles automatiques (2.1).
@@ -9,9 +10,10 @@ import { recordBoost } from "./boost.service";
    - 🚉 Joueur            : il a fondé sa compagnie ;
    - 💎 Premium           : sa compagnie est Premium ;
    - 🤝 Chef d'alliance   : il a fondé (ou hérité) une alliance ;
-   - 🏆 Champion de saison : premier de son groupe à la dernière saison close.
+   - 🏆 Champion de saison : premier de son groupe à la dernière saison close ;
+   - 🗳️ Voteur du mois    : sur le podium des votes Top-Serveurs du mois dernier.
 
-   Le jeu ne touche qu'à ces quatre rôles : ceux du staff, les rôles de
+   Le jeu ne touche qu'à ces cinq rôles : ceux du staff, les rôles de
    notification et tout ce qui est ajouté à la main restent intacts.
 
    Synchronisation : au moment de la liaison, à l'achat du Premium, et un
@@ -21,9 +23,10 @@ import { recordBoost } from "./boost.service";
 type Linked = { id: string; discordId: string; companyId: string | null; isPremium: boolean };
 
 async function context() {
-  const [founders, lastSeason] = await Promise.all([
+  const [founders, lastSeason, voters] = await Promise.all([
     prisma.alliance.findMany({ select: { founderId: true } }) as Promise<{ founderId: string }[]>,
     prisma.season.findFirst({ where: { endedAt: { not: null } }, orderBy: { number: "desc" }, select: { id: true } }),
+    voteRoleHolders().catch(() => new Set<string>()),
   ]);
   const champions = lastSeason
     ? ((await prisma.seasonEntry.findMany({
@@ -34,6 +37,7 @@ async function context() {
   return {
     founders: new Set(founders.map((f) => f.founderId)),
     champions: new Set(champions.map((c) => c.companyId)),
+    voters,
   };
 }
 type Ctx = Awaited<ReturnType<typeof context>>;
@@ -45,6 +49,7 @@ function wanted(u: Linked, ctx: Ctx): Set<ManagedRole> {
   if (u.isPremium) out.add("PREMIUM");
   if (ctx.founders.has(u.companyId)) out.add("CHEF");
   if (ctx.champions.has(u.companyId)) out.add("CHAMPION");
+  if (ctx.voters.has(u.companyId)) out.add("VOTEUR");
   return out;
 }
 

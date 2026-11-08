@@ -1441,3 +1441,29 @@ model VoteReward {
 
   @@id([companyId, day])
 }
+
+/* Voteurs du mois : chaque vote Top-Serveurs validé dans le jeu compte, même
+   ceux qui ne paient pas (une prime par jour seulement). lastAt départage les
+   ex æquo : le premier arrivé à ce total passe devant. */
+model VoteMonth {
+  companyId String
+  month     String   // AAAA-MM, heure de Paris
+  votes     Int      @default(0)
+  lastAt    DateTime @default(now())
+
+  @@id([companyId, month])
+  @@index([month, votes])
+}
+
+/* Les trois premiers d'un mois, une fois les lots versés depuis l'admin :
+   l'emblème « Tampon de contrôle » pour toujours, le rôle Discord le mois suivant. */
+model VoteWinner {
+  month     String
+  rank      Int
+  companyId String
+  votes     Int
+  createdAt DateTime @default(now())
+
+  @@id([month, rank])
+  @@index([companyId])
+}

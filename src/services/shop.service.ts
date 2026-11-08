@@ -1,6 +1,7 @@
 import { RELEASE_171 } from "../release";
 import { boostUnlocksFor } from "./boost.service";
 import { halloweenUnlocks } from "./halloween.service";
+import { isVoteWinner, VOTE_EMBLEM } from "./vote.service";
 import { seasonUnlocks } from "./saison.service";
 import { isBuilder, BUILDER_EMBLEM } from "./world.service";
 
@@ -691,6 +692,8 @@ export async function unlockedFor(companyId: string) {
   won.titles.forEach((t) => titles.add(t));
   won.liveries.forEach((c) => liveries.add(c.toLowerCase()));
   if (await isBuilder(companyId)) emblems.add(BUILDER_EMBLEM);
+  // podium des voteurs d'un mois
+  if (await isVoteWinner(companyId).catch(() => false)) emblems.add(VOTE_EMBLEM);
   // 2.0 : ce que les pass de saison ont fait gagner
   const pass = await passUnlocks(companyId).catch(() => null);
   if (pass) {

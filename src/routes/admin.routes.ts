@@ -53,3 +53,6 @@ adminRouter.get("/logs", admin.adminLogs);
 adminRouter.get("/maintenance", admin.maintenanceAdmin);
 adminRouter.post("/maintenance", admin.startMaintenance);
 adminRouter.delete("/maintenance", admin.endMaintenance);
+
+adminRouter.get("/voters", admin.votersAdmin);
+adminRouter.post("/voters/:month/pay", admin.payVoters);

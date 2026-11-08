@@ -5,6 +5,7 @@ import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
 import { adminConfigured, logAdmin, markBanned } from "../services/admin.service";
 import { maintenance, maintenanceActive, setMaintenance } from "../services/maintenance.service";
+import { monthTop, parisMonth, previousMonth, VOTE_PRIZES, VOTE_WINNERS } from "../services/vote.service";
 import { buildLeaderRows } from "../services/leaderboard.service";
 import { currentSeason, DIVISIONS, invalidateSeason } from "../services/saison.service";
 import { allianceRanking, invalidateAlliances } from "../services/alliance.service";
@@ -14,7 +15,7 @@ import { GIFT_FROM, parsePrize, prizeLabel, PRIZE_CHOICES, MAX_GIFT_COINS } from
 import { grantTrial, MAX_TRIAL_DAYS } from "../services/trial.service";
 import { sendToCompany, pushEnabled } from "../services/push.service";
 import { syncCompany, clearRoles } from "../services/discord-roles.service";
-import { botEnabled, BRAND_COLOR, channelId, CHANNELS, ChannelKey, DiscordFile, GUILD_ID, NOTIFY_ROLES, NotifyRole, postOnce, rest } from "../services/discord.service";
+import { botEnabled, BRAND_COLOR, channelId, CHANNELS, ChannelKey, DiscordFile, esc, GUILD_ID, NOTIFY_ROLES, NotifyRole, postOnce, rest } from "../services/discord.service";
 import { createGiveaway, finishGiveaway, rerollGiveaway, parseDuration, MIN_DURATION_MS, MAX_DURATION_MS, MAX_WINNERS } from "../services/giveaway.service";
 import { LIVERY_PREMIUM } from "./company.controller";
 import { TRAIN_MODELS, trainValue } from "./train.controller";
@@ -501,6 +502,87 @@ export async function warnPlayer(req: AuthRequest, res: Response) {
   await prisma.user.update({ where: { id: c.ownerId }, data: { warning: message, warnedAt: new Date(), warnCount: { increment: 1 } } });
   await logAdmin(actor(req), "AVERTISSEMENT", { id: c.id, label: c.name }, message);
   res.json({ ok: true });
+}
+
+/* ---------------- voteurs du mois ---------------- */
+
+const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
+
+async function winnersOf(month: string) {
+  return (await prisma.voteWinner.findMany({ where: { month }, orderBy: { rank: "asc" } })) as { month: string; rank: number; companyId: string; votes: number; createdAt: Date }[];
+}
+
+/* Le mois en cours et le mois dernier, avec le podium déjà versé s'il l'a été. */
+export async function votersAdmin(_req: AuthRequest, res: Response) {
+  const current = parisMonth();
+  const previous = previousMonth(current);
+  const [now, last, paid] = await Promise.all([monthTop(current, 10), monthTop(previous, 10), winnersOf(previous)]);
+  res.json({ winners: VOTE_WINNERS, prizes: VOTE_PRIZES, current: { month: current, top: now }, previous: { month: previous, top: last, paid } });
+}
+
+/* Verse les lots d'un mois terminé : emblème, rôle Discord, annonce.
+   exclude = compagnies écartées (multi-comptes…) : les suivantes montent. */
+export async function payVoters(req: AuthRequest, res: Response) {
+  const month = String(req.params.month ?? "");
+  if (!MONTH_RE.test(month)) return bad(res, 400, "Mois invalide");
+  if (month >= parisMonth()) return bad(res, 400, "Le mois n'est pas terminé");
+  if ((await winnersOf(month)).length) return bad(res, 409, "Les lots de ce mois sont déjà versés");
+  const exclude = Array.isArray(req.body?.exclude) ? (req.body.exclude as unknown[]).map(String).slice(0, 50) : [];
+  const podium = await monthTop(month, VOTE_WINNERS, exclude);
+  if (!podium.length) return bad(res, 400, "Aucun vote ce mois-là");
+  try {
+    await prisma.voteWinner.createMany({ data: podium.map((p) => ({ month, rank: p.rank, companyId: p.companyId, votes: p.votes })) });
+  } catch {
+    return bad(res, 409, "Les lots de ce mois sont déjà versés");
+  }
+
+  const label = new Date(`${month}-15T12:00:00Z`).toLocaleDateString("fr-FR", { month: "long", year: "numeric" });
+  const place = (r: number) => (r === 1 ? "1re" : `${r}e`);
+  await prisma.$transaction(
+    podium.flatMap((p) => {
+      const amount = VOTE_PRIZES[p.rank - 1] ?? 0;
+      return amount
+        ? [
+            prisma.company.update({ where: { id: p.companyId }, data: { balance: { increment: amount } } }),
+            prisma.transaction.create({ data: { companyId: p.companyId, type: "VOTE", amount, description: `Voteurs du mois (${label}) : ${place(p.rank)} place, ${p.votes} votes` } }),
+          ]
+        : [];
+    })
+  );
+  for (const p of podium) {
+    void syncCompany(p.companyId).catch(() => undefined);
+    void sendToCompany(p.companyId, {
+      title: `Voteur du mois, ${place(p.rank)} place`,
+      body: `${p.votes} votes en ${label} : ${(VOTE_PRIZES[p.rank - 1] ?? 0).toLocaleString("fr-FR")} pi. versées. L'emblème « Tampon de contrôle » vous attend dans les Paramètres, et le rôle Voteur du mois sur le Discord.`,
+      tag: "voteurs",
+    }).catch(() => undefined);
+  }
+  if (botEnabled()) {
+    const owners = (await prisma.company.findMany({
+      where: { id: { in: podium.map((p) => p.companyId) } },
+      select: { id: true, owner: { select: { discordId: true } } },
+    })) as { id: string; owner: { discordId: string | null } }[];
+    const discordOf = new Map(owners.map((o) => [o.id, o.owner.discordId]));
+    const medal = ["🥇", "🥈", "🥉"];
+    const lines = podium.map((p) => {
+      const d = discordOf.get(p.companyId);
+      return `${medal[p.rank - 1] ?? `${p.rank}.`} **${esc(p.name)}**${d ? ` (<@${d}>)` : ""} · ${p.votes} votes · ${(VOTE_PRIZES[p.rank - 1] ?? 0).toLocaleString("fr-FR")} pi.`;
+    });
+    await postOnce(`voteurs:${month}`, "CLASSEMENTS", [
+      {
+        embeds: [
+          {
+            color: BRAND_COLOR,
+            title: `Voteurs du mois · ${label}`,
+            description: `${lines.join("\n")}\n\nMerci à eux : chaque vote fait monter Réseau sur Top-Serveurs. Ils portent l'emblème « Tampon de contrôle » et le rôle Voteur du mois jusqu'à la fin du mois.`,
+          },
+        ],
+        allowed_mentions: { parse: [] },
+      },
+    ]).catch(() => undefined);
+  }
+  await logAdmin(actor(req), "VOTEURS", null, `lots de ${label} versés : ${podium.map((p) => `${p.rank}. ${p.name} (${p.votes})`).join(", ")}${exclude.length ? ` · ${exclude.length} écartée(s)` : ""}`);
+  res.json({ ok: true, podium });
 }
 
 /* ---------------- maintenance ---------------- */

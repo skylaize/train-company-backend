@@ -10,6 +10,13 @@ import {
   parisDay,
   rewardFor,
   voteConfig,
+  recordVote,
+  monthTop,
+  myMonth,
+  parisMonth,
+  msUntilMonthEnd,
+  VOTE_WINNERS,
+  VOTE_PRIZES,
 } from "../services/vote.service";
 
 const SELECT = { id: true, referralCode: true, voteStreak: true, lastVoteDay: true } as const;
@@ -42,7 +49,15 @@ export async function getMyVote(req: AuthRequest, res: Response) {
     // prochain vote récompensé (aujourd'hui, ou demain si c'est déjà fait) : la série +1
     nextReward: rewardFor(streak + 1),
     resetInMs: msUntilParisMidnight(),
+    // voteurs du mois : le podium, sa place, le temps qui reste
+    month: await monthSummary(company.id),
   });
+}
+
+async function monthSummary(companyId: string) {
+  const month = parisMonth();
+  const [top, me] = await Promise.all([monthTop(month, VOTE_WINNERS), myMonth(companyId, month)]);
+  return { month, winners: VOTE_WINNERS, prizes: VOTE_PRIZES, top: top.map((r) => ({ ...r, me: r.companyId === companyId })), votes: me.votes, rank: me.rank, endsInMs: msUntilMonthEnd() };
 }
 
 export async function claimVote(req: AuthRequest, res: Response) {
@@ -52,9 +67,8 @@ export async function claimVote(req: AuthRequest, res: Response) {
   const company = await prisma.company.findUnique({ where: { ownerId: req.userId as string }, select: SELECT });
   if (!company) return res.status(404).json({ error: "Créez d'abord votre compagnie" });
 
-  if (company.lastVoteDay === parisDay()) {
-    return res.status(409).json({ error: "Prime du jour déjà reçue. Vos votes suivants comptent quand même pour le classement !" });
-  }
+  // prime du jour déjà reçue : le vote est quand même vérifié, il compte pour les voteurs du mois
+  const paidToday = company.lastVoteDay === parisDay();
 
   const now = Date.now();
   const wait = (lastTry.get(company.id) ?? 0) + COOLDOWN_MS - now;
@@ -79,13 +93,13 @@ export async function claimVote(req: AuthRequest, res: Response) {
       });
     }
     if (state === "claimed") {
-      return res.status(409).json({ error: "Ce vote a déjà été utilisé. Un nouveau vote est possible toutes les 2 h sur Top-Serveurs." });
+      return res.status(409).json({ error: "Ce vote a déjà été compté. Un nouveau vote est possible toutes les 2 h sur Top-Serveurs." });
     }
 
-    const granted = await grantVoteReward(company.id, company.lastVoteDay, company.voteStreak);
-    if (!granted) return res.status(409).json({ error: "Prime du jour déjà reçue" });
-
-    return res.json({ ok: true, ...granted });
+    // le vote est consommé chez Top-Serveurs : il compte pour le mois, prime ou pas
+    const monthVotes = await recordVote(company.id);
+    const granted = paidToday ? null : await grantVoteReward(company.id, company.lastVoteDay, company.voteStreak);
+    return res.json({ ok: true, amount: granted?.amount ?? 0, streak: granted?.streak ?? null, nextReward: granted?.nextReward ?? null, monthVotes, month: await monthSummary(company.id) });
   } finally {
     busy.delete(company.id);
   }
