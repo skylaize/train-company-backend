@@ -1,4 +1,5 @@
 import { Router, Response } from "express";
+import { setAutoFreight } from "../controllers/contract.controller";
 import { requireAuth, AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
 import { trainBonuses } from "../services/bonus.service";
@@ -21,6 +22,8 @@ trainRouter.post("/trains/parts", requireAuth, buyParts);
 trainRouter.post("/trains/sell", requireAuth, sellTrain);
 // 2.1.1 (Premium)
 trainRouter.get("/trains/:id/resale", requireAuth, trainResale);
+// 2.7 : fret automatique de nuit
+trainRouter.patch("/trains/:id/auto-freight", requireAuth, setAutoFreight);
 /* 2.7 : vue cabine — les rames des autres compagnies qui roulent sur au moins
    un tronçon de la ligne de cette rame, pour les croiser en route. Une seule
    requête sur les rames en route (index sur le statut), filtrée en mémoire,

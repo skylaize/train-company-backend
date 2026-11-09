@@ -1,7 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { randomUUID } from "crypto";
 import { prisma } from "../prisma";
-import { ensureMarketStocked, removeExpiredContracts } from "../controllers/contract.controller";
+import { ensureMarketStocked, removeExpiredContracts, runAutoFreight, AUTO_FREIGHT_PAY, nightOwlHours } from "../controllers/contract.controller";
 import { processReferralMilestones } from "../services/referral-milestone.service";
 import { creditDelivery, expireMissions } from "../services/mission.service";
 import { cargoBonus } from "../services/client.service";
@@ -236,6 +236,8 @@ async function runSimulationTick(timer: TickTimer) {
   await T("ordres expirés", () => expireMissions());
   await T("contrats expirés", () => removeExpiredContracts());
   await T("marché des contrats", () => ensureMarketStocked());
+  // 2.7 : le fret automatique, toutes les deux minutes
+  if (tickCount % 4 === 2) await T("fret automatique", () => runAutoFreight()).catch((err) => console.error("[fret automatique] échec :", (err as Error).message));
   // 2.4 : les parrainages bougent lentement, une fois par minute suffit
   if (tickCount % 2 === 0) await T("parrainages", () => processReferralRewards());
   /* Cours du fret : le marché bouge que le joueur soit là ou non, sinon
@@ -1001,6 +1003,9 @@ export async function runFreightContracts(weather: Map<string, StationWeather> =
       // 2.1 : gare de triage au départ ou à l'arrivée
       const myYards = yards.get(companyId);
       if (myYards && (myYards.has(contract.originStation) || myYards.has(contract.destinationStation))) baseReward = Math.round(baseReward * YARD_PAY);
+      // 2.7 : le fret automatique est payé 80 %
+      const auto = Boolean((contract as { auto?: boolean }).auto);
+      if (auto) baseReward = Math.round(baseReward * AUTO_FREIGHT_PAY);
       // Une compagnie Premium subit deux fois moins de risque de dommage ; l'assurance encore deux fois moins
       let effectiveDamageChance = premiumCompanyIds.has(companyId) ? DAMAGE_CHANCE / 2 : DAMAGE_CHANCE;
       if (contract.insured) effectiveDamageChance /= 2;
@@ -1033,7 +1038,7 @@ export async function runFreightContracts(weather: Map<string, StationWeather> =
       updates.push(
         prisma.contract.update({ where: { id: contract.id }, data: { status: "LIVREE", trainId: null } }),
         // 2.7 : le matériel électrique donne un point de réparation des sous-stations
-        prisma.company.update({ where: { id: companyId }, data: { balance: { increment: payout }, ...((contract as { electric?: boolean }).electric ? { voltPoints: { increment: 1 } } : {}) } }),
+        prisma.company.update({ where: { id: companyId }, data: { balance: { increment: payout }, ...((contract as { electric?: boolean }).electric ? { voltPoints: { increment: !auto && nightOwlHours() ? 2 : 1 } } : {}) } }),
         prisma.transaction.create({
           data: {
             companyId,
@@ -1042,7 +1047,7 @@ export async function runFreightContracts(weather: Map<string, StationWeather> =
             trainId: train.id,
             description: damaged
               ? `Cargaison endommagée en route : ${contract.cargoType} (${contract.originStation} → ${contract.destinationStation})`
-              : `Livraison "${contract.cargoType}"${load} (${contract.originStation} → ${contract.destinationStation})`,
+              : `Livraison "${contract.cargoType}"${load} (${contract.originStation} → ${contract.destinationStation})${auto ? ", fret automatique" : ""}`,
           },
         })
       );

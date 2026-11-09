@@ -10,7 +10,8 @@ import { getCargoIndexMap, freightMultiplier } from "../services/market.service"
 import { distanceKm } from "../services/geography.service";
 import { brokenRegions, eruptionActive, eruptionConfig, ELECTRIC_CARGO, ERUPTION_REGIONS, routeEruption } from "../services/eruption.service";
 import { yardsOf, YARD_TIME } from "../services/infrastructure.service";
-import { loadCheck, loadFactorFor, tourMinutes, isFreightModel, isWagon, wagonFor } from "../services/freight.service";
+import { parisHour } from "../services/time.service";
+import { loadCheck, loadFactorFor, tourMinutes, isFreightModel, isWagon, wagonFor, wagonsOf } from "../services/freight.service";
 
 async function getOwnedCompanyOrFail(userId: string) {
   return prisma.company.findUnique({ where: { ownerId: userId } });
@@ -527,4 +528,104 @@ export async function acceptContract(req: AuthRequest, res: Response) {
   }
 
   return res.status(201).json(contracts.length === 1 ? done[0] : { ok: true, contracts: done, tourMinutes: tour });
+}
+
+
+/* ---------------- 2.7 : le fret automatique ----------------
+
+   Pour les joueurs absents : une locomotive cochée « fret automatique » part
+   seule quand elle est libre, à toute heure. Le serveur lui choisit, pour
+   chaque type de wagon attelé, le contrat qui rapporte le plus. Moins bien
+   que de jouer : payé 80 %, tournées moitié plus longues, 4 livraisons par
+   heure et par locomotive au plus, et seulement des contrats restés 5 min
+   sans preneur (le marché va d'abord aux joueurs présents). Une locomotive
+   usée à 80 % reste au dépôt. */
+export const AUTO_FREIGHT_PAY = 0.8;
+export const AUTO_FREIGHT_SLOW = 1.5;
+export const AUTO_FREIGHT_PER_HOUR = 4;
+const AUTO_MIN_AGE_MS = 5 * 60_000;
+
+/* 2.7 : la nuit (23 h – 8 h), un conteneur électrique livré à la main vaut
+   deux points : les veilleurs avancent plus vite quand le réseau dort. */
+export const nightOwlHours = (at = new Date()) => {
+  const h = parisHour(at);
+  return h >= 23 || h < 8;
+};
+
+type MarketRow = { id: string; cargoType: string; reward: number; durationMinutes: number; originStation: string; destinationStation: string; expiresAt: Date | null };
+
+export async function runAutoFreight(now = new Date()) {
+  const trains = (await prisma.train.findMany({
+    where: { autoFreight: true, status: "IDLE", lineId: null, wear: { lt: 80 }, partsEta: null, model: { in: ["LOCOTRACTEUR", "FRET_LOURD", "FRET_RAPIDE", "FRET_ELECTRIQUE"] } },
+    select: { id: true, companyId: true, model: true, cars: true, workshopUntil: true },
+  })) as { id: string; companyId: string; model: string; cars: string[]; workshopUntil: Date | null }[];
+  const ready = trains.filter((t) => !t.workshopUntil || t.workshopUntil <= now);
+  if (!ready.length) return 0;
+  const market = (await prisma.contract.findMany({
+    where: { status: "DISPONIBLE", companyId: null, reservedFor: null, sealed: false, createdAt: { lte: new Date(now.getTime() - AUTO_MIN_AGE_MS) } },
+    select: { id: true, cargoType: true, reward: true, durationMinutes: true, originStation: true, destinationStation: true, expiresAt: true },
+  })) as MarketRow[];
+  const free = market.filter((c) => !c.expiresAt || c.expiresAt.getTime() > now.getTime() + 60_000);
+  // ce que chaque locomotive a déjà pris dans l'heure
+  const usedRows = (await (prisma.contract.groupBy as any)({
+    by: ["autoTrain"],
+    where: { auto: true, acceptedAt: { gte: new Date(now.getTime() - 3_600_000) }, autoTrain: { in: ready.map((t) => t.id) } },
+    _count: { _all: true },
+  })) as { autoTrain: string; _count: { _all: number } }[];
+  const used = new Map(usedRows.map((r) => [r.autoTrain, r._count._all]));
+  const taken = new Set<string>();
+  let started = 0;
+  // chacun son tour, dans un ordre tiré au sort
+  for (const train of ready.sort(() => Math.random() - 0.5)) {
+    const wagons = wagonsOf(train.cars);
+    const left = AUTO_FREIGHT_PER_HOUR - (used.get(train.id) ?? 0);
+    if (left <= 0) continue;
+    const pick: MarketRow[] = [];
+    for (const w of wagons.keys()) {
+      if (pick.length >= left) break;
+      const best = free
+        .filter((c) => !taken.has(c.id) && wagonFor(c.cargoType) === w)
+        // pas de départ électrique vers une région coupée
+        .filter((c) => train.model !== "FRET_ELECTRIQUE" || routeEruption([c.originStation, c.destinationStation])?.status !== "coupee")
+        .sort((a, b) => b.reward / Math.max(1, b.durationMinutes) - a.reward / Math.max(1, a.durationMinutes))[0];
+      if (best) pick.push(best);
+    }
+    if (!pick.length) continue;
+    const yards = await yardsOf(train.companyId);
+    const durations = pick.map((c) => Math.round(c.durationMinutes * (yards.has(c.originStation) || yards.has(c.destinationStation) ? YARD_TIME : 1)));
+    const tour = Math.round(tourMinutes(train.model, durations, train.cars.filter((c) => isWagon(c)).length) * AUTO_FREIGHT_SLOW);
+    try {
+      await prisma.$transaction(async (tx) => {
+        const claimed = await tx.train.updateMany({
+          where: { id: train.id, status: "IDLE", lineId: null, autoFreight: true },
+          data: { status: "EN_ROUTE", progress: 0, departedAt: now },
+        });
+        if (claimed.count !== 1) throw new Error("TRAIN");
+        for (const c of pick) {
+          const hit = await tx.contract.updateMany({
+            where: { id: c.id, status: "DISPONIBLE", companyId: null },
+            data: { companyId: train.companyId, trainId: train.id, status: "EN_COURS", acceptedAt: now, tourMinutes: tour, loadFactor: loadFactorFor(train, c.cargoType), auto: true, autoTrain: train.id },
+          });
+          if (hit.count !== 1) throw new Error("PRIS");
+        }
+      });
+      pick.forEach((c) => taken.add(c.id));
+      used.set(train.id, (used.get(train.id) ?? 0) + pick.length);
+      started++;
+    } catch {
+      // pris entre-temps par un joueur : la locomotive retentera au tour suivant
+    }
+  }
+  return started;
+}
+
+export async function setAutoFreight(req: AuthRequest, res: Response) {
+  const company = await getOwnedCompanyOrFail(req.userId as string);
+  if (!company) return res.status(404).json({ error: "Créez d'abord votre compagnie" });
+  const train = await prisma.train.findFirst({ where: { id: String(req.params.id), companyId: company.id }, select: { id: true, model: true } });
+  if (!train) return res.status(404).json({ error: "Train introuvable" });
+  if (!isFreightModel(train.model)) return res.status(409).json({ error: "Le fret automatique est réservé aux locomotives de fret" });
+  const on = Boolean(req.body?.on);
+  await prisma.train.update({ where: { id: train.id }, data: { autoFreight: on } });
+  return res.json({ ok: true, autoFreight: on });
 }

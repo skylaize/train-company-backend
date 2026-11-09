@@ -594,6 +594,7 @@ model Train {
   brokenPart    String?    // organe cassé : la réparation demande la pièce
   partsEta      DateTime?  // pièce commandée, livrée à cette heure
   workshopUntil DateTime?  // en révision à l'atelier jusqu'à cette heure
+  autoFreight   Boolean    @default(false) // 2.7 : fret automatique (joueurs absents)
   serviceAt     Int?       // révision automatique quand l'usure atteint ce seuil (40, 60, 80)
 
   // 2.0 — rame de collection, restaurée depuis une épave (numéro, histoire, livrée d'époque, prestige)
@@ -676,6 +677,8 @@ model Contract {
   // 2.6.1 : contrat de bienvenue, réservé 24 h à une nouvelle compagnie
   // 2.7 : conteneur de matériel électrique (éruption solaire), 1 point de réparation à la livraison
   electric          Boolean  @default(false)
+  auto              Boolean  @default(false) // 2.7 : pris par le fret automatique, payé 80 %
+  autoTrain         String?  // 2.7 : la locomotive qui l'a pris (plafond de 4 par heure)
   reservedFor       String?
 
   createdAt         DateTime       @default(now())
@@ -683,6 +686,7 @@ model Contract {
   @@index([trainId])
   // 2.4 : marché (DISPONIBLE) et tournées en cours (EN_COURS), à chaque tour
   @@index([status, companyId])
+  @@index([autoTrain, acceptedAt])
   @@index([companyId])
 }
 
