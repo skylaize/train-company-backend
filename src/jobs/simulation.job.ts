@@ -84,6 +84,14 @@ const NO_STAFF: CompanyStaffEffects = { wearMultiplier: 1, repairMultiplier: 1, 
 
 const TICK_INTERVAL_MS = 30_000;
 
+/* 2.7 : une rame qui ne prend pas le courant de la caténaire : la vapeur
+   (modèle ou rame de collection) et la Micheline. Le site dit la même chose. */
+function thermalTrain(t: { model: string; heritage?: unknown }) {
+  if (t.model === "VAPEUR") return true;
+  const skin = heritageOf(t)?.skin;
+  return skin === "vapeur" || skin === "micheline";
+}
+
 export function startSimulationJob() {
   /* Le tick est une fonction async lancée par setInterval : personne n'attend
      la promesse qu'elle renvoie. Sans ce filet, la moindre erreur — une
@@ -484,11 +492,11 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
   const premiumIds = await getPremiumCompanyIds();
   const parked = (await prisma.train.findMany({
     where: { status: "EN_ROUTE", lineId: { not: null }, departedAt: null },
-    select: { id: true, companyId: true, serviceFrom: true, serviceTo: true, model: true, line: { select: { electrified: true, departureStation: true, arrivalStation: true, stops: true } } },
-  })) as { id: string; companyId: string; serviceFrom: number | null; serviceTo: number | null; model: string; line: { electrified: boolean; departureStation: string; arrivalStation: string; stops: string[] } | null }[];
+    select: { id: true, companyId: true, serviceFrom: true, serviceTo: true, model: true, heritage: true, line: { select: { electrified: true, departureStation: true, arrivalStation: true, stops: true } } },
+  })) as { id: string; companyId: string; serviceFrom: number | null; serviceTo: number | null; model: string; heritage?: unknown; line: { electrified: boolean; departureStation: string; arrivalStation: string; stops: string[] } | null }[];
   // 2.7 : une rame électrique restée à quai pendant la coupure attend le retour du courant
   const unpowered = (p: (typeof parked)[number]) =>
-    !!p.line && (p.line.electrified || p.model === TGV_MODEL) && routeEruption(routeOf(p.line))?.status === "coupee";
+    !!p.line && ((p.line.electrified && !thermalTrain(p)) || p.model === TGV_MODEL) && routeEruption(routeOf(p.line))?.status === "coupee";
   // 2.4 : une seule écriture pour toutes les rames qui repartent
   const restart = parked.filter((p) => (!premiumIds.has(p.companyId) || inServiceWindow(p)) && !unpowered(p)).map((p) => p.id);
   for (const ids of chunk(restart, 1000)) {
@@ -637,7 +645,8 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
     /* 2.4 : une rame électrique est arrêtée par une panne de sous-station sur
        son itinéraire ; une rame thermique attend si la facture de gazole n'a
        pas pu être payée (hors période d'essai). */
-    const electric = Boolean(lineX.electrified) || train.model === TGV_MODEL;
+    // 2.7 : la vapeur et les autorails d'époque restent thermiques, même sous la caténaire
+    const electric = (Boolean(lineX.electrified) && !thermalTrain(train)) || train.model === TGV_MODEL;
     if (electric && routeInOutage(routeOf(lineX))) return;
     /* 2.7 : l'éruption solaire. En tension réduite, une rame électrique partie
        depuis roule à moitié de sa vitesse ; à la coupure, elle finit son
@@ -944,9 +953,13 @@ export async function runFreightContracts(weather: Map<string, StationWeather> =
     const freightRoute = tour.flatMap((c) => [c.originStation, c.destinationStation]);
     const freightTrack = routeTrack(freightRoute);
     const freightElectric = train.model === "FRET_ELECTRIQUE";
-    // 2.7 : éruption solaire, coupure = à l'arrêt, tension réduite = un tour sur deux
+    /* 2.7 : éruption solaire. Une tournée électrique déjà partie avance à
+       moitié vitesse (un tour sur deux), même sous la coupure : elle finit sa
+       tournée et rentre. Avant, elle s'arrêtait net jusqu'à la réparation, et
+       la locomotive restait bloquée, impossible à revendre ou à remplacer.
+       Ce sont les nouveaux départs qui sont refusés (voir acceptContract). */
     const freightEruption = freightElectric ? routeEruption(freightRoute) : null;
-    const freightStalled = freightEruption?.status === "coupee" || (freightEruption?.status === "reduite" && Math.random() < 0.5);
+    const freightStalled = Boolean(freightEruption) && Math.random() < 0.5;
     if ((freightElectric && (routeInOutage(freightRoute) || freightStalled)) || (!freightElectric && blockedFreight.has(companyId))) {
       // le temps perdu repousse l'arrivée, comme un retard
       await prisma.$transaction(tour.map((c) => prisma.contract.update({ where: { id: c.id }, data: { acceptedAt: new Date(new Date(c.acceptedAt).getTime() + TICK_INTERVAL_MS) } })));

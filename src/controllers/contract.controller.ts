@@ -8,7 +8,7 @@ import { requiredCargoTypes } from "../services/mission.service";
 import { campaignFreightStations } from "../services/campaign.service";
 import { getCargoIndexMap, freightMultiplier } from "../services/market.service";
 import { distanceKm } from "../services/geography.service";
-import { brokenRegions, eruptionActive, eruptionConfig, ELECTRIC_CARGO, ERUPTION_REGIONS } from "../services/eruption.service";
+import { brokenRegions, eruptionActive, eruptionConfig, ELECTRIC_CARGO, ERUPTION_REGIONS, routeEruption } from "../services/eruption.service";
 import { yardsOf, YARD_TIME } from "../services/infrastructure.service";
 import { loadCheck, loadFactorFor, tourMinutes, isFreightModel, isWagon, wagonFor } from "../services/freight.service";
 
@@ -453,6 +453,10 @@ export async function acceptContract(req: AuthRequest, res: Response) {
   // 2.1 : les wagons décident de ce que la rame peut charger
   const why = loadCheck(train, contracts.map((c) => c.cargoType));
   if (why) return res.status(409).json({ error: why });
+  // 2.7 : pas de départ électrique vers une région où le courant est coupé
+  if (train.model === "FRET_ELECTRIQUE" && routeEruption(contracts.flatMap((c) => [c.originStation, c.destinationStation]))?.status === "coupee") {
+    return res.status(409).json({ error: "Le courant est coupé sur ce trajet (éruption solaire) : prenez une locomotive diesel, locotracteur, fret lourd ou messagerie rapide" });
+  }
 
   for (const id of insuredIds) {
     const c = contracts.find((x) => x.id === id);
