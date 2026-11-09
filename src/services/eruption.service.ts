@@ -37,19 +37,20 @@ export type RegionStatus = "normal" | "alerte" | "reduite" | "coupee" | "reparee
 
 // Prix de chaque sous-station, en points : selon le poids de la région sur le réseau.
 // Réglables depuis l'admin une fois l'éruption lancée.
+// 2.7.1 : ×2,5, les joueurs les réparaient trop vite.
 export const DEFAULT_COSTS: Record<string, number> = {
-  idf: 160,
-  ara: 130,
-  "grand-est": 110,
-  "nouvelle-aquitaine": 110,
-  occitanie: 100,
-  paca: 100,
-  hdf: 90,
-  pdl: 80,
-  normandie: 80,
-  bretagne: 70,
-  cvl: 70,
-  bfc: 70,
+  idf: 400,
+  ara: 325,
+  "grand-est": 275,
+  "nouvelle-aquitaine": 275,
+  occitanie: 250,
+  paca: 250,
+  hdf: 225,
+  pdl: 200,
+  normandie: 200,
+  bretagne: 175,
+  cvl: 175,
+  bfc: 175,
 };
 
 export const ERUPTION_REGIONS = REGIONS.filter((r) => !r.dlc && r.id !== "etranger");
@@ -147,8 +148,9 @@ export async function launchEruption(startsAt: Date, opts: Partial<EruptionConfi
   const c: EruptionConfig = {
     startsAt: startsAt.toISOString(),
     order,
-    stepMinutes: 120,
-    reducedMinutes: 120,
+    // 2.7.1 : une région toutes les 40 min (au lieu de 2 h) : trop calme, d'après les joueurs
+    stepMinutes: 40,
+    reducedMinutes: 40,
     autoRepairDays: 12,
     containersOpen: 6,
     containerChance: 0.35,

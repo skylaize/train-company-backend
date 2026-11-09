@@ -155,7 +155,7 @@ export async function startSeason(number: number, startsAt: Date) {
   // 2.7 : la saison du vieux matériel s'ouvre sur l'éruption solaire, sauf si elle est déjà programmée
   if (key === "vieux") {
     const er = await import("./eruption.service");
-    if (!(await er.loadEruption())) await er.launchEruption(startsAt).catch((err) => console.error("[éruption] lancement :", (err as Error).message));
+    if (!(await er.loadEruption())) await er.launchEruption(new Date(Math.max(startsAt.getTime(), Date.now()))).catch((err) => console.error("[éruption] lancement :", (err as Error).message));
   }
 
   const rows = await buildLeaderRows();

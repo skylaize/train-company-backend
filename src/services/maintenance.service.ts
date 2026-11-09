@@ -52,6 +52,13 @@ async function reload() {
 
 export function maintenance(): Maintenance | null {
   if (Date.now() - loadedAt > REFRESH_MS && !loading) loading = reload();
+  /* 2.7.1 : une maintenance dont l'heure de fin est passée se termine toute
+     seule. Avant, elle restait en place tant qu'on ne la levait pas dans
+     l'admin : le bandeau (ou l'écran) ne partait jamais. */
+  if (current?.endsAt && Date.parse(current.endsAt) <= Date.now()) {
+    current = null;
+    void prisma.gameSetting.deleteMany({ where: { key: KEY } }).catch(() => undefined);
+  }
   return current;
 }
 

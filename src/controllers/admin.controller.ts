@@ -8,7 +8,8 @@ import { maintenance, maintenanceActive, setMaintenance } from "../services/main
 import { monthTop, parisMonth, previousMonth, VOTE_PRIZES, VOTE_WINNERS } from "../services/vote.service";
 import { eruptionSummary, launchEruption, loadEruption, stopEruption, updateEruption, ERUPTION_REGIONS } from "../services/eruption.service";
 import { buildLeaderRows } from "../services/leaderboard.service";
-import { currentSeason, DIVISIONS, invalidateSeason, SEASON_THEMES } from "../services/saison.service";
+import { currentSeason, DIVISIONS, invalidateSeason, SEASON_THEMES, runSeasons, notifySeasonEnd } from "../services/saison.service";
+import { announceSeasonEnd } from "../services/discord-feed.service";
 import { allianceRanking, invalidateAlliances } from "../services/alliance.service";
 import { ensureProject, TUNNEL_ID } from "../services/world.service";
 import { findAnyItem, SHOP_ITEMS, DISCORD_ITEMS, AD_FREE_ITEM } from "../services/shop.service";
@@ -850,6 +851,23 @@ export async function updateSeason(req: AuthRequest, res: Response) {
   await prisma.season.update({ where: { id: s.id }, data });
   invalidateSeason();
   await logAdmin(actor(req), "SAISON", { id: s.id, label: `Saison ${s.number}` }, changes.join(", "));
+  /* 2.7.1 : une fin de saison dans le passé se fait tout de suite, sans
+     attendre le tour de saison (toutes les 5 min) : la suivante s'ouvre
+     aussitôt, avec le thème choisi pour elle. */
+  if (data.endsAt && data.endsAt.getTime() <= Date.now()) {
+    try {
+      const closed = await runSeasons();
+      if (closed) {
+        await notifySeasonEnd(closed.id).catch(() => {});
+        await announceSeasonEnd(closed.id).catch((err) => console.error("[discord] fin de saison :", (err as Error).message));
+      }
+      const next = await currentSeason();
+      return res.json({ ok: true, closed: Boolean(closed), next: next ? { number: next.number, name: next.name } : null });
+    } catch (err) {
+      console.error("[saisons] clôture depuis l'admin :", (err as Error).message);
+      return bad(res, 500, `Saison close, mais la suivante n'a pas pu s'ouvrir : ${(err as Error).message}`);
+    }
+  }
   res.json({ ok: true });
 }
 
