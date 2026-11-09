@@ -2,7 +2,7 @@ import { prisma } from "../prisma";
 import { botEnabled, BRAND_COLOR, Embed, esc, fmt, MessagePayload, postOnce, markPosted, upsertPost } from "./discord.service";
 import { buildLeaderRows, rankRows } from "./leaderboard.service";
 import { allianceRanking } from "./alliance.service";
-import { currentSeason, DIVISIONS } from "./saison.service";
+import { currentSeason, DIVISIONS, seasonTitle } from "./saison.service";
 import { ensureProject, TUNNEL_NAME, TUNNEL_STATIONS } from "./world.service";
 import { pruneLogKeys } from "./discord-modlog.service";
 import { Stop, TRAIN200_ID, TRAIN200_REWARD, TRAIN500_ID, TRAIN500_REWARD } from "./train200.service";
@@ -50,7 +50,7 @@ export async function updateLeaderboardPost() {
     const names = new Map(rows.map((r) => [r.id, r.name]));
     const daysLeft = Math.max(0, Math.ceil((season.endsAt.getTime() - Date.now()) / 86_400_000));
     fields.push({
-      name: `🏆 ${season.name} — encore ${daysLeft} j`,
+      name: `🏆 ${seasonTitle(season.name)} — encore ${daysLeft} j`,
       value: entries.length
         ? entries.map((e, i) => `${medal(i)} **${esc(names.get(e.companyId) ?? "—")}** — ${fmt(e.points)} pts · ${DIVISIONS[e.division]}`).join("\n")
         : "Aucun point marqué pour l'instant.",
@@ -142,7 +142,7 @@ async function checkSeasonStart() {
     {
       embeds: [
         {
-          title: `${season.name} — c'est parti !`,
+          title: `${seasonTitle(season.name)} — c'est parti !`,
           url: SITE_URL ? `${SITE_URL}/dashboard` : undefined,
           description: [
             `La saison ${season.number} est ouverte jusqu'au **${parisDay(season.endsAt)}**.`,
@@ -182,7 +182,7 @@ export async function announceSeasonEnd(seasonId: string) {
     {
       embeds: [
         {
-          title: `${season.name} terminée`,
+          title: `${seasonTitle(season.name)} terminée`,
           description: "Bravo aux champions de chaque groupe ! Les montées et descentes sont appliquées, la saison suivante démarre tout de suite.",
           color: BRAND_COLOR,
           fields: fields?.length ? fields : undefined,

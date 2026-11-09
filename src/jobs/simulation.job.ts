@@ -23,6 +23,8 @@ import { sendToCompany } from "../services/push.service";
 import { consumePart } from "../services/parts-market.service";
 import { economy, inTrial } from "../services/settings.service";
 import { meterAdd, routeInOutage, tripEnergy } from "../services/energy.service";
+import { routeEruption } from "../services/eruption.service";
+import { questEvent } from "../services/quest.service";
 import { cofunderMultiplier, routeTrack, tollsFor, wearTrack } from "../services/track.service";
 import { economyAfterTick, economyBeforeTick } from "../services/economy24.service";
 import { runTrain200, runTrain500 } from "../services/train200.service";
@@ -482,10 +484,13 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
   const premiumIds = await getPremiumCompanyIds();
   const parked = (await prisma.train.findMany({
     where: { status: "EN_ROUTE", lineId: { not: null }, departedAt: null },
-    select: { id: true, companyId: true, serviceFrom: true, serviceTo: true },
-  })) as { id: string; companyId: string; serviceFrom: number | null; serviceTo: number | null }[];
+    select: { id: true, companyId: true, serviceFrom: true, serviceTo: true, model: true, line: { select: { electrified: true, departureStation: true, arrivalStation: true, stops: true } } },
+  })) as { id: string; companyId: string; serviceFrom: number | null; serviceTo: number | null; model: string; line: { electrified: boolean; departureStation: string; arrivalStation: string; stops: string[] } | null }[];
+  // 2.7 : une rame électrique restée à quai pendant la coupure attend le retour du courant
+  const unpowered = (p: (typeof parked)[number]) =>
+    !!p.line && (p.line.electrified || p.model === TGV_MODEL) && routeEruption(routeOf(p.line))?.status === "coupee";
   // 2.4 : une seule écriture pour toutes les rames qui repartent
-  const restart = parked.filter((p) => !premiumIds.has(p.companyId) || inServiceWindow(p)).map((p) => p.id);
+  const restart = parked.filter((p) => (!premiumIds.has(p.companyId) || inServiceWindow(p)) && !unpowered(p)).map((p) => p.id);
   for (const ids of chunk(restart, 1000)) {
     await prisma.train.updateMany({ where: { id: { in: ids }, status: "EN_ROUTE", departedAt: null }, data: { departedAt: new Date(), progress: 0 } });
   }
@@ -634,6 +639,15 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
        pas pu être payée (hors période d'essai). */
     const electric = Boolean(lineX.electrified) || train.model === TGV_MODEL;
     if (electric && routeInOutage(routeOf(lineX))) return;
+    /* 2.7 : l'éruption solaire. En tension réduite, une rame électrique partie
+       depuis roule à moitié de sa vitesse ; à la coupure, elle finit son
+       trajet et reste à quai au départ suivant (elle repart avec le courant). */
+    const eruption = electric ? routeEruption(routeOf(lineX)) : null;
+    if (eruption?.status === "coupee" && train.progress === 0 && Date.now() - new Date(train.departedAt).getTime() < 90_000) {
+      await prisma.train.updateMany({ where: { id: train.id, status: "EN_ROUTE", progress: 0 }, data: { departedAt: null } });
+      return;
+    }
+    const eruptionSlow = eruption && new Date(train.departedAt).getTime() >= eruption.since ? 2 : 1;
     if (!electric && fuelBlocked.has(train.companyId)) return;
     if (tgv || tgvClassic) wearRate = wearRate * TGV_WEAR;
     const newWear = Math.min(100, train.wear + stochasticRound(wearRate));
@@ -670,7 +684,7 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
     // Une rame Express effectue le trajet 30% plus vite ; 1.7 : chaque voiture ajoutée ralentit,
     // l'électrification fait gagner 10 %
     const effectiveDuration =
-      train.line.durationMinutes * (train.model === "EXPRESS" ? 0.7 : 1) * (dlcModel?.speed ?? 1) * speedFactor(trainX) * (lineX.electrified ? ELECTRIC_SPEED : 1) * (doubled ? DOUBLE_SPEED : 1) * (tgv ? TGV_SPEED : tgvClassic ? TGV_CLASSIC_SPEED : 1) * trackFx.slow;
+      train.line.durationMinutes * (train.model === "EXPRESS" ? 0.7 : 1) * (dlcModel?.speed ?? 1) * speedFactor(trainX) * (lineX.electrified ? ELECTRIC_SPEED : 1) * (doubled ? DOUBLE_SPEED : 1) * (tgv ? TGV_SPEED : tgvClassic ? TGV_CLASSIC_SPEED : 1) * trackFx.slow * eruptionSlow;
     const progress = Math.min(100, Math.floor((elapsedMinutes / effectiveDuration) * 100));
 
     if (progress >= 100) {
@@ -850,6 +864,8 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
       if (load.seats > 0 && load.passengers >= load.seats && PEAK_HOURS.includes(parisHour())) seasonEvent(train.companyId, "RUSH_FULL");
       if (international) seasonEvent(train.companyId, "INTL");
       if (nightTrip) seasonEvent(train.companyId, "NIGHT");
+      // 2.7 : la quête du vieux matériel compte les trajets en traction thermique
+      if (!electric) questEvent(train.companyId, "THERMAL_TRIPS");
       await afterTrip(train, newWear, route, driver.incident).catch((err) => console.error("[atelier] fin de trajet :", (err as Error).message));
     } else if (progress !== train.progress || newWear !== train.wear) {
       progressUpdates.push({ id: train.id, progress, wear: newWear });
@@ -928,7 +944,10 @@ export async function runFreightContracts(weather: Map<string, StationWeather> =
     const freightRoute = tour.flatMap((c) => [c.originStation, c.destinationStation]);
     const freightTrack = routeTrack(freightRoute);
     const freightElectric = train.model === "FRET_ELECTRIQUE";
-    if ((freightElectric && routeInOutage(freightRoute)) || (!freightElectric && blockedFreight.has(companyId))) {
+    // 2.7 : éruption solaire, coupure = à l'arrêt, tension réduite = un tour sur deux
+    const freightEruption = freightElectric ? routeEruption(freightRoute) : null;
+    const freightStalled = freightEruption?.status === "coupee" || (freightEruption?.status === "reduite" && Math.random() < 0.5);
+    if ((freightElectric && (routeInOutage(freightRoute) || freightStalled)) || (!freightElectric && blockedFreight.has(companyId))) {
       // le temps perdu repousse l'arrivée, comme un retard
       await prisma.$transaction(tour.map((c) => prisma.contract.update({ where: { id: c.id }, data: { acceptedAt: new Date(new Date(c.acceptedAt).getTime() + TICK_INTERVAL_MS) } })));
       return;
@@ -1000,7 +1019,8 @@ export async function runFreightContracts(weather: Map<string, StationWeather> =
       }
       updates.push(
         prisma.contract.update({ where: { id: contract.id }, data: { status: "LIVREE", trainId: null } }),
-        prisma.company.update({ where: { id: companyId }, data: { balance: { increment: payout } } }),
+        // 2.7 : le matériel électrique donne un point de réparation des sous-stations
+        prisma.company.update({ where: { id: companyId }, data: { balance: { increment: payout }, ...((contract as { electric?: boolean }).electric ? { voltPoints: { increment: 1 } } : {}) } }),
         prisma.transaction.create({
           data: {
             companyId,

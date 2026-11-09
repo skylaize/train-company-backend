@@ -4,6 +4,7 @@ import { randomUUID } from "crypto";
 import { chunk, row } from "./batch.service";
 import { buildLeaderRows } from "./leaderboard.service";
 import { parisDate, parisMidnight, DAY_MS } from "./time.service";
+import { flushQuest, questEvent, QuestKind } from "./quest.service";
 
 /* ============================================================
    Saisons classées (2.0). À ne pas confondre avec season.service, les
@@ -45,7 +46,20 @@ export const SEASON_THEMES: Record<string, { name: string; title: string; livery
   hiver: { name: "Saison d'hiver", title: "Pionnier de l'hiver", livery: "#9cc7e0", liveryName: "Givre" },
   printemps: { name: "Saison de printemps", title: "Pionnier du printemps", livery: "#6fae6b", liveryName: "Prairie" },
   ete: { name: "Saison d'été", title: "Pionnier de l'été", livery: "#e8b33d", liveryName: "Blé mûr" },
+  // 2.7 : une saison à thème, choisie depuis l'admin pour la saison suivante
+  vieux: { name: "Retour au vieux matériel", title: "Gardien du vieux matériel", livery: "#46624a", liveryName: "Vert dépôt" },
 };
+
+/* Le nom à mettre dans une phrase : « Saison d'automne », mais « Saison
+   « Retour au vieux matériel » » pour une saison à thème. */
+export function seasonTitle(name: string) {
+  return name.toLowerCase().startsWith("saison") ? name : `Saison « ${name} »`;
+}
+
+/* La clé du thème d'une saison, d'après son nom. */
+export function themeKeyOf(season: { name: string }) {
+  return Object.entries(SEASON_THEMES).find(([, t]) => season.name.startsWith(t.name))?.[0] ?? "automne";
+}
 
 export function themeKey(at: Date) {
   const m = parisDate(at).month;
@@ -127,12 +141,22 @@ async function activeCompanyIds() {
 }
 
 export async function startSeason(number: number, startsAt: Date) {
-  const theme = SEASON_THEMES[themeKey(startsAt)];
+  /* 2.7 : un thème choisi d'avance dans l'admin passe devant le calendrier,
+     pour cette saison seulement */
+  const forced = (await prisma.gameSetting.findUnique({ where: { key: "nextSeasonTheme" } }).catch(() => null))?.value as { key?: string } | null;
+  const key = forced?.key && SEASON_THEMES[forced.key] ? forced.key : themeKey(startsAt);
+  const theme = SEASON_THEMES[key];
+  if (forced) await prisma.gameSetting.deleteMany({ where: { key: "nextSeasonTheme" } }).catch(() => undefined);
   const season = (await prisma.season.create({
     data: { number, name: `${theme.name}`, startsAt, endsAt: seasonEnd(startsAt) },
   })) as SeasonRow;
   current = season;
   currentAt = Date.now();
+  // 2.7 : la saison du vieux matériel s'ouvre sur l'éruption solaire, sauf si elle est déjà programmée
+  if (key === "vieux") {
+    const er = await import("./eruption.service");
+    if (!(await er.loadEruption())) await er.launchEruption(startsAt).catch((err) => console.error("[éruption] lancement :", (err as Error).message));
+  }
 
   const rows = await buildLeaderRows();
   const active = await activeCompanyIds();
@@ -194,11 +218,15 @@ const pendingEvents = new Map<string, number>(); // `${companyId}|${kind}`
 
 export function addSeasonPoints(companyId: string, n: number) {
   if (n > 0) pendingPoints.set(companyId, (pendingPoints.get(companyId) ?? 0) + n);
+  questEvent(companyId, "POINTS", n);
 }
 
+const QUEST_KINDS = new Set<string>(["FREIGHT", "REVISE", "FULL_TRIPS", "TRIPS"]);
 export function seasonEvent(companyId: string, kind: ObjectiveKind, amount = 1) {
   const key = `${companyId}|${kind}`;
   pendingEvents.set(key, (pendingEvents.get(key) ?? 0) + amount);
+  // 2.7 : la quête de fin de saison compte les mêmes actions
+  if (QUEST_KINDS.has(kind)) questEvent(companyId, kind as QuestKind, amount);
 }
 
 /* Appelé à la fin de chaque tour de simulation : une écriture par compagnie,
@@ -211,6 +239,16 @@ export async function flushSeason(now = new Date()) {
   pendingPoints.clear();
   pendingEvents.clear();
   if (!season || now >= season.endsAt) return;
+
+  // 2.7 : la quête de fin de saison, une requête groupée elle aussi
+  const finished = await flushQuest(season, themeKeyOf(season), now).catch((err) => {
+    console.error("[quête] écriture :", (err as Error).message);
+    return [] as string[];
+  });
+  if (finished.length) {
+    const { sendToCompany } = await import("./push.service");
+    for (const id of finished) void sendToCompany(id, { title: "Quête de fin de saison terminée", body: "Bravo : vos récompenses vous attendent dans les Paramètres.", url: "/dashboard", tag: "saison" }).catch(() => undefined);
+  }
 
   const week = weekOf(season, now);
   const objectives = objectivesFor(season.number, week);

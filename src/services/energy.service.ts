@@ -6,6 +6,7 @@ import { chunk, row, pool, SIM_CONCURRENCY } from "./batch.service";
 import { economy, inTrial } from "./settings.service";
 import { parisDate, parisHour } from "./time.service";
 import { REGIONS, REGION_OF } from "./regions.service";
+import { eruptionActive } from "./eruption.service";
 import type { StationWeather } from "./realweather.service";
 
 /* ============================================================
@@ -262,7 +263,8 @@ export async function runEnergyMarkets(weather: Map<string, StationWeather>, now
   if (cold && !wasCold) out.push({ kind: "cold", title: "🥶 Vague de froid", body: `Le courant prend ${Math.round((s.coldFactor - 1) * 100)} % tant que le froid dure. Aux heures de pointe, laisser des rames au dépôt rapporte une prime.` });
 
   // panne de sous-station
-  if (!outageNow(ev, now.getTime()) && Math.random() < s.outageChancePerHour) {
+  // 2.7 : pas de panne au hasard pendant l'éruption solaire, elle suffit
+  if (!outageNow(ev, now.getTime()) && !eruptionActive(now.getTime()) && Math.random() < s.outageChancePerHour) {
     const candidates = REGIONS.filter((r) => !r.dlc && r.id !== "etranger");
     const region = candidates[Math.floor(Math.random() * candidates.length)];
     ev.outage = { region: region.id, until: new Date(now.getTime() + s.outageMinutes * 60_000).toISOString() };
@@ -344,7 +346,15 @@ type CompanyEnergy = {
   batteryKwh: number;
   batteryOffPeak: boolean;
   powerOfferPrice: number | null;
+  powerOfferPct?: number | null; // 2.7 : vendre à x % sous le prix du réseau, recalculé à chaque heure
 };
+
+/* 2.7 : le prix auquel une compagnie vend son surplus cette heure-ci. En
+   mode automatique, il suit le réseau : x % en dessous. */
+export function offerPriceAt(c: { powerOfferPrice: number | null; powerOfferPct?: number | null }, grid: number) {
+  if (c.powerOfferPct != null && c.powerOfferPct > 0) return Math.round(grid * (1 - c.powerOfferPct / 100) * 1000) / 1000;
+  return c.powerOfferPrice;
+}
 
 /* Calcul pur du règlement d'une heure, pour toutes les compagnies d'un coup :
    chaque compagnie couvre d'abord ses besoins, puis les déficits sont servis
@@ -385,8 +395,9 @@ export function computeSettlement(
 
   // les vendeurs : surplus disponible, au prix qu'ils ont fixé, s'il bat le réseau
   const sellers = companies
-    .filter((c) => c.powerOfferPrice !== null && c.powerOfferPrice < grid && (bills.get(c.id)?.surplus ?? 0) > 0)
-    .sort((a, b) => (a.powerOfferPrice ?? 0) - (b.powerOfferPrice ?? 0));
+    .map((c) => ({ id: c.id, price: offerPriceAt(c, grid) }))
+    .filter((c) => c.price !== null && c.price < grid && (bills.get(c.id)?.surplus ?? 0) > 0)
+    .sort((a, b) => (a.price ?? 0) - (b.price ?? 0));
 
   for (const c of companies) {
     const b = bills.get(c.id)!;
@@ -394,7 +405,7 @@ export function computeSettlement(
     for (const seller of sellers) {
       if (b.deficit <= 0) break;
       if (seller.id === c.id) continue;
-      const price = seller.powerOfferPrice ?? grid;
+      const price = seller.price ?? grid;
       if (price >= myPrice) continue;
       const sb = bills.get(seller.id)!;
       const qty = Math.min(b.deficit, sb.surplus);
@@ -475,7 +486,7 @@ export async function settleEnergy(weather: Map<string, StationWeather>, now = n
     if (ids.length === 0) continue;
     const companies = (await prisma.company.findMany({
       where: { id: { in: ids } },
-      select: { id: true, createdAt: true, balance: true, dieselLiters: true, dieselFixedPrice: true, dieselFixedUntil: true, powerFixedPrice: true, powerFixedUntil: true, batteryKwh: true, batteryOffPeak: true, powerOfferPrice: true },
+      select: { id: true, createdAt: true, balance: true, dieselLiters: true, dieselFixedPrice: true, dieselFixedUntil: true, powerFixedPrice: true, powerFixedUntil: true, batteryKwh: true, batteryOffPeak: true, powerOfferPrice: true, powerOfferPct: true },
     })) as CompanyEnergy[];
 
     // alerte tension : vague de froid et heure de pointe

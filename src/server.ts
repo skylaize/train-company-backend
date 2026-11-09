@@ -45,6 +45,7 @@ import { economyRouter } from "./routes/economy.routes"; // 2.4
 import { halloweenRouter } from "./routes/halloween.routes"; // 2.2
 import { v25Router } from "./routes/v25.routes"; // 2.5
 import { voteRouter } from "./routes/vote.routes"; // 2.6.1
+import { eruptionRouter } from "./routes/eruption.routes"; // 2.7
 import { startMentorJob } from "./services/mentor.service";
 import { adminRouter } from "./routes/admin.routes"; // 2.2
 import { warmBanList } from "./services/admin.service";
@@ -139,6 +140,7 @@ app.use("/api", economyRouter);
 app.use("/api", halloweenRouter);
 app.use("/api", v25Router);
 app.use("/api", voteRouter);
+app.use("/api", eruptionRouter);
 
 /* 2.1.2 : toute erreur de route finit ici, avec une vraie réponse 500 et
    une ligne lisible dans les journaux de Coolify. */

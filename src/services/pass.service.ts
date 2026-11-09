@@ -41,6 +41,10 @@ interface PassTheme {
   emblems: { id: string; name: string }[]; // deux emblèmes
   titles: string[]; // six titres
   final: { color: string; name: string; title: string };
+  // 2.7 : paliers du pass remplacés (habillages de rame, de gare…)
+  extra?: Record<number, PassReward>;
+  // 2.7 : ce que le parcours gratuit donne en plus des pièces, pour tout le monde
+  free?: Record<number, PassReward>;
 }
 
 export const PASS_THEMES: Record<string, PassTheme> = {
@@ -98,6 +102,34 @@ export const PASS_THEMES: Record<string, PassTheme> = {
     titles: ["Habitué du printemps", "Voyageur des prairies", "Chef de quai du printemps", "Gardien des vergers", "Maître des giboulées", "Seigneur des jardins"],
     final: { color: "#9b7fc0", name: "Lilas", title: "Légende du printemps" },
   },
+  // 2.7 : Retour au vieux matériel (saison à thème, avec l'éruption solaire)
+  vieux: {
+    liveries: [
+      { color: "#3b5e3f", name: "Vert wagon" },
+      { color: "#1d2f55", name: "Bleu nuit d'express" },
+      { color: "#a5342b", name: "Rouge autorail" },
+      { color: "#e3d6b4", name: "Crème" },
+      { color: "#7f8486", name: "Gris béton" },
+      { color: "#d9772b", name: "Orange Corail" },
+      { color: "#5a3a28", name: "Marron fourgon" },
+      { color: "#222428", name: "Noir charbon" },
+    ],
+    emblems: [
+      { id: "bielle", name: "Bielle motrice" },
+      { id: "manometre", name: "Manomètre de chaudière" },
+    ],
+    titles: ["Ancien du dépôt", "Graisseur de bielles", "Fidèle de la Micheline", "Chauffeur de 141R", "Habitué des voitures Corail", "Nostalgique des vieux express"],
+    final: { color: "#a3202a", name: "Rouge Capitole", title: "Légende du vieux matériel" },
+    // les habillages de Norcam prennent la place de deux livrées
+    extra: {
+      10: { type: "HABILLAGE", id: "intercites", label: "Habillage « Intercités » à vos couleurs (rame Standard)" },
+      17: { type: "GARE", id: "gare-epoque", label: "Habillage de gare « Gare d'époque »" },
+    },
+    free: {
+      15: { type: "TITRE", title: "Adepte du diesel", label: "Titre « Adepte du diesel »" },
+      20: { type: "HABILLAGE", id: "rer-c", label: "Habillage « RER C » (rame Standard)" },
+    },
+  },
   ete: {
     liveries: [
       { color: "#e8b33d", name: "Blé mûr" },
@@ -124,7 +156,9 @@ export type PassReward =
   | { type: "LIVREE"; color: string; label: string }
   | { type: "EMBLEME"; id: string; label: string }
   | { type: "TITRE"; title: string; label: string }
-  | { type: "PLAQUE"; id: string; label: string };
+  | { type: "PLAQUE"; id: string; label: string }
+  | { type: "HABILLAGE"; id: string; label: string } // 2.7 : habillage de rame
+  | { type: "GARE"; id: string; label: string }; // 2.7 : habillage de gare
 
 function themeKeyOf(season: { name: string }) {
   const t = themeOf(season);
@@ -160,7 +194,22 @@ export function passRewards(season: { name: string }): Record<number, PassReward
     28: { type: "LIVREE", color: th.final.color, label: `Livrée de légende « ${th.final.name} »` },
     29: { type: "PLAQUE", id: "legende", label: "Plaque de légende" },
     30: { type: "TITRE", title: th.final.title, label: `Titre « ${th.final.title} »` },
+    ...(th.extra ?? {}),
   };
+}
+
+/* 2.7 : ce que le parcours gratuit donne en plus des pièces. */
+export function freeRewards(season: { name: string }): Record<number, PassReward> {
+  return PASS_THEMES[themeKeyOf(season)].free ?? {};
+}
+
+function addReward(out: { liveries: string[]; emblems: string[]; titles: string[]; plates: string[]; cabSkins: string[]; stationSkins: string[] }, r: PassReward) {
+  if (r.type === "LIVREE") out.liveries.push(r.color);
+  if (r.type === "EMBLEME") out.emblems.push(r.id);
+  if (r.type === "TITRE") out.titles.push(r.title);
+  if (r.type === "PLAQUE") out.plates.push(r.id);
+  if (r.type === "HABILLAGE") out.cabSkins.push(r.id);
+  if (r.type === "GARE") out.stationSkins.push(r.id);
 }
 
 export const passItemId = (seasonNumber: number) => `pass-s${seasonNumber}`;
@@ -172,7 +221,19 @@ export const passSeasonNumber = (itemId: string) => {
 /* Tout ce que les pass achetés d'une compagnie lui ont fait gagner, toutes
    saisons confondues : lu par la boutique pour autoriser livrées et titres. */
 export async function passUnlocks(companyId: string) {
-  const out = { liveries: [] as string[], emblems: [] as string[], titles: [] as string[], plates: [] as string[] };
+  const out = { liveries: [] as string[], emblems: [] as string[], titles: [] as string[], plates: [] as string[], cabSkins: [] as string[], stationSkins: [] as string[] };
+  // 2.7 : le parcours gratuit des saisons qui en ont un, pour tout le monde
+  const freeThemes = Object.entries(PASS_THEMES).filter(([, t]) => t.free && Object.keys(t.free).length).map(([k]) => k);
+  if (freeThemes.length) {
+    const { SEASON_THEMES } = await import("./saison.service");
+    const names = freeThemes.map((k) => SEASON_THEMES[k]?.name).filter(Boolean) as string[];
+    const seasons = (await prisma.season.findMany({ where: { OR: names.map((n) => ({ name: { startsWith: n } })) }, select: { id: true, name: true } })) as { id: string; name: string }[];
+    for (const season of seasons) {
+      const entry = await prisma.seasonEntry.findUnique({ where: { seasonId_companyId: { seasonId: season.id, companyId } } });
+      const reached = tierOf(entry?.points ?? 0);
+      for (const [tier, r] of Object.entries(freeRewards(season))) if (Number(tier) <= reached) addReward(out, r);
+    }
+  }
   const bought = (await prisma.shopPurchase.findMany({ where: { companyId, itemId: { startsWith: "pass-s" } }, select: { itemId: true } })) as { itemId: string }[];
   for (const b of bought) {
     const n = passSeasonNumber(b.itemId);
@@ -183,10 +244,7 @@ export async function passUnlocks(companyId: string) {
     const reached = tierOf(entry?.points ?? 0);
     for (const [tier, r] of Object.entries(passRewards(season))) {
       if (Number(tier) > reached) continue;
-      if (r.type === "LIVREE") out.liveries.push(r.color);
-      if (r.type === "EMBLEME") out.emblems.push(r.id);
-      if (r.type === "TITRE") out.titles.push(r.title);
-      if (r.type === "PLAQUE") out.plates.push(r.id);
+      addReward(out, r);
     }
   }
   return out;
@@ -205,7 +263,13 @@ export async function passView(companyId: string) {
   const reached = tierOf(points);
   const claimed = new Set((claims as { tier: number }[]).map((c) => c.tier));
   const rewards = passRewards(season);
+  const freeExtra = freeRewards(season);
+  // 2.7 : la quête de fin de saison, pour les thèmes qui en ont une
+  const { questView } = await import("./quest.service");
+  const { themeKeyOf: seasonThemeKey } = await import("./saison.service");
+  const quest = await questView(season, seasonThemeKey(season), companyId, Boolean(owned)).catch(() => null);
   return {
+    quest,
     season: { id: season.id, number: season.number, name: season.name, endsAt: season.endsAt },
     itemId: passItemId(season.number),
     priceCents: PASS_PRICE_CENTS,
@@ -220,6 +284,8 @@ export async function passView(companyId: string) {
         need: tierThreshold(n),
         reached: n <= reached,
         free: FREE_COINS[n] ? { coins: FREE_COINS[n], claimed: claimed.has(n) } : null,
+        freeReward: freeExtra[n] ?? null, // 2.7 : objet gratuit, débloqué au palier
+
         pass: rewards[n] ?? null,
       };
     }),
@@ -255,8 +321,10 @@ export async function currentPassItem() {
   return {
     id: passItemId(season.number),
     kind: "PASS" as const,
-    name: `Pass ${season.name.toLowerCase().startsWith("saison") ? "de la " + season.name.toLowerCase() : season.name}`,
-    description: "Trente paliers franchis en jouant la saison : neuf livrées, deux emblèmes, sept titres, trois plaques, jusqu'à la livrée et le titre de légende. Tout est gardé pour toujours.",
+    name: season.name.toLowerCase().startsWith("saison") ? `Pass de la ${season.name.toLowerCase()}` : `Pass « ${season.name} »`,
+    description: PASS_THEMES[themeKeyOf(season)].extra
+      ? "Trente paliers franchis en jouant la saison : des habillages de rame et de gare dessinés par N0RCAM, des livrées, deux emblèmes, des titres et trois plaques, jusqu'à la livrée et le titre de légende. Tout est gardé pour toujours."
+      : "Trente paliers franchis en jouant la saison : neuf livrées, deux emblèmes, sept titres, trois plaques, jusqu'à la livrée et le titre de légende. Tout est gardé pour toujours.",
     priceCents: PASS_PRICE_CENTS,
   };
 }

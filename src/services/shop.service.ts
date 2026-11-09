@@ -2,6 +2,9 @@ import { RELEASE_171 } from "../release";
 import { boostUnlocksFor } from "./boost.service";
 import { halloweenUnlocks } from "./halloween.service";
 import { isVoteWinner, VOTE_EMBLEM } from "./vote.service";
+import { hasEruptionIcon, ERUPTION_EMBLEM } from "./eruption.service";
+import { questUnlocks } from "./quest.service";
+import { themeKeyOf } from "./saison.service";
 import { seasonUnlocks } from "./saison.service";
 import { isBuilder, BUILDER_EMBLEM } from "./world.service";
 
@@ -145,10 +148,11 @@ const ALL_ITEMS: ShopItem[] = [
   {
     id: "habillage-intercites",
     kind: "CABINE",
-    name: "Intercités",
-    description: "La motrice et ses voitures Intercités (2de, 1re et voiture-restaurant), aux couleurs de votre compagnie, en vue cabine. Dessinées par N0RCAM, joueur du réseau.",
+    name: "Intercités carmillon",
+    // 2.7 : la version à vos couleurs passe dans le pass de saison ; la boutique vend la livrée carmillon
+    description: "La motrice et ses voitures Intercités (2de, 1re et voiture-restaurant) en livrée carmillon, en vue cabine. Dessinées par N0RCAM, joueur du réseau.",
     priceCents: 299,
-    cabSkins: ["intercites"],
+    cabSkins: ["intercites-carmillon"],
     creator: { name: "N0RCAM", company: "Compagnie de Minuit", share: 0.3, note: "Le premier habillage dessiné par un joueur. Merci à lui !" },
     isNew: true,
   },
@@ -580,6 +584,22 @@ export async function hasAdFree(companyId: string) {
    leur donne le déballage et la vérification serveur des autres objets.
    ============================================================ */
 export const DISCORD_LIVERY = "#5865f2";
+/* 2.7 : les habillages de locomotive de fret, et le modèle qu'ils habillent.
+   Ils se choisissent à part (freightSkin), à côté de celui des voyageurs. */
+export const FREIGHT_SKINS: Record<string, string> = { bb69200: "FRET_RAPIDE" };
+
+let intercitesSwitch: number | null | undefined;
+async function boughtBeforeSwitch(companyId: string) {
+  if (intercitesSwitch === undefined) {
+    const row = await prisma.gameSetting.findUnique({ where: { key: "intercitesSwitch" } }).catch(() => null);
+    const t = row ? Date.parse(String(row.value)) : NaN;
+    intercitesSwitch = Number.isNaN(t) ? null : t;
+  }
+  if (intercitesSwitch === null) return true; // migration pas encore passée : tout achat est d'avant
+  const p = await prisma.shopPurchase.findUnique({ where: { companyId_itemId: { companyId, itemId: "habillage-intercites" } }, select: { purchasedAt: true } });
+  return Boolean(p && p.purchasedAt.getTime() < intercitesSwitch);
+}
+
 export const DISCORD_ITEMS: ShopItem[] = [
   {
     id: "discord-livree",
@@ -694,6 +714,12 @@ export async function unlockedFor(companyId: string) {
   if (await isBuilder(companyId)) emblems.add(BUILDER_EMBLEM);
   // podium des voteurs d'un mois
   if (await isVoteWinner(companyId).catch(() => false)) emblems.add(VOTE_EMBLEM);
+  // 2.7 : 10 % d'une sous-station réparée pendant l'éruption solaire
+  if (await hasEruptionIcon(companyId).catch(() => false)) emblems.add(ERUPTION_EMBLEM);
+  /* 2.7 : la boutique vend maintenant l'Intercités carmillon. Ceux qui ont
+     acheté l'Intercités avant (la version à leurs couleurs) le gardent : la
+     date du changement est écrite par la migration de la 2.7. */
+  if (owned.has("habillage-intercites") && (await boughtBeforeSwitch(companyId))) cabSkins.add("intercites");
   // 2.0 : ce que les pass de saison ont fait gagner
   const pass = await passUnlocks(companyId).catch(() => null);
   if (pass) {
@@ -701,6 +727,15 @@ export async function unlockedFor(companyId: string) {
     pass.emblems.forEach((e) => emblems.add(e));
     pass.titles.forEach((t) => titles.add(t));
     pass.plates.forEach((p) => plates.add(p));
+    pass.cabSkins.forEach((c) => cabSkins.add(c)); // 2.7
+    pass.stationSkins.forEach((c) => stationSkins.add(c));
+  }
+  // 2.7 : la quête de fin de saison
+  const quest = await questUnlocks(companyId, themeKeyOf).catch(() => null);
+  if (quest) {
+    quest.cabSkins.forEach((c) => cabSkins.add(c));
+    quest.titles.forEach((t) => titles.add(t));
+    quest.stationSkins.forEach((c) => stationSkins.add(c));
   }
   // 2.2 : ce que les âmes d'Halloween ont fait gagner
   const ghosts = await halloweenUnlocks(companyId).catch(() => null);

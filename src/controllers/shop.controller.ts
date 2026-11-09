@@ -23,7 +23,7 @@ const stripe = secretKey ? new Stripe(secretKey) : null;
 async function companyOf(req: AuthRequest) {
   return prisma.company.findUnique({
     where: { ownerId: req.userId as string },
-    select: { id: true, name: true, emblem: true, title: true, theme: true, liveryColor: true, cabSkin: true, plate: true, soundPack: true, stationSkin: true, uniform: true },
+    select: { id: true, name: true, emblem: true, title: true, theme: true, liveryColor: true, cabSkin: true, freightSkin: true, plate: true, soundPack: true, stationSkin: true, uniform: true },
   });
 }
 
@@ -66,6 +66,7 @@ export async function getShop(req: AuthRequest, res: Response) {
       theme: company.theme,
       livery: company.liveryColor,
       cabSkin: (company as { cabSkin?: string | null }).cabSkin ?? null,
+      freightSkin: (company as { freightSkin?: string | null }).freightSkin ?? null,
       plate: (company as { plate?: string | null }).plate ?? null,
       // 2.1
       soundPack: (company as { soundPack?: string | null }).soundPack ?? null,

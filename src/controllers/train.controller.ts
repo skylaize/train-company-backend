@@ -1,5 +1,5 @@
 import { consumePart, partScarcity } from "../services/parts-market.service";
-import { depotUse, heritageOf } from "../services/wreck.service";
+import { depotUse, heritageOf, abandonHeritage } from "../services/wreck.service";
 import { Prisma } from "@prisma/client";
 import { seasonEvent } from "../services/saison.service";
 import { Response } from "express";
@@ -477,7 +477,7 @@ export async function sellTrain(req: AuthRequest, res: Response) {
   const company = await getOwnedCompanyOrFail(req.userId as string);
   if (!company) return res.status(404).json({ error: "Créez d'abord votre compagnie" });
   const scrap = !company.isPremium;
-  const train = await prisma.train.findFirst({ where: { id: trainId, companyId: company.id } });
+  const train = await prisma.train.findFirst({ where: { id: trainId, companyId: company.id }, include: { line: { select: { departureStation: true, arrivalStation: true } } } });
   if (!train) return res.status(404).json({ error: "Train introuvable" });
   if (train.status === "EN_ROUTE" && !train.lineId) return res.status(409).json({ error: "Cette rame livre du fret : attendez son retour" });
   if (train.partsEta) return res.status(409).json({ error: "Une pièce est en commande pour cette rame" });
@@ -493,7 +493,9 @@ export async function sellTrain(req: AuthRequest, res: Response) {
     prisma.company.update({ where: { id: company.id }, data: { balance: { increment: value } } }),
     prisma.transaction.create({ data: { companyId: company.id, type: "VENTE_TRAIN", amount: value, description: scrap ? `Mise à la casse de ${train.name}` : `Revente de ${train.name}` } }),
   ]);
-  return res.json({ ok: true, value, scrap });
+  // 2.7 : une rame de collection repart en épave, dans la zone d'abandon
+  if (heritageOf(train)) await abandonHeritage(train, company.name).catch((e) => console.error("[abandon]", (e as Error).message));
+  return res.json({ ok: true, value, scrap, abandoned: Boolean(heritageOf(train)) });
 }
 
 /* 2.1.1 (Premium) : la cote de la rame, ses 14 derniers jours et le meilleur jour de la semaine pour la revendre */

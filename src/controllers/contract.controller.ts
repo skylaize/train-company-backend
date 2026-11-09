@@ -8,6 +8,7 @@ import { requiredCargoTypes } from "../services/mission.service";
 import { campaignFreightStations } from "../services/campaign.service";
 import { getCargoIndexMap, freightMultiplier } from "../services/market.service";
 import { distanceKm } from "../services/geography.service";
+import { brokenRegions, eruptionActive, eruptionConfig, ELECTRIC_CARGO, ERUPTION_REGIONS } from "../services/eruption.service";
 import { yardsOf, YARD_TIME } from "../services/infrastructure.service";
 import { loadCheck, loadFactorFor, tourMinutes, isFreightModel, isWagon, wagonFor } from "../services/freight.service";
 
@@ -111,6 +112,8 @@ const SEALED_EXPIRY_MINUTES = 10;
 const SEALED_RATE = 2.2; // le tarif à la minute d'un conteneur ordinaire, multiplié
 
 async function maybeOfferSealed() {
+  // 2.7 : pendant l'éruption solaire, le matériel électrique remplace le conteneur scellé
+  if (eruptionActive()) return;
   if (Math.random() >= SEALED_CHANCE) return;
   const already = await prisma.contract.count({ where: { sealed: true, status: "DISPONIBLE", companyId: null } });
   if (already > 0) return;
@@ -132,6 +135,48 @@ async function maybeOfferSealed() {
   });
 }
 
+/* ---------------- 2.7 : le matériel électrique ----------------
+
+   Pendant l'éruption solaire, des conteneurs de matériel électrique
+   attendent sur le marché, livrés dans une région en panne. Payés comme des
+   conteneurs, ils donnent en plus un point de réparation des sous-stations.
+   Quelques-uns à la fois pour tout le réseau, réassortis au fil des tours. */
+const ELECTRIC_EXPIRY_MINUTES = 10;
+const FRANCE_STATIONS = ERUPTION_REGIONS.flatMap((r) => r.stations);
+
+async function maybeOfferElectric() {
+  const cfg = eruptionConfig();
+  if (!cfg || !eruptionActive()) return;
+  const targets = brokenRegions();
+  if (!targets.length || Math.random() >= cfg.containerChance) return;
+  const open = await prisma.contract.count({ where: { electric: true, status: "DISPONIBLE", companyId: null } });
+  if (open >= cfg.containersOpen) return;
+  const region = ERUPTION_REGIONS.find((r) => r.id === targets[Math.floor(Math.random() * targets.length)])!;
+  const to = region.stations[Math.floor(Math.random() * region.stations.length)];
+  // un départ à distance raisonnable, hors de la région
+  const froms = FRANCE_STATIONS.filter((st) => !region.stations.includes(st)).filter((st) => {
+    const km = distanceKm(st, to);
+    return km !== null && km >= 80 && km <= 420;
+  });
+  const from = froms[Math.floor(Math.random() * froms.length)];
+  if (!from) return;
+  const km = distanceKm(from, to) ?? 150;
+  const durationMinutes = Math.max(4, Math.min(14, Math.round(km / 30)));
+  const base = BASE_TEMPLATES.find((t) => t.cargoType === "Conteneurs")!;
+  await prisma.contract.create({
+    data: {
+      cargoType: ELECTRIC_CARGO,
+      originStation: from,
+      destinationStation: to,
+      durationMinutes,
+      reward: Math.round(((base.reward / base.durationMinutes) * durationMinutes) / 5) * 5,
+      risky: false,
+      electric: true,
+      expiresAt: new Date(Date.now() + ELECTRIC_EXPIRY_MINUTES * 60_000),
+    },
+  });
+}
+
 export async function removeExpiredContracts() {
   await prisma.contract.deleteMany({
     // 2.4 : même grâce de 30 s qu'à l'acceptation, sinon l'offre disparaîtrait pendant le clic
@@ -144,7 +189,7 @@ async function ensureCampaignFreight() {
   const regions = await campaignFreightStations();
   if (!regions.size) return;
   const open = (await prisma.contract.findMany({
-    where: { status: "DISPONIBLE", companyId: null, sealed: false, reservedFor: null },
+    where: { status: "DISPONIBLE", companyId: null, sealed: false, electric: false, reservedFor: null },
     select: { originStation: true, destinationStation: true },
   })) as { originStation: string; destinationStation: string }[];
   for (const stations of regions.values()) {
@@ -160,9 +205,10 @@ async function ensureCampaignFreight() {
 
 export async function ensureMarketStocked() {
   await maybeOfferSealed().catch((err) => console.error("[fret] conteneur scellé :", (err as Error).message));
+  await maybeOfferElectric().catch((err) => console.error("[fret] matériel électrique :", (err as Error).message));
   await ensureCampaignFreight().catch((err) => console.error("[fret] campagnes :", (err as Error).message));
   const availableContracts = await prisma.contract.findMany({
-    where: { status: "DISPONIBLE", companyId: null, sealed: false, reservedFor: null },
+    where: { status: "DISPONIBLE", companyId: null, sealed: false, electric: false, reservedFor: null },
     select: { cargoType: true },
   });
   const presentTypes = new Set(availableContracts.map((c) => c.cargoType));
@@ -282,8 +328,10 @@ export async function listMarket(req: AuthRequest, res: Response) {
     ...(company ? await prisma.contract.findMany({ where: { status: "DISPONIBLE", companyId: null, reservedFor: company.id } }) : []),
     // 2.3 : le conteneur scellé passe devant, pour tout le monde
     ...(await prisma.contract.findMany({ where: { status: "DISPONIBLE", companyId: null, sealed: true, reservedFor: null } })),
+    // 2.7 : le matériel électrique aussi, pour tout le monde
+    ...(await prisma.contract.findMany({ where: { status: "DISPONIBLE", companyId: null, electric: true }, orderBy: { createdAt: "asc" } })),
     ...(await prisma.contract.findMany({
-      where: { status: "DISPONIBLE", companyId: null, sealed: false, reservedFor: null },
+      where: { status: "DISPONIBLE", companyId: null, sealed: false, electric: false, reservedFor: null },
       orderBy: { createdAt: "asc" },
       take: company?.isPremium ? PREMIUM_MARKET_SIZE : MIN_MARKET_SIZE,
     })),
@@ -295,7 +343,7 @@ export async function listMarket(req: AuthRequest, res: Response) {
     const touches = (c: { originStation: string; destinationStation: string }) => mine.includes(c.originStation) || mine.includes(c.destinationStation);
     if (mine.length && !(contracts as { originStation: string; destinationStation: string }[]).some(touches)) {
       const extra = await prisma.contract.findFirst({
-        where: { status: "DISPONIBLE", companyId: null, sealed: false, reservedFor: null, OR: [{ originStation: { in: mine } }, { destinationStation: { in: mine } }] },
+        where: { status: "DISPONIBLE", companyId: null, sealed: false, electric: false, reservedFor: null, OR: [{ originStation: { in: mine } }, { destinationStation: { in: mine } }] },
         orderBy: { createdAt: "asc" },
       });
       if (extra) contracts.push(extra);

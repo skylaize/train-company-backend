@@ -4,7 +4,7 @@ import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
 import { economy, inTrial } from "../services/settings.service";
 import {
-  PLANT_KINDS, PLANT_LABELS, PlantKind, storageCapacity, plantSiteOk, plantSites, plantOutput, dieselPrice, powerPrice, powerProfile,
+  PLANT_KINDS, PLANT_LABELS, PlantKind, storageCapacity, plantSiteOk, plantSites, plantOutput, dieselPrice, powerPrice, powerProfile, offerPriceAt,
   loadIndices, energyEvents, outageNow, companyDieselPrice, companyPowerPrice, hourStart,
 } from "../services/energy.service";
 import { carbonBracket, carbonRate, carbonTax } from "../services/carbon.service";
@@ -120,6 +120,8 @@ export async function energyOverview(req: AuthRequest, res: Response) {
     tank: { tanks: company.dieselTanks, liters: Math.round(company.dieselLiters), capacity: company.dieselTanks * s.tankLiters, tankCost: s.tankCost, tankLiters: s.tankLiters, maxTanks: s.maxTanks },
     battery: { kwh: Math.round(company.batteryKwh), capacity: batteryCap, offPeak: company.batteryOffPeak },
     offerPrice: company.powerOfferPrice,
+    offerPct: (company as { powerOfferPct?: number | null }).powerOfferPct ?? null, // 2.7
+    offerNow: offerPriceAt(company as { powerOfferPrice: number | null; powerOfferPct?: number | null }, powerPrice(now)),
     fuelBlocked: company.fuelBlocked && !inTrial(now.getTime()),
     meters: meters.map((m) => ({ hour: m.hour, kwh: m.kwh, liters: m.liters, produced: m.produced, co2: m.co2, cost: m.cost, income: m.income, settled: m.settled, trial: m.trial })),
     plants: plants.map((p) => ({
@@ -254,6 +256,18 @@ export async function energySettings(req: AuthRequest, res: Response) {
       const n = Number(v);
       if (!Number.isFinite(n) || n <= 0 || n > 2) return err(res, 400, "Prix de vente invalide");
       data.powerOfferPrice = Math.round(n * 1000) / 1000;
+      (data as { powerOfferPct?: number | null }).powerOfferPct = null;
+    }
+  }
+  // 2.7 : prix automatique, x % sous le réseau (null pour l'arrêter)
+  if ("offerPct" in (req.body ?? {})) {
+    const v = req.body.offerPct;
+    if (v === null) (data as { powerOfferPct?: number | null }).powerOfferPct = null;
+    else {
+      const n = Math.round(Number(v));
+      if (!Number.isFinite(n) || n < 1 || n > 50) return err(res, 400, "Pourcentage invalide (de 1 à 50 %)");
+      (data as { powerOfferPct?: number | null }).powerOfferPct = n;
+      data.powerOfferPrice = null;
     }
   }
   await prisma.company.update({ where: { id: company.id }, data });

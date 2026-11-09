@@ -135,15 +135,65 @@ export function draftWreck(station: string, now = new Date(), random = Math.rand
   };
 }
 
-export function damageOf(w: { damage: unknown }) {
+/* ---------- 2.7 : la zone d'abandon ----------
+   Une rame de collection revendue ou mise à la casse ne disparaît plus : elle
+   retourne à l'état d'épave, garée près de sa dernière gare. Chaque jour
+   passé dehors l'abîme un peu plus (plus de pièces, plus d'atelier). Une
+   autre compagnie peut la racheter pendant une semaine ; ensuite, ferraille. */
+export const ABANDON_DAYS = 7;
+export const ABANDON_DECAY = 7; // points de dégâts par organe et par jour
+
+export function damageOf(w: { damage: unknown; abandonedAt?: Date | null; companyId?: string | null }, now = new Date()) {
   const d = (w.damage ?? {}) as Record<string, number>;
-  return Object.fromEntries(ORGANS.map((o) => [o, Math.max(0, Math.min(100, Number(d[o]) || 0))])) as Record<Organ, number>;
+  // tant qu'elle attend preneur, l'épave abandonnée se dégrade
+  const days = w.abandonedAt && !w.companyId ? Math.max(0, Math.floor((now.getTime() - w.abandonedAt.getTime()) / 86_400_000)) : 0;
+  return Object.fromEntries(ORGANS.map((o) => [o, Math.max(0, Math.min(100, (Number(d[o]) || 0) + days * ABANDON_DECAY))])) as Record<Organ, number>;
+}
+
+/* Appelé à la revente ou à la casse d'une rame de collection. */
+export async function abandonHeritage(
+  train: { id: string; wear: number; heritage?: unknown; line?: { departureStation: string; arrivalStation: string } | null; direction?: number },
+  companyName: string,
+  now = new Date(),
+  random = Math.random
+) {
+  const h = heritageOf(train);
+  if (!h) return;
+  const kind = WRECK_KINDS[h.kind];
+  if (!kind) return;
+  const old = h.wreckId ? await prisma.wreck.findUnique({ where: { id: h.wreckId } }) : null;
+  const station = train.line ? (train.direction ? train.line.departureStation : train.line.arrivalStation) : old?.station ?? pick(STATIONS, random);
+  // l'état de départ suit l'usure de la rame
+  const base = Math.min(80, 15 + Math.round(train.wear * 0.4));
+  const damage = Object.fromEntries(ORGANS.map((o) => [o, Math.min(100, base + Math.floor(random() * 16))]));
+  const year = now.getFullYear();
+  const data = {
+    companyId: null,
+    trainId: null,
+    claimedAt: null,
+    completedAt: null,
+    working: null,
+    workUntil: null,
+    restored: [] as string[],
+    spent: 0,
+    damage: damage as unknown as Prisma.InputJsonValue,
+    price: Math.max(50, Math.round(kind.price * 0.6)),
+    station,
+    discoveredAt: now,
+    expiresAt: new Date(now.getTime() + ABANDON_DAYS * 86_400_000),
+    abandonedAt: now,
+    abandonedBy: companyName,
+    history: `${h.history} Laissée à l'abandon près de ${station} en ${year}, par ${companyName}.`,
+  };
+  if (old) await prisma.wreck.update({ where: { id: old.id }, data });
+  else await prisma.wreck.create({ data: { ...data, kind: h.kind, rarity: h.rarity, serial: h.serial, year: h.year, retiredYear: Math.min(2015, h.year + 30) } });
 }
 
 /* l'état d'avancement, vu de l'extérieur */
 export function wreckView(w: {
   id: string; kind: string; rarity: string; station: string; serial: string; year: number; history: string; damage: unknown;
   restored: string[]; working: string | null; workUntil: Date | null; price: number; spent: number; expiresAt: Date; companyId: string | null; trainId: string | null;
+  abandonedAt?: Date | null; abandonedBy?: string | null;
 }, stock?: Record<string, number>) {
   const kind = WRECK_KINDS[w.kind];
   const dmg = damageOf(w);
@@ -186,6 +236,8 @@ export function wreckView(w: {
     ready: done === ORGANS.length,
     organs,
     commissioned: Boolean(w.trainId),
+    // 2.7 : la zone d'abandon
+    abandoned: w.abandonedAt && !w.companyId ? { by: w.abandonedBy ?? "Une compagnie", at: w.abandonedAt, decay: ABANDON_DECAY } : null,
   };
 }
 
@@ -220,7 +272,7 @@ export async function runWrecks(now = new Date(), random = Math.random) {
   await prisma.wreck.deleteMany({ where: { companyId: null, expiresAt: { lte: now } } });
 
   const [open, last, active] = await Promise.all([
-    prisma.wreck.findMany({ where: { companyId: null }, select: { station: true } }),
+    prisma.wreck.findMany({ where: { companyId: null, abandonedAt: null }, select: { station: true } }),
     prisma.wreck.findFirst({ orderBy: { discoveredAt: "desc" }, select: { discoveredAt: true } }),
     prisma.company.count({ where: { lastActiveAt: { gte: new Date(now.getTime() - 3 * 86_400_000) } } }).catch(() => 40),
   ]);
@@ -261,7 +313,11 @@ export async function buyWreck(companyId: string, wreckId: string, now = new Dat
   try {
     await prisma.$transaction(async (tx) => {
       // la première compagnie l'emporte : la ligne n'est prise que si elle est encore libre
-      const claimed = await tx.wreck.updateMany({ where: { id: w.id, companyId: null }, data: { companyId, claimedAt: now, spent: w.price } });
+      const claimed = await tx.wreck.updateMany({
+        where: { id: w.id, companyId: null },
+        // 2.7 : une épave abandonnée arrête de se dégrader une fois rachetée
+        data: { companyId, claimedAt: now, spent: w.price, ...(w.abandonedAt ? { damage: damageOf(w, now) as unknown as Prisma.InputJsonValue, abandonedAt: null } : {}) },
+      });
       if (!claimed.count) throw new Error("PRISE");
       const paid = await tx.company.updateMany({ where: { id: companyId, balance: { gte: w.price } }, data: { balance: { decrement: w.price } } });
       if (!paid.count) throw new Error("ARGENT");

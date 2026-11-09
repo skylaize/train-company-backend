@@ -88,12 +88,15 @@ model Company {
   referralRewardGranted Boolean @default(false) // évite de verser deux fois la récompense au parrain
   referralMilestone Int  @default(0) // plus haut palier de parrainage déjà accordé (3, 5, 10 filleuls)
   // 2.6.1 : vote Top-Serveurs — série de jours consécutifs, et dernier jour (heure de Paris) récompensé
+  // 2.7 : éruption solaire, points de réparation gagnés en livrant du matériel électrique (pas encore dépensés)
+  voltPoints   Int      @default(0)
   voteStreak   Int      @default(0)
   lastVoteDay  String?
   title        String?  // titre affiché au classement : gagné (palier 5) ou choisi parmi ceux de la boutique
   emblem       String?  // emblème porté devant le nom de la compagnie, choisi parmi ceux débloqués
   plate        String?  // 1.7.1 : plaque d'honneur portée au classement (laiton, email, or)
   division     Int      @default(0) // 2.0 : division de saison (0 Bronze, 1 Argent, 2 Or, 3 Platine)
+  freightSkin  String?  // 2.7 : habillage des locomotives de fret en vue cabine (141R, BB 69200)
   cabSkin      String?  // matériel de collection affiché dans la vue cabine (1.4), choisi parmi ceux achetés
   intlLicenceAt DateTime? // licence internationale (1.6) : date d'achat, null tant qu'elle n'est pas achetée
   partsStock   Json     @default("{}") // 2.0 : pièces détachées en stock au magasin { FREINS: 2, … }
@@ -167,6 +170,7 @@ model Company {
   batteryKwh        Float     @default(0)  // courant stocké dans les batteries
   batteryOffPeak    Boolean   @default(true) // recharger les batteries aux heures creuses
   powerOfferPrice   Float?                 // prix auquel la compagnie vend son surplus aux autres joueurs
+  powerOfferPct     Int?                   // 2.7 : ou vend x % sous le prix du réseau, recalculé chaque heure
   co2Week           Float     @default(0)  // tonnes de CO₂ émises depuis lundi
   fuelBlocked       Boolean   @default(false) // facture d'énergie impayée : les rames thermiques attendent
   energyMeters      EnergyMeter[]
@@ -631,6 +635,8 @@ model Wreck {
   claimedAt    DateTime?
   trainId      String?
   completedAt  DateTime?
+  abandonedAt  DateTime? // 2.7 : laissée à l'abandon par une compagnie (revente, casse)
+  abandonedBy  String?
 
   @@index([companyId])
   @@index([expiresAt])
@@ -668,6 +674,8 @@ model Contract {
   sealed            Boolean        @default(false)
   sealedOutcome     String?
   // 2.6.1 : contrat de bienvenue, réservé 24 h à une nouvelle compagnie
+  // 2.7 : conteneur de matériel électrique (éruption solaire), 1 point de réparation à la livraison
+  electric          Boolean  @default(false)
   reservedFor       String?
 
   createdAt         DateTime       @default(now())
@@ -1466,4 +1474,37 @@ model VoteWinner {
 
   @@id([month, rank])
   @@index([companyId])
+}
+
+// 2.7 : éruption solaire. Une sous-station par région, réparée en commun avec
+// les points des conteneurs de matériel électrique. auto = réparée toute seule
+// par le filet de sécurité, faute de contributions.
+model SubStation {
+  region     String    @id
+  cost       Int
+  points     Int       @default(0)
+  repairedAt DateTime?
+  auto       Boolean   @default(false)
+}
+
+// Ce que chaque compagnie a mis dans une sous-station.
+model SubStationGift {
+  region    String
+  companyId String
+  points    Int
+  lastAt    DateTime @default(now())
+
+  @@id([region, companyId])
+  @@index([companyId])
+}
+
+// 2.7 : la quête de fin de saison, où en est chaque compagnie
+model SeasonQuest {
+  seasonId  String
+  companyId String
+  step      Int       @default(0)
+  progress  Int       @default(0)
+  doneAt    DateTime?
+
+  @@id([seasonId, companyId])
 }

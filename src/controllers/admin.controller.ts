@@ -6,8 +6,9 @@ import { prisma } from "../prisma";
 import { adminConfigured, logAdmin, markBanned } from "../services/admin.service";
 import { maintenance, maintenanceActive, setMaintenance } from "../services/maintenance.service";
 import { monthTop, parisMonth, previousMonth, VOTE_PRIZES, VOTE_WINNERS } from "../services/vote.service";
+import { eruptionSummary, launchEruption, loadEruption, stopEruption, updateEruption, ERUPTION_REGIONS } from "../services/eruption.service";
 import { buildLeaderRows } from "../services/leaderboard.service";
-import { currentSeason, DIVISIONS, invalidateSeason } from "../services/saison.service";
+import { currentSeason, DIVISIONS, invalidateSeason, SEASON_THEMES } from "../services/saison.service";
 import { allianceRanking, invalidateAlliances } from "../services/alliance.service";
 import { ensureProject, TUNNEL_ID } from "../services/world.service";
 import { findAnyItem, SHOP_ITEMS, DISCORD_ITEMS, AD_FREE_ITEM } from "../services/shop.service";
@@ -585,6 +586,57 @@ export async function payVoters(req: AuthRequest, res: Response) {
   res.json({ ok: true, podium });
 }
 
+/* ---------------- 2.7 : éruption solaire ---------------- */
+
+export async function eruptionAdmin(_req: AuthRequest, res: Response) {
+  const cfg = await loadEruption();
+  const season = await currentSeason().catch(() => null);
+  res.json({ config: cfg, summary: cfg ? await eruptionSummary(null) : null, nextSeasonAt: (season as { endsAt?: Date } | null)?.endsAt ?? null });
+}
+
+/* Lance l'éruption à une date (le début de la saison), ou tout de suite. */
+export async function launchEruptionAdmin(req: AuthRequest, res: Response) {
+  const raw = req.body?.startsAt ? Date.parse(String(req.body.startsAt)) : Date.now();
+  if (!Number.isFinite(raw)) return bad(res, 400, "Date de début invalide");
+  const c = await launchEruption(new Date(raw));
+  await logAdmin(actor(req), "ERUPTION", null, `éruption solaire lancée pour ${new Date(raw).toLocaleString("fr-FR", { timeZone: "Europe/Paris" })}`);
+  res.json({ ok: true, config: c });
+}
+
+/* Réglages en cours de route : rythme, filet de sécurité, conteneurs, prix des sous-stations. */
+export async function updateEruptionAdmin(req: AuthRequest, res: Response) {
+  const b = req.body ?? {};
+  const num = (v: unknown, min: number, max: number) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n >= min && n <= max ? n : undefined;
+  };
+  const patch = Object.fromEntries(
+    Object.entries({
+      stepMinutes: num(b.stepMinutes, 5, 24 * 60),
+      reducedMinutes: num(b.reducedMinutes, 0, 24 * 60),
+      autoRepairDays: num(b.autoRepairDays, 1, 60),
+      containersOpen: num(b.containersOpen, 0, 50),
+      containerChance: num(b.containerChance, 0, 1),
+    }).filter(([, v]) => v !== undefined)
+  );
+  const c = await updateEruption(patch);
+  if (!c) return bad(res, 404, "Pas d'éruption en cours");
+  const costs = (b.costs ?? {}) as Record<string, unknown>;
+  for (const [region, v] of Object.entries(costs)) {
+    const cost = num(v, 1, 100_000);
+    if (cost && ERUPTION_REGIONS.some((r) => r.id === region)) await prisma.subStation.updateMany({ where: { region, repairedAt: null }, data: { cost: Math.round(cost) } });
+  }
+  await loadEruption();
+  await logAdmin(actor(req), "ERUPTION", null, `réglages : ${JSON.stringify({ ...patch, ...(Object.keys(costs).length ? { costs } : {}) })}`);
+  res.json({ ok: true, config: c });
+}
+
+export async function stopEruptionAdmin(req: AuthRequest, res: Response) {
+  await stopEruption();
+  await logAdmin(actor(req), "ERUPTION", null, "éruption arrêtée, courant rétabli partout");
+  res.json({ ok: true });
+}
+
 /* ---------------- maintenance ---------------- */
 
 export async function maintenanceAdmin(_req: AuthRequest, res: Response) {
@@ -753,11 +805,25 @@ export async function seasons(_req: AuthRequest, res: Response) {
   const cNames = new Map(
     ((await prisma.company.findMany({ where: { id: { in: contributors.map((c) => c.companyId) } }, select: { id: true, name: true } })) as { id: string; name: string }[]).map((c) => [c.id, c.name])
   );
+  const forced = (await prisma.gameSetting.findUnique({ where: { key: "nextSeasonTheme" } }).catch(() => null))?.value as { key?: string } | null;
   res.json({
     current,
     history: list,
+    // 2.7 : le thème imposé à la prochaine saison, et ceux qu'on peut choisir
+    nextTheme: forced?.key ?? null,
+    themes: Object.entries(SEASON_THEMES).map(([key, t]) => ({ key, name: t.name })),
     world: world ? { ...world, contributors: contributors.map((c) => ({ name: cNames.get(c.companyId) ?? "—", amount: c.amount })) } : null,
   });
+}
+
+/* 2.7 : imposer un thème à la prochaine saison (null : le calendrier décide). */
+export async function setNextSeasonTheme(req: AuthRequest, res: Response) {
+  const key = req.body?.key ? String(req.body.key) : null;
+  if (key && !SEASON_THEMES[key]) return bad(res, 400, "Thème inconnu");
+  if (key) await prisma.gameSetting.upsert({ where: { key: "nextSeasonTheme" }, create: { key: "nextSeasonTheme", value: { key } }, update: { value: { key } } });
+  else await prisma.gameSetting.deleteMany({ where: { key: "nextSeasonTheme" } });
+  await logAdmin(actor(req), "SAISON", null, key ? `prochaine saison : ${SEASON_THEMES[key].name}` : "prochaine saison : selon le calendrier");
+  res.json({ ok: true });
 }
 
 export async function updateSeason(req: AuthRequest, res: Response) {
