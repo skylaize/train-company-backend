@@ -11,6 +11,7 @@ import {
   loanCapacity,
   computeReputation,
   weeklyReport,
+  elementReport,
   SHARES_PER_COMPANY,
   MAX_HOLD,
   MAX_FLOAT,
@@ -105,7 +106,10 @@ export async function getWeeklyReport(req: AuthRequest, res: Response) {
   const company = await companyOf(req);
   if (!company) return res.status(404).json({ error: "Créez d'abord votre compagnie" });
   const offset = Math.min(8, Math.max(0, Number(req.query.week) || 0));
-  return res.json(await weeklyReport(company.id, offset));
+  const report = await weeklyReport(company.id, offset);
+  // 2.7 (Premium) : chaque gare, commerce et voie, avec ce qu'elle a rapporté
+  const elements = (company as { isPremium?: boolean }).isPremium ? await elementReport(company.id, offset) : null;
+  return res.json({ ...report, elements, elementsLocked: !(company as { isPremium?: boolean }).isPremium });
 }
 
 /* ---------------- bourse ---------------- */

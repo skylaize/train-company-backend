@@ -15,6 +15,7 @@ import { activeStationEvents, competitionMap, routeDemand, routeHasBoost, maybeS
 import { routeOf, routeInDirection } from "../services/route.service";
 import { passengersPerDeparture, tripLoad, speedFactor } from "../services/ridership.service";
 import { runStationWatches, runDailyBalance } from "../services/watch.service";
+import { runAuctions } from "../services/auction.service";
 import { stationOwners, stationShops, stationEffects, accruePending, payStationIncome, workshopsByCompany, WORKSHOP_WEAR, ELECTRIC_SPEED, ELECTRIC_WEAR, DOUBLE_SPEED, DOUBLE_DELAY, cadenceBonus, yardsByCompany, YARD_PAY } from "../services/infrastructure.service";
 import { runLoanPayments, runSharePrices, runDividends, runWeeklyReports, runStockOrders, runPremiumAlerts } from "../services/finance.service";
 import { runAutoPricing } from "../services/pricing.service";
@@ -40,7 +41,8 @@ import { isNightService, NIGHT_MULTIPLIER, DAY_COUCHETTES_MULTIPLIER } from "../
 import { peakFactor, PEAK_HOURS } from "../services/peak.service";
 import { allianceMap, alliesOf, allyMultiplier } from "../services/alliance.service";
 import { contribute, flushWorld, TUNNEL_NAME, TUNNEL_STATIONS } from "../services/world.service";
-import { addSeasonPoints, seasonEvent, flushSeason, runSeasons, reconcileObjectives, notifySeasonEnd, POINTS } from "../services/saison.service";
+import { addSeasonPoints, seasonEvent, flushSeason, runSeasons, reconcileObjectives, notifySeasonEnd, POINTS, tripPoints } from "../services/saison.service";
+import { stationSize } from "../services/station.service";
 import { runDiscordFeed, announceSeasonEnd } from "../services/discord-feed.service";
 import { syncAllRoles } from "../services/discord-roles.service";
 import { runGiveaways } from "../services/giveaway.service";
@@ -284,6 +286,8 @@ async function runSimulationTick(timer: TickTimer) {
   }
   // 2.6 : gares surveillées (chaque tour, pour prévenir tout le monde au même moment) et solde du soir
   await T("gares surveillées", () => runStationWatches()).catch((err) => console.error("[surveillance] échec :", (err as Error).message));
+  // 2.7 : enchères de gares
+  await T("enchères de gares", () => runAuctions()).catch((err) => console.error("[enchères] échec :", (err as Error).message));
   await T("solde du soir", () => runDailyBalance()).catch((err) => console.error("[solde du soir] échec :", (err as Error).message));
   // 1.7 : revenus des gares (toutes les heures), échéances d'emprunt, cours de bourse, dividendes, rapport hebdo
   if (tickCount % 120 === 0) await T("revenus des gares", () => payStationIncome()).catch((err) => console.error("[gares] échec :", (err as Error).message));
@@ -867,7 +871,17 @@ export async function runLineTrains(weather: Map<string, StationWeather> = new M
       await prisma.$transaction(ops);
       /* 2.0 : points de saison et objectifs de la semaine (écrits en fin de tour) */
       const fullish = load.seats > 0 && load.passengers >= load.seats * 0.8;
-      addSeasonPoints(train.companyId, POINTS.TRIP + (fullish ? POINTS.TRIP_FULL : 0));
+      // 2.7 : points pondérés par la durée, le remplissage, les grandes villes et les arrêts
+      addSeasonPoints(
+        train.companyId,
+        tripPoints({
+          minutes: train.line.durationMinutes,
+          passengers: load.passengers,
+          seats: load.seats,
+          bigEnds: stationSize(train.line.departureStation) >= 4 && stationSize(train.line.arrivalStation) >= 4,
+          stops: (train.line.stops ?? []).length,
+        })
+      );
       seasonEvent(train.companyId, "TRIPS");
       contribute(train.companyId); // 2.0 : le Grand Chantier avance d'un trajet
       collectSouls(train.companyId, route); // 2.2 : Halloween, le trajet passe-t-il par la gare hantée ?

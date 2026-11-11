@@ -146,10 +146,14 @@ export interface Contender {
   multiplier: number;
 }
 
+/* 2.7 : le TGV compte comme une rame rapide (il n'était compté ni dans
+   l'attrait ni dans la colonne « Express » du tableau des concurrents) */
+const FAST: Record<string, number> = { EXPRESS: 1.3, TGV: 1.45 };
+
 function attractiveness(reputation: number, trains: { model: string; wear: number }[]) {
   const n = trains.length;
   if (n === 0) return 0;
-  const speed = trains.reduce((s, t) => s + (t.model === "EXPRESS" ? 1.3 : 1), 0) / n;
+  const speed = trains.reduce((s, t) => s + (FAST[t.model] ?? 1), 0) / n;
   const comfort = 1 - trains.reduce((s, t) => s + t.wear, 0) / n / 200;
   const rep = 0.4 + 0.6 * (reputation / 100);
   return rep * Math.sqrt(n) * speed * comfort;
@@ -216,7 +220,7 @@ export async function competitionMap(): Promise<Map<string, Contender[]>> {
         trains: c.trains.length,
         attractiveness: n > 1 ? attractiveness(rep, c.trains) : 1,
         reputation: rep,
-        express: c.trains.filter((t) => t.model === "EXPRESS").length / c.trains.length,
+        express: c.trains.filter((t) => FAST[t.model]).length / c.trains.length,
         comfort: 1 - c.trains.reduce((s, t) => s + t.wear, 0) / c.trains.length / 200,
         share: 1,
         multiplier: 1,

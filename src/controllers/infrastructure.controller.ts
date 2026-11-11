@@ -1,4 +1,5 @@
 import { Response } from "express";
+import { auctionFor, openAuctions, nextMinBid, placeBid } from "../services/auction.service";
 import { prisma } from "../prisma";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { isKnownStation } from "../services/geography.service";
@@ -154,6 +155,8 @@ export async function getInfrastructure(req: AuthRequest, res: Response) {
   const myShops = shopRows.filter((r) => r.companyId === company.id);
   const myShopAt = new Set(myShops.map((r) => r.station));
   const watches = (await prisma.stationWatch.findMany({ where: { companyId: company.id }, select: { station: true } })) as { station: string }[];
+  // 2.7 : les enchères en cours
+  const auctions = new Map((await openAuctions()).map((a) => [a.station, a]));
   const shopInfo = (st: string) => ({ slots: shopSlots(st), taken: takenAt.get(st) ?? 0, price: shopPrice(st), mine: myShopAt.has(st) });
 
   const cap = await stationCap(company.id);
@@ -237,7 +240,7 @@ export async function getInfrastructure(req: AuthRequest, res: Response) {
     })),
     watches: watches.map((w) => w.station),
     // le marché : gares de mon réseau et gares les plus fréquentées, avec leur propriétaire éventuel
-    market: [...new Set([...myStations, ...[...traffic.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([s]) => s)])]
+    market: [...new Set([...myStations, ...[...traffic.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([s]) => s), ...watches.map((w) => w.station), ...auctions.keys()])]
       .filter((s) => isKnownStation(s))
       .map((s) => {
         const o = allOwners.find((x) => x.station === s);
@@ -254,6 +257,12 @@ export async function getInfrastructure(req: AuthRequest, res: Response) {
           protectedUntil: o && !mine && new Date(o.protectedUntil).getTime() > now ? o.protectedUntil : null,
           shops: shopInfo(s),
           watched: watches.some((w) => w.station === s),
+          // 2.7 : enchères en cours
+          auction: (() => {
+            const a = auctions.get(s);
+            if (!a || a.ownerId === company.id) return null;
+            return { endsAt: a.endsAt, minPrice: a.minPrice, bestBid: a.bestBid, mine: a.bestId === company.id, nextMin: nextMinBid(a) };
+          })(),
         };
       })
       .filter((m) => !m.mine)
@@ -444,6 +453,9 @@ export async function buyStation(req: AuthRequest, res: Response) {
   }
 
   if (current.companyId === company.id) return res.status(409).json({ error: "Cette gare est déjà à vous" });
+  // 2.7 : à la fin de la protection, la gare part d'abord aux enchères
+  const auction = await auctionFor(station);
+  if (auction) return res.status(409).json({ error: "Cette gare est aux enchères : faites une offre" });
   if (new Date(current.protectedUntil).getTime() > Date.now()) {
     return res.status(409).json({ error: `Rachat possible ${inHowLong(new Date(current.protectedUntil))}` });
   }
@@ -475,6 +487,20 @@ export async function buyStation(req: AuthRequest, res: Response) {
     tag: "gares",
   }).catch(() => {});
   return res.json({ ok: true, price });
+}
+
+/* 2.7 : une enchère sur une gare dont la protection vient de tomber */
+export async function bidStation(req: AuthRequest, res: Response) {
+  const company = await companyOf(req);
+  if (!company) return res.status(404).json({ error: "Créez d'abord votre compagnie" });
+  const station = String(req.body?.station ?? "");
+  if (!isKnownStation(station)) return res.status(400).json({ error: "Gare inconnue du réseau" });
+  const count = await prisma.stationOwnership.count({ where: { companyId: company.id } });
+  const cap = await stationCap(company.id);
+  if (count >= cap.max) return res.status(409).json({ error: `${cap.max} gares au plus pour l'instant` });
+  const r = await placeBid(company, station, Math.round(Number(req.body?.amount)));
+  if (!r.ok) return res.status(r.status).json({ error: r.error });
+  return res.json(r);
 }
 
 export async function upgradeStation(req: AuthRequest, res: Response) {

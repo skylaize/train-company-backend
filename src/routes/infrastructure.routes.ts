@@ -1,12 +1,13 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth.middleware";
-import { getInfrastructure, electrifyLine, buyStation, upgradeStation, sellStation, openWorkshop, closeWorkshop, doubleLine, openYard, closeYard, buildHighSpeed, buyShop, sellShop, toggleWatch, shopAdvisor } from "../controllers/infrastructure.controller";
+import { getInfrastructure, electrifyLine, buyStation, bidStation, upgradeStation, sellStation, openWorkshop, closeWorkshop, doubleLine, openYard, closeYard, buildHighSpeed, buyShop, sellShop, toggleWatch, shopAdvisor } from "../controllers/infrastructure.controller";
 
 export const infrastructureRouter = Router();
 
 infrastructureRouter.get("/infrastructure", requireAuth, getInfrastructure);
 infrastructureRouter.post("/infrastructure/electrify", requireAuth, electrifyLine);
 infrastructureRouter.post("/infrastructure/stations/buy", requireAuth, buyStation);
+infrastructureRouter.post("/infrastructure/stations/bid", requireAuth, bidStation); // 2.7 : enchères
 infrastructureRouter.post("/infrastructure/stations/upgrade", requireAuth, upgradeStation);
 infrastructureRouter.post("/infrastructure/stations/sell", requireAuth, sellStation);
 infrastructureRouter.post("/infrastructure/workshops", requireAuth, openWorkshop);

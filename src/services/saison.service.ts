@@ -25,17 +25,40 @@ import { flushQuest, questEvent, QuestKind } from "./quest.service";
 export const DIVISIONS = ["Bronze", "Argent", "Or", "Platine"];
 export const GROUP_SIZE = 12;
 export const MOVERS = 3; // montent et descendent, dans un groupe d'au moins six
+/* 2.7 : un petit groupe (2 à 5 compagnies, souvent en haut de l'échelle) fait
+   quand même monter son premier : avant, trois compagnies seules en Or ne
+   pouvaient jamais passer Platine. Personne ne descend d'un petit groupe. */
+export const upMovers = (size: number) => (size >= 6 ? MOVERS : size >= 2 ? 1 : 0);
+export const downMovers = (size: number) => (size >= 6 ? MOVERS : 0);
 export const SEASON_DAYS = 28;
 
 export const POINTS = {
-  TRIP: 1, // trajet voyageurs arrivé
-  TRIP_FULL: 2, // en plus, s'il était rempli à 80 % ou plus
+  TRIP: 1, // (avant la 2.7) trajet voyageurs arrivé
+  TRIP_FULL: 2, // (avant la 2.7) en plus, s'il était rempli à 80 % ou plus
   FREIGHT: 5, // contrat de fret livré
 };
 
+/* 2.7 : les points d'un trajet voyageurs sont pondérés (suggestion d'UP HDF).
+   Avant, un aller-retour de 4 minutes valait autant qu'une grande ligne : on
+   gagnait plus à multiplier les petites navettes qu'à bâtir un réseau.
+   Maintenant :
+   - la durée compte, un peu plus que proportionnellement (×(durée/10)^1,25) :
+     une ligne de 30 min rapporte plus que trois navettes de 10 ;
+   - le remplissage : ×0,5 à vide, ×1,5 plein ;
+   - entre deux grandes villes (métropoles et capitales) : ×1,25 ;
+   - chaque arrêt desservi : +5 % (jusqu'à +25 %). */
+export function tripPoints(t: { minutes: number; passengers: number; seats: number; bigEnds: boolean; stops: number }) {
+  const duration = Math.min(8, Math.max(0.5, Math.pow(Math.max(1, t.minutes) / 10, 1.25)));
+  const fill = 0.5 + Math.min(1, t.seats > 0 ? t.passengers / t.seats : 0);
+  const cities = t.bigEnds ? 1.25 : 1;
+  const stops = 1 + Math.min(0.25, 0.05 * Math.max(0, t.stops));
+  return Math.max(1, Math.round(1.5 * duration * fill * cities * stops));
+}
+
 export const SCORING = [
-  { label: "Trajet voyageurs arrivé", points: "+1" },
-  { label: "Trajet rempli à plus de 80 %", points: "+2" },
+  { label: "Trajet voyageurs (selon sa durée et son remplissage)", points: "+1 à +30" },
+  { label: "Entre deux grandes villes", points: "×1,25" },
+  { label: "Chaque arrêt desservi", points: "+5 %" },
   { label: "Contrat de fret livré", points: "+5" },
   { label: "Objectif de la semaine", points: "+60 à +120" },
 ];
@@ -312,10 +335,10 @@ export async function finalizeSeason(season: SeasonRow) {
       const rank = i + 1;
       let outcome = "MAINTIEN";
       let division = e.division;
-      if (size >= 6 && rank <= MOVERS && e.division < DIVISIONS.length - 1 && e.points > 0) {
+      if (rank <= upMovers(size) && e.division < DIVISIONS.length - 1 && e.points > 0) {
         outcome = "MONTEE";
         division++;
-      } else if (size >= 6 && rank > size - MOVERS && e.division > 0) {
+      } else if (rank > size - downMovers(size) && e.division > 0) {
         outcome = "DESCENTE";
         division--;
       }
@@ -492,7 +515,8 @@ export async function seasonView(companyId: string, now = new Date()) {
     },
     me: { division: me.division, divisionName: DIVISIONS[me.division], groupNo: me.groupNo, points: me.points, rank: myRank, groupSize: group.length },
     group,
-    movers: group.length >= 6 ? MOVERS : 0,
+    movers: upMovers(group.length),
+    down: downMovers(group.length), // 2.7
     divisions,
     objectives,
     reward: { title: theme.title, livery: theme.livery, liveryName: theme.liveryName, cut: Math.ceil(group.length / 2) },

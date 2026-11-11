@@ -15,6 +15,7 @@ import { parisDay } from "./report.service";
    ============================================================ */
 
 const SOON_MS = 10 * 60_000;
+const SOON_MS_PREMIUM = 30 * 60_000; // 2.7 : le Premium est prévenu 30 min avant (pas d'enchère plus forte, juste plus de temps)
 const STALE_MS = 3600_000; // une fin de protection de plus d'une heure n'est plus annoncée
 
 export async function runStationWatches(now = Date.now()) {
@@ -22,8 +23,11 @@ export async function runStationWatches(now = Date.now()) {
     companyId: string; station: string; soonFor: Date | null; freeFor: Date | null;
   }[];
   if (!watches.length) return;
+  const premium = new Set(
+    ((await prisma.company.findMany({ where: { id: { in: [...new Set(watches.map((w) => w.companyId))] }, isPremium: true }, select: { id: true } })) as { id: string }[]).map((c) => c.id)
+  );
   const owners = (await prisma.stationOwnership.findMany({
-    where: { station: { in: [...new Set(watches.map((w) => w.station))] }, protectedUntil: { gte: new Date(now - STALE_MS), lte: new Date(now + SOON_MS) } },
+    where: { station: { in: [...new Set(watches.map((w) => w.station))] }, protectedUntil: { gte: new Date(now - STALE_MS), lte: new Date(now + SOON_MS_PREMIUM) } },
     select: { station: true, companyId: true, protectedUntil: true, company: { select: { name: true } } },
   })) as { station: string; companyId: string; protectedUntil: Date; company: { name: string } }[];
   if (!owners.length) return;
@@ -34,6 +38,7 @@ export async function runStationWatches(now = Date.now()) {
     if (!o || o.companyId === w.companyId) continue;
     const end = new Date(o.protectedUntil);
     const free = end.getTime() <= now;
+    if (!free && end.getTime() - now > (premium.has(w.companyId) ? SOON_MS_PREMIUM : SOON_MS)) continue;
     const sent = free ? w.freeFor : w.soonFor;
     if (sent && new Date(sent).getTime() === end.getTime()) continue;
     // marqué d'abord : un envoi qui échoue n'est pas renvoyé à chaque tour
@@ -42,10 +47,10 @@ export async function runStationWatches(now = Date.now()) {
       data: free ? { freeFor: end, soonFor: end } : { soonFor: end },
     });
     void sendToCompany(w.companyId, {
-      title: free ? `Gare de ${w.station} : rachat possible` : `Gare de ${w.station} : rachat dans 10 min`,
+      title: free ? `Gare de ${w.station} : enchères ouvertes` : `Gare de ${w.station} : enchères dans ${Math.max(1, Math.round((end.getTime() - now) / 60_000))} min`,
       body: free
-        ? `La protection de ${o.company.name} est tombée. Tous ceux qui la surveillent sont prévenus en même temps.`
-        : `La protection de ${o.company.name} tombe dans ${Math.max(1, Math.round((end.getTime() - now) / 60_000))} min. Tous ceux qui la surveillent sont prévenus en même temps.`,
+        ? `La protection de ${o.company.name} est tombée : 10 minutes d'enchères, la meilleure offre l'emporte.`
+        : `La protection de ${o.company.name} tombe bientôt, puis 10 minutes d'enchères. La meilleure offre l'emporte.`,
       url: "/dashboard",
       tag: `gare-${w.station}`,
     }).catch(() => undefined);

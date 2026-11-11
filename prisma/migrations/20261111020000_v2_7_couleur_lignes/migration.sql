@@ -1,0 +1,1 @@
+ALTER TABLE "Line" ADD COLUMN "color" TEXT;

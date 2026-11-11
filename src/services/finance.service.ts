@@ -200,10 +200,19 @@ const INCOME_GROUPS: Record<string, string> = {
   FRET: "Fret",
   VENTE_FRET: "Fret",
   SUBVENTION: "Appels d'offres",
-  REDEVANCE_QUAI: "Gares",
-  COMMERCES: "Gares",
-  DIVIDENDE: "Bourse",
+  // 2.7 : une ligne par source (suggestion de DarkLegend) : avant, gares et commerces étaient mêlés et les péages tombaient dans « Divers »
+  REDEVANCE_QUAI: "Gares : redevances de quai",
+  COMMERCES: "Commerces",
+  PEAGE_VOIE: "Voies : péages encaissés",
+  ENERGIE_VENTE: "Électricité vendue",
+  DIVIDENDE: "Dividendes",
   BOURSE: "Bourse",
+  FRET_FRAGILE: "Fret",
+  VENTE_TRAIN: "Ventes de matériel",
+  REVENTE: "Ventes de matériel",
+  CAMPAGNE: "Missions",
+  VOTE: "Bonus",
+  COMPAGNONNAGE: "Bonus",
   MISSION: "Missions",
   DEFI_QUOTIDIEN: "Bonus",
   PARRAINAGE: "Bonus",
@@ -217,7 +226,15 @@ const EXPENSE_GROUPS: Record<string, string> = {
   PERSONNEL: "Personnel",
   REPARATION: "Réparations",
   PEAGE: "Péages et redevances",
+  PEAGE_VOIE: "Péages et redevances",
   REDEVANCE_QUAI: "Péages et redevances",
+  ENERGIE: "Énergie",
+  CARBONE: "Taxe carbone",
+  CENTRALE: "Investissements",
+  LGV: "Investissements",
+  USINE: "Investissements",
+  CONCESSION: "Investissements",
+  NOUVELLE_LIGNE: "Investissements",
   ACHAT_TRAIN: "Investissements",
   COMPOSITION: "Investissements",
   EXPANSION_FLOTTE: "Investissements",
@@ -240,6 +257,39 @@ export function weekBounds(offset: number, now = new Date()) {
   const d = parisDate(new Date(start.getTime() + 12 * HOUR_MS));
   const end = parisMidnight(d.year, d.month, d.day + 7);
   return { start, end: offset === 0 ? now : end };
+}
+
+/* 2.7 (Premium) : ce que rapporte chaque gare, chaque commerce et chaque
+   voie possédée, sur la semaine. Lu dans le libellé des recettes, qui nomme
+   la gare ou la liaison. */
+const ELEMENT_TYPES = ["REDEVANCE_QUAI", "COMMERCES", "PEAGE_VOIE"];
+function elementOf(type: string, description: string) {
+  const gare = description.match(/gare de (.+)$/);
+  if (type === "REDEVANCE_QUAI" && gare) return { kind: "Gare", name: gare[1] };
+  if (type === "COMMERCES" && gare) return { kind: description.startsWith("Votre commerce") ? "Commerce" : "Loyers des commerces", name: gare[1] };
+  if (type === "COMMERCES") return { kind: "Commerce", name: "plusieurs gares" };
+  const voie = description.match(/liaison (.+)$/);
+  if (type === "PEAGE_VOIE" && voie) return { kind: "Voie", name: voie[1] };
+  return null;
+}
+
+export async function elementReport(companyId: string, offset = 0) {
+  const { start, end } = weekBounds(offset);
+  const rows = (await (prisma.transaction.groupBy as any)({
+    by: ["type", "description"],
+    where: { companyId, type: { in: ELEMENT_TYPES }, amount: { gt: 0 }, createdAt: { gte: start, lt: end } },
+    _sum: { amount: true },
+  })) as { type: string; description: string; _sum: { amount: number | null } }[];
+  const out = new Map<string, { kind: string; name: string; amount: number }>();
+  for (const r of rows) {
+    const e = elementOf(r.type, r.description);
+    if (!e) continue;
+    const k = `${e.kind}|${e.name}`;
+    const cur = out.get(k) ?? { ...e, amount: 0 };
+    cur.amount += r._sum.amount ?? 0;
+    out.set(k, cur);
+  }
+  return [...out.values()].sort((a, b) => b.amount - a.amount);
 }
 
 export async function weeklyReport(companyId: string, offset = 0) {

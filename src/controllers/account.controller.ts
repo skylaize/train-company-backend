@@ -3,6 +3,27 @@ import bcrypt from "bcrypt";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { prisma } from "../prisma";
 import { forgetDiscord } from "./discord.controller";
+import { heldByIssuer, marketPrice } from "../services/finance.service";
+import { sendToCompany } from "../services/push.service";
+
+async function buyBackShares(company: { id: string; name: string; sharePrice: number }) {
+  const holders = (await prisma.shareholding.findMany({ where: { issuerId: company.id, shares: { gt: 0 } } })) as { holderId: string; shares: number }[];
+  if (!holders.length) return;
+  const held = (await heldByIssuer()).get(company.id) ?? 0;
+  const price = marketPrice(Math.max(0, company.sharePrice ?? 0), held);
+  await prisma.$transaction(
+    holders.flatMap((h) => {
+      const amount = Math.floor(h.shares * price);
+      return [
+        prisma.company.update({ where: { id: h.holderId }, data: { balance: { increment: amount } } }),
+        prisma.transaction.create({ data: { companyId: h.holderId, type: "BOURSE", amount, description: `Rachat de ${h.shares} action${h.shares > 1 ? "s" : ""} ${company.name} : la compagnie a quitté le réseau` } }),
+      ];
+    })
+  );
+  for (const h of holders) {
+    void sendToCompany(h.holderId, { title: `${company.name} a quitté le réseau`, body: `Vos ${h.shares} action${h.shares > 1 ? "s" : ""} vous sont remboursées au cours du jour.`, url: "/dashboard", tag: "bourse" }).catch(() => {});
+  }
+}
 
 export async function changePassword(req: AuthRequest, res: Response) {
   const { currentPassword, newPassword } = req.body;
@@ -38,6 +59,9 @@ export async function deleteAccount(req: AuthRequest, res: Response) {
   const company = await prisma.company.findUnique({ where: { ownerId: userId } });
 
   if (company) {
+    /* 2.7 : les actionnaires de la compagnie supprimée sont remboursés au
+       cours du moment. Avant, leurs actions disparaissaient sans rien. */
+    await buyBackShares(company as { id: string; name: string; sharePrice: number }).catch((e) => console.error("[bourse] rachat à la suppression :", (e as Error).message));
     const trains = await prisma.train.findMany({ where: { companyId: company.id }, select: { id: true } });
     const trainIds = trains.map((t) => t.id);
 

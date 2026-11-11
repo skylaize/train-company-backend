@@ -26,7 +26,9 @@ export const UPKEEP_FREE_TRAINS = 2;
 
 /* Calibré pour que la flotte optimale tombe vers 15 places et que la marge de
    la rame suivante passe de +491 pi./h à 6 rames à +11 à 16, puis négative. */
-export const UPKEEP_K = 0.1;
+/* 2.7 : 0,1 → 0,055. Les joueurs plafonnaient vers 11-15 rames et
+   attendaient sans rien pouvoir faire : l'optimum passe vers 25-30 rames. */
+export const UPKEEP_K = 0.055;
 
 /* Coût d'entretien par tick pour une compagnie de n rames. */
 export function upkeepPerTick(trainCount: number) {
@@ -49,7 +51,15 @@ export const DEPOT_GROWTH = 1.7;
    Payer pour aller plus vite se défend, payer pour aller plus haut non. */
 export const PREMIUM_DEPOT_DISCOUNT = 0.2;
 
+/* 2.7 : après 8 places, chaque place ne coûte plus que 1,2 fois la
+   précédente (au lieu de 1,7) : la 11e place passe de ~24 000 à ~8 300 pi.,
+   la 15e de ~200 000 à ~17 000. */
+export const DEPOT_GROWTH_LATE = 1.2;
+export const DEPOT_LATE_FROM = 8;
+
 export function depotExpansionCost(currentSlots: number, isPremium = false) {
-  const base = DEPOT_BASE_COST * Math.pow(DEPOT_GROWTH, Math.max(0, currentSlots - 2));
+  const early = Math.max(0, Math.min(currentSlots, DEPOT_LATE_FROM) - 2);
+  const late = Math.max(0, currentSlots - DEPOT_LATE_FROM);
+  const base = DEPOT_BASE_COST * Math.pow(DEPOT_GROWTH, early) * Math.pow(DEPOT_GROWTH_LATE, late);
   return Math.round(base * (isPremium ? 1 - PREMIUM_DEPOT_DISCOUNT : 1));
 }

@@ -102,6 +102,15 @@ export async function updateLine(req: AuthRequest, res: Response) {
     return res.status(404).json({ error: "Ligne introuvable" });
   }
 
+  /* 2.7 — Premium : la couleur de la ligne sur la carte. Seul changement de la requête. */
+  if (req.body.color !== undefined && departureStation === undefined && arrivalStation === undefined && req.body.stops === undefined) {
+    if (!(company as { isPremium?: boolean }).isPremium) return res.status(403).json({ error: "La couleur des lignes est réservée aux abonnés Premium" });
+    const color = req.body.color === null ? null : String(req.body.color);
+    if (color !== null && !/^#[0-9a-fA-F]{6}$/.test(color)) return res.status(400).json({ error: "Couleur invalide" });
+    const updated = await prisma.line.update({ where: { id: lineId }, data: { color } });
+    return res.json(updated);
+  }
+
   /* 1.7 — Premium : prix automatique. Seul changement de la requête : on ne
      touche pas au reste de la ligne. */
   if (req.body.autoPrice !== undefined && departureStation === undefined && arrivalStation === undefined && req.body.stops === undefined) {

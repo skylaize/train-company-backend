@@ -544,6 +544,8 @@ model Line {
   rivals            Int      @default(0)
   leading           Boolean  @default(true)
 
+  color             String?  // 2.7 (Premium) : couleur de la ligne sur la carte
+
   // 2.4 : la simulation et les écrans filtrent par compagnie
   @@index([companyId])
 }
@@ -1416,6 +1418,20 @@ model StationShop {
 
 // 2.6 : une gare surveillée. Tous les surveillants sont prévenus au même
 // moment : 10 minutes avant la fin de la protection, puis à la fin.
+// 2.7 : enchères de 10 minutes à la fin de la protection d'une gare
+model StationAuction {
+  station   String    @id
+  ownerId   String
+  forUntil  DateTime  // la fin de protection qui l'a ouverte
+  minPrice  Int
+  bestBid   Int?
+  bestId    String?
+  endsAt    DateTime
+  closedAt  DateTime?
+
+  @@index([closedAt, endsAt])
+}
+
 model StationWatch {
   station   String
   createdAt DateTime  @default(now())
