@@ -714,6 +714,12 @@ export async function unlockedFor(companyId: string) {
   if (await isBuilder(companyId)) emblems.add(BUILDER_EMBLEM);
   // podium des voteurs d'un mois
   if (await isVoteWinner(companyId).catch(() => false)) emblems.add(VOTE_EMBLEM);
+  // 2.8 : premier du quiz du jour sur un mois
+  // (import différé : discord-quiz → gift → shop formerait une boucle d'imports)
+  {
+    const quiz = await import("./discord-quiz.service");
+    if (await quiz.isQuizChampion(companyId).catch(() => false)) emblems.add(quiz.QUIZ_EMBLEM);
+  }
   // 2.7 : 10 % d'une sous-station réparée pendant l'éruption solaire
   if (await hasEruptionIcon(companyId).catch(() => false)) emblems.add(ERUPTION_EMBLEM);
   /* 2.7 : la boutique vend maintenant l'Intercités carmillon. Ceux qui ont

@@ -1251,6 +1251,41 @@ model DiscordPost {
   createdAt DateTime @default(now())
 }
 
+// 2.8 : l'espace privé d'une alliance sur Discord (un rôle et un salon),
+// créé quand au moins deux de ses membres ont lié leur compte.
+model DiscordAllianceSpace {
+  allianceId       String   @id
+  roleId           String
+  channelId        String
+  name             String   // nom de l'alliance au moment de la dernière mise à jour
+  founderDiscordId String   @default("")
+  createdAt        DateTime @default(now())
+}
+
+// 2.8 : le quiz du jour. Une question par jour (heure de Paris), tirée de
+// la banque de questions ; la réponse est dévoilée le lendemain.
+model DiscordQuiz {
+  day         String    @id // AAAA-MM-JJ
+  questionIdx Int
+  channelId   String    @default("")
+  messageId   String    @default("")
+  closedAt    DateTime?
+  createdAt   DateTime  @default(now())
+}
+
+model DiscordQuizAnswer {
+  id        String   @id @default(uuid())
+  day       String
+  discordId String
+  choice    Int
+  correct   Boolean
+  createdAt DateTime @default(now())
+
+  @@unique([day, discordId])
+  @@index([discordId])
+  @@index([createdAt])
+}
+
 // 2.1 : giveaways du serveur Discord (commande /giveaway). Le lot est livré
 // dans le jeu au tirage : des pièces ou une exclusivité Discord.
 model Giveaway {

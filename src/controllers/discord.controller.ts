@@ -15,6 +15,9 @@ import { BOARDS, BoardId, buildLeaderRows, rankRows } from "../services/leaderbo
 import { allianceRanking, ALLIANCE_MAX } from "../services/alliance.service";
 import { currentSeason, DIVISIONS } from "../services/saison.service";
 import { chantierReply, comparerReply, gareReply, NEW_COMMANDS, notifsReply, saisonReply, stationChoices } from "./discord-commands";
+import { answerQuiz, quizReply } from "../services/discord-quiz.service";
+import { SUIVI_CHOICES, suiviCommand } from "../services/discord-suivi.service";
+import { CardData, fetchAvatar, profileCard } from "../services/discord-card.service";
 
 /* ============================================================
    Discord (2.1) : liaison du compte et commandes slash.
@@ -157,7 +160,7 @@ const BOARD_CHOICES = [
 export const COMMANDS = [
   {
     name: "profil",
-    description: "La compagnie d'un joueur : valeur, flotte, saison, alliance",
+    description: "La carte d'une compagnie : valeur, flotte, saison, alliance",
     options: [{ type: 6, name: "joueur", description: "Le joueur (vous par défaut)", required: false }],
   },
   {
@@ -173,6 +176,18 @@ export const COMMANDS = [
   { name: "lier", description: "Lier votre compte Réseau à Discord pour recevoir vos rôles" },
   // 2.5 : /gare, /chantier, /saison, /comparer, /notifs
   ...NEW_COMMANDS,
+  // 2.8 : quiz du jour, suivi des suggestions et des bugs
+  { name: "quiz", description: "Ton score au quiz du jour et le podium du mois" },
+  {
+    name: "suivi",
+    description: "Staff et graphiste : indiquer où en est une suggestion ou un bug (à taper dans le post)",
+    dm_permission: false,
+    options: [
+      { type: 3, name: "etat", description: "Où en est ce post", required: true, choices: SUIVI_CHOICES },
+      { type: 3, name: "version", description: "Version concernée, par exemple 2.9", required: false, max_length: 20 },
+      { type: 3, name: "note", description: "Un mot pour l'auteur du post", required: false, max_length: 300 },
+    ],
+  },
   // 2.1 : réservées au staff (Discord les masque aux autres ; vérifié aussi ici)
   {
     name: "donner",
@@ -272,10 +287,10 @@ type Interaction = {
     name: string;
     custom_id?: string;
     options?: (InteractionOption & { focused?: boolean })[];
-    resolved?: { users?: Record<string, { username: string; global_name?: string | null }> };
+    resolved?: { users?: Record<string, { username: string; global_name?: string | null; avatar?: string | null }> };
   };
-  member?: { user: { id: string }; permissions?: string };
-  user?: { id: string };
+  member?: { user: { id: string; username?: string; global_name?: string | null; avatar?: string | null }; permissions?: string };
+  user?: { id: string; username?: string; global_name?: string | null; avatar?: string | null };
 };
 
 /* Monté AVANT express.json() : la signature porte sur les octets bruts. */
@@ -293,6 +308,16 @@ export async function discordInteractions(req: Request, res: Response) {
   if (i.type === 3 && i.data?.custom_id?.startsWith("giveaway:")) {
     const content = await toggleEntry(i.data.custom_id.slice("giveaway:".length), callerId).catch((err) => {
       console.error("[giveaway] participation :", (err as Error).message);
+      return "Le réseau ne répond pas, réessaie dans un instant.";
+    });
+    return res.json({ type: 4, data: { flags: 64, content } });
+  }
+
+  // 2.8 : boutons A, B, C, D du quiz du jour
+  if (i.type === 3 && i.data?.custom_id?.startsWith("quiz:")) {
+    const [, day, choice] = i.data.custom_id.split(":");
+    const content = await answerQuiz(day, Number(choice), callerId).catch((err) => {
+      console.error("[quiz] réponse :", (err as Error).message);
       return "Le réseau ne répond pas, réessaie dans un instant.";
     });
     return res.json({ type: 4, data: { flags: 64, content } });
@@ -337,6 +362,17 @@ export async function discordInteractions(req: Request, res: Response) {
     return;
   }
 
+  // 2.8 : /suivi, dans un post de forum ; réponse visible par soi seul
+  if (i.data.name === "suivi") {
+    res.json({ type: 5, data: { flags: 64 } });
+    const content = await suiviCommand(i.channel_id ?? "", i.member?.permissions, opt("etat"), opt("version"), opt("note"), callerId).catch((err) => {
+      console.error("[discord] suivi :", (err as Error).message);
+      return `Échec : ${(err as Error).message.slice(0, 300)}`;
+    });
+    await rest("PATCH", `/webhooks/${APP_ID}/${i.token}/messages/@original`, { bot: false, body: { content, allowed_mentions: { parse: [] } } }).catch(() => undefined);
+    return;
+  }
+
   if (i.data.name === "lier") {
     return res.json({
       type: 4,
@@ -353,7 +389,21 @@ export async function discordInteractions(req: Request, res: Response) {
   res.json(i.data.name === "notifs" ? { type: 5, data: { flags: 64 } } : { type: 5 });
   try {
     let reply: { content?: string; embeds?: Embed[] };
-    if (i.data.name === "profil") reply = await profileReply(opt("joueur") ?? callerId, callerId);
+    if (i.data.name === "profil") {
+      // 2.8 : la carte en image ; à défaut, la réponse en texte comme avant
+      const target = opt("joueur") ?? callerId;
+      const who = target === callerId ? i.member?.user ?? i.user : i.data.resolved?.users?.[target];
+      const card = await profileCardReply(target, who).catch((err) => {
+        console.error("[discord] carte de profil :", (err as Error).message);
+        return null;
+      });
+      if (card) {
+        await editOriginalWithFile(i.token, card);
+        return;
+      }
+      reply = await profileReply(target, callerId);
+    }
+    else if (i.data.name === "quiz") reply = await quizReply(callerId);
     else if (i.data.name === "classement") reply = await boardReply(opt("tableau") ?? "valeur");
     else if (i.data.name === "alliance") reply = await allianceReply(opt("nom"), callerId);
     else if (i.data.name === "gare") reply = await gareReply(opt("nom"), callerId);
@@ -418,6 +468,65 @@ const colorOf = (hex: string | null | undefined) => {
   const n = parseInt(String(hex ?? "").replace("#", ""), 16);
   return Number.isFinite(n) ? n : BRAND_COLOR;
 };
+
+/* 2.8 : la carte de profil en image. null si le compte n'est pas lié ou si
+   le rendu n'est pas possible : /profil répond alors en texte. */
+async function profileCardReply(discordId: string, who: { username?: string; global_name?: string | null; avatar?: string | null } | undefined) {
+  const user = await prisma.user.findUnique({
+    where: { discordId },
+    select: { discordName: true, company: { select: { id: true, name: true, liveryColor: true, isPremium: true, title: true, createdAt: true, pioneerNumber: true } } },
+  });
+  const company = user?.company;
+  if (!company) return null;
+  const ranked = rankRows(await buildLeaderRows(), "valeur");
+  const row = ranked.find((r) => r.id === company.id);
+  const season = await currentSeason();
+  let seasonData: CardData["season"] = null;
+  if (season) {
+    const entry = await prisma.seasonEntry.findUnique({ where: { seasonId_companyId: { seasonId: season.id, companyId: company.id } } });
+    if (entry) {
+      const ahead = await prisma.seasonEntry.count({ where: { seasonId: season.id, division: entry.division, groupNo: entry.groupNo, points: { gt: entry.points } } });
+      seasonData = { name: season.name, division: DIVISIONS[entry.division], group: entry.groupNo, place: ahead + 1, points: entry.points };
+    }
+  }
+  const member = await prisma.allianceMember.findUnique({ where: { companyId: company.id } });
+  const alliance = member ? await prisma.alliance.findUnique({ where: { id: member.allianceId }, select: { name: true, founderId: true } }) : null;
+  const png = profileCard({
+    name: company.name,
+    title: company.title,
+    color: company.liveryColor,
+    grade: row?.grade ?? null,
+    value: row?.valeur ?? null,
+    rank: row?.rank ?? null,
+    total: ranked.length,
+    trains: row?.trains ?? null,
+    lines: row?.lines ?? null,
+    season: seasonData,
+    alliance: alliance ? { name: alliance.name, chief: alliance.founderId === company.id } : null,
+    premium: company.isPremium,
+    pioneer: company.pioneerNumber,
+    founded: company.createdAt,
+    discordName: who?.global_name || who?.username || user?.discordName || null,
+    avatar: await fetchAvatar(discordId, who?.avatar),
+  });
+  return png ? { png, name: company.name, color: colorOf(company.liveryColor) } : null;
+}
+
+/* Remplace la réponse « réfléchit… » par un message avec l'image jointe. */
+async function editOriginalWithFile(token: string, card: { png: Buffer; name: string; color: number }) {
+  const form = new FormData();
+  form.append(
+    "payload_json",
+    JSON.stringify({
+      embeds: [{ color: card.color, image: { url: "attachment://profil.png" }, footer: SITE_URL ? { text: SITE_URL.replace(/^https?:\/\//, "") } : undefined }],
+      attachments: [{ id: 0, filename: "profil.png", description: `Carte de la compagnie ${card.name}` }],
+      allowed_mentions: { parse: [] },
+    })
+  );
+  form.append("files[0]", new Blob([card.png], { type: "image/png" }), "profil.png");
+  const r = await fetch(`https://discord.com/api/v10/webhooks/${APP_ID}/${token}/messages/@original`, { method: "PATCH", body: form });
+  if (!r.ok) throw new Error(`carte de profil → ${r.status} ${(await r.text()).slice(0, 200)}`);
+}
 
 async function profileReply(discordId: string, callerId: string) {
   const company = await companyOfDiscord(discordId);

@@ -4,6 +4,9 @@ import { prisma } from "../prisma";
 import { BOT_TOKEN, botEnabled, BRAND_COLOR, channelId, CHANNELS, esc, GUILD_ID, managedRoleIds, NOTIFY_ROLES, ROLES } from "./discord.service";
 import { syncUser } from "./discord-roles.service";
 import { recordBoost } from "./boost.service";
+import { attachAntiSpam } from "./discord-antispam.service";
+import { provisionDiscord } from "./discord-provision.service";
+import { onForumPost } from "./discord-suivi.service";
 
 /* ============================================================
    Connexion permanente au Gateway de Discord (2.1).
@@ -178,6 +181,8 @@ export function startDiscordGateway(level = 0) {
     if (set.missing) console.warn(`[discord] ⚠️  à activer dans le portail développeur → Bot → Privileged Gateway Intents : ${set.missing}`);
     await setPresence();
     setInterval(() => void setPresence(), 10 * 60_000).unref();
+    // 2.8 : rôles de division, salon du quiz, forum du graphiste, étiquettes — créés s'ils manquent
+    await provisionDiscord().catch(() => undefined);
     await diagnose();
     if (guild) await catchUpArrivals(guild).catch((err) => console.error("[discord] rattrapage des arrivées :", (err as Error).message));
   });
@@ -199,6 +204,12 @@ export function startDiscordGateway(level = 0) {
     recordBoost(member.id, null).catch(() => undefined);
   });
   attachModLog(client, GUILD_ID);
+  // 2.8 : anti-spam, et accueil des nouveaux posts dans les forums de suggestions et de bugs
+  attachAntiSpam(client, GUILD_ID);
+  client.on(Events.ThreadCreate, (thread, newlyCreated) => {
+    if (!newlyCreated || thread.guildId !== GUILD_ID) return;
+    onForumPost(thread.id, thread.parentId, "appliedTags" in thread ? thread.appliedTags : []).catch((err) => console.error("[discord] suivi :", (err as Error).message));
+  });
 
   client.on(Events.Error, (err) => console.error("[discord] gateway :", err.message));
 

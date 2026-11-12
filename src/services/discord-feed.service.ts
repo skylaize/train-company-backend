@@ -1,4 +1,5 @@
 import { prisma } from "../prisma";
+import { runQuiz } from "./discord-quiz.service";
 import { botEnabled, BRAND_COLOR, Embed, esc, fmt, MessagePayload, postOnce, markPosted, upsertPost } from "./discord.service";
 import { buildLeaderRows, rankRows } from "./leaderboard.service";
 import { allianceRanking } from "./alliance.service";
@@ -533,6 +534,7 @@ export async function runDiscordFeed() {
     ["fête des 500", checkTrain500],
     ["halloween", checkHalloween],
     ["régions", checkRegions],
+    ["quiz du jour", () => runQuiz()],
     ["ménage du journal", pruneLogKeys],
   ];
   for (const [label, fn] of steps) {

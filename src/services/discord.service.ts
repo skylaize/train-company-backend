@@ -27,6 +27,7 @@ export const ROLES = {
   CHEF: "🤝 Chef d'alliance",
   CHAMPION: "🏆 Champion de saison",
   VOTEUR: "🗳️ Voteur du mois", // podium des votes Top-Serveurs du mois précédent
+  QUIZ: "🧠 Champion du quiz", // 2.8 : premier du quiz du jour le mois précédent
 } as const;
 export type ManagedRole = keyof typeof ROLES;
 
@@ -46,6 +47,11 @@ export const CHANNELS = {
   ENERGIE: "⛽・énergie", // 2.5 : chocs du gazole, vagues de froid, pannes
   LOGS: "📋・logs",
   GENERAL: "💬・général", // 2.3 : les merci aux boosters
+  // 2.8 : quiz du jour, suivi des suggestions et des bugs, idées pour le graphiste
+  QUIZ: "🧠・quiz",
+  SUGGESTIONS: "💡・suggestions",
+  BUGS: "🐛・bugs",
+  GRAPHISTE: "🎨・suggestions-graphiste",
 } as const;
 export type ChannelKey = keyof typeof CHANNELS;
 
@@ -94,8 +100,11 @@ export async function rest<T = unknown>(method: string, path: string, opts: Rest
 /* ---------------- rôles et salons, par leur nom ---------------- */
 
 const CACHE_MS = 10 * 60_000;
-let rolesCache: { at: number; byName: Map<string, string> } | null = null;
-let channelsCache: { at: number; byName: Map<string, string> } | null = null;
+export type GuildRole = { id: string; name: string; position?: number; permissions?: string };
+export type ForumTag = { id?: string; name: string; moderated?: boolean; emoji_id?: string | null; emoji_name?: string | null };
+export type GuildChannel = { id: string; name: string; type: number; parent_id?: string | null; available_tags?: ForumTag[] };
+let rolesCache: { at: number; list: GuildRole[]; byName: Map<string, string> } | null = null;
+let channelsCache: { at: number; list: GuildChannel[]; byName: Map<string, string> } | null = null;
 const warned = new Set<string>();
 
 function warnOnce(key: string, msg: string) {
@@ -106,9 +115,31 @@ function warnOnce(key: string, msg: string) {
 
 async function guildRoles() {
   if (rolesCache && Date.now() - rolesCache.at < CACHE_MS) return rolesCache.byName;
-  const roles = (await rest<{ id: string; name: string }[]>("GET", `/guilds/${GUILD_ID}/roles`)) ?? [];
-  rolesCache = { at: Date.now(), byName: new Map(roles.map((r) => [r.name, r.id])) };
+  const roles = (await rest<GuildRole[]>("GET", `/guilds/${GUILD_ID}/roles`)) ?? [];
+  rolesCache = { at: Date.now(), list: roles, byName: new Map(roles.map((r) => [r.name, r.id])) };
   return rolesCache.byName;
+}
+
+/* 2.8 : la liste complète des rôles et des salons, pour ce que le bot crée
+   lui-même (rôles de division, espaces d'alliance, salon du quiz). */
+export async function guildRoleList(fresh = false) {
+  if (fresh) rolesCache = null;
+  await guildRoles();
+  return rolesCache!.list;
+}
+
+export async function guildChannels(fresh = false) {
+  if (fresh || !channelsCache || Date.now() - channelsCache.at >= CACHE_MS) {
+    const list = (await rest<GuildChannel[]>("GET", `/guilds/${GUILD_ID}/channels`)) ?? [];
+    channelsCache = { at: Date.now(), list, byName: new Map(list.map((c) => [c.name, c.id])) };
+  }
+  return channelsCache.list;
+}
+
+/* Après une création ou une suppression : la prochaine lecture repart de Discord. */
+export function forgetGuildCache() {
+  rolesCache = null;
+  channelsCache = null;
 }
 
 /* Les identifiants des rôles gérés par le jeu ; un rôle introuvable est
@@ -135,11 +166,8 @@ async function rolePing(key: NotifyRole): Promise<MessagePayload> {
 }
 
 export async function channelId(key: ChannelKey) {
-  if (!channelsCache || Date.now() - channelsCache.at >= CACHE_MS) {
-    const list = (await rest<{ id: string; name: string }[]>("GET", `/guilds/${GUILD_ID}/channels`)) ?? [];
-    channelsCache = { at: Date.now(), byName: new Map(list.map((c) => [c.name, c.id])) };
-  }
-  const id = channelsCache.byName.get(CHANNELS[key]);
+  await guildChannels();
+  const id = channelsCache!.byName.get(CHANNELS[key]);
   if (!id) warnOnce(`channel:${key}`, `salon « ${CHANNELS[key]} » introuvable sur le serveur`);
   return id ?? null;
 }
@@ -158,7 +186,7 @@ export type Embed = {
   footer?: { text: string };
   timestamp?: string;
 };
-export type MessagePayload = { content?: string; embeds?: Embed[]; allowed_mentions?: { parse: string[]; roles?: string[]; users?: string[] } };
+export type MessagePayload = { content?: string; embeds?: Embed[]; components?: unknown[]; allowed_mentions?: { parse: string[]; roles?: string[]; users?: string[] } };
 
 // jamais de @everyone ou de mention surprise venue d'un nom de compagnie
 const SAFE = { allowed_mentions: { parse: [] as string[] } };

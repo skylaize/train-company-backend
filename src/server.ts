@@ -51,6 +51,7 @@ import { adminRouter } from "./routes/admin.routes"; // 2.2
 import { warmBanList } from "./services/admin.service";
 import { discordInteractions, registerDiscordCommands } from "./controllers/discord.controller";
 import { startDiscordGateway } from "./services/discord-gateway.service";
+import { provisionDiscord } from "./services/discord-provision.service";
 import { responseCache } from "./middleware/responseCache";
 import { handleStripeWebhook } from "./controllers/billing.controller";
 import { startSimulationJob } from "./jobs/simulation.job";
@@ -160,6 +161,7 @@ app.listen(PORT, () => {
   startMentorJob(); // 2.5 : primes et diplômes du compagnonnage
   void warmBanList();
   void registerDiscordCommands();
+  void provisionDiscord(); // 2.8 : ce que le bot crée lui-même sur le serveur
   // 2.1 : bienvenue aux nouveaux membres et bot « en ligne »
   startDiscordGateway();
 });
